@@ -58,6 +58,7 @@ npm run dev    # http://localhost:4000
 | `npm run start` | Run compiled server (`dist/`) |
 | `npm run lint` | ESLint over `src` |
 | `npm run typecheck` | `tsc --noEmit` |
+| `npm run test` | Run the test suite |
 
 ---
 
