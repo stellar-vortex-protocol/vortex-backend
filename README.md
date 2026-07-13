@@ -11,8 +11,9 @@ of the multi-repo Vortex stack — see also
 [`vortex-contract`](https://github.com/vortex-protocol/vortex-contract) and
 [`vortex-frontend`](https://github.com/vortex-protocol/vortex-frontend).
 
-> The relay currently uses an in-memory store and mock data. On-chain
-> integration (Soroban RPC reads/writes) is on the roadmap.
+> The relay currently uses an in-memory store and mock data. Read-only
+> Soroban RPC access is live (`/api/v1/chain/*`); writing intent state
+> on-chain is still on the roadmap.
 
 > **Rebuild complete:** the service has been ported from Express to NestJS.
 > All endpoints below are live.
@@ -38,6 +39,10 @@ GET  /api/v1/stats                — protocol stats
 GET  /health                      — service health
 WS   /ws                          — real-time intent feed
 GET  /docs                        — Swagger / OpenAPI docs
+GET  /api/v1/chain/health         — Soroban RPC health (read-only)
+GET  /api/v1/chain/ledger         — latest Soroban ledger
+GET  /api/v1/chain/network        — Soroban network info
+GET  /api/v1/chain/account/:key   — Stellar account lookup
 ```
 
 ---
@@ -83,7 +88,8 @@ flags to override them.
 
 ## Roadmap
 
-- [ ] **On-chain integration** — replace the in-memory store with Soroban RPC reads/writes
+- [x] **Soroban RPC reads** — health/ledger/network/account lookups via `/api/v1/chain/*`
+- [ ] **On-chain writes** — replace the in-memory intent store with real Soroban transactions
 - [ ] **Solver WS client** — reference implementation for a solver bot
 
 ---
