@@ -1,6 +1,8 @@
 import { Controller, Get, NotFoundException, Param } from "@nestjs/common";
+import { ApiTags } from "@nestjs/swagger";
 import { SolversService } from "./solvers.service";
 
+@ApiTags("solvers")
 @Controller("api/v1/solvers")
 export class SolversController {
   constructor(private readonly solversService: SolversService) {}

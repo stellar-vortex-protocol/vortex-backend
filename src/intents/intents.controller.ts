@@ -11,6 +11,7 @@ import {
   Post,
   Query,
 } from "@nestjs/common";
+import { ApiTags } from "@nestjs/swagger";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
@@ -20,6 +21,7 @@ import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
 
+@ApiTags("intents")
 @Controller("api/v1/intents")
 export class IntentsController {
   constructor(
