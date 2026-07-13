@@ -6,9 +6,10 @@
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint src test --ext .ts",
     "typecheck": "tsc --noEmit",
-    "test": "jest"
+    "test": "jest",
+    "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.28",
@@ -39,12 +40,14 @@
     "@types/cors": "^2.8.17",
     "@types/jest": "^30.0.0",
     "@types/node": "^20.14.2",
+    "@types/supertest": "^7.2.0",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.12",
     "@typescript-eslint/eslint-plugin": "^7.13.0",
     "@typescript-eslint/parser": "^7.13.0",
     "eslint": "^8.57.0",
     "jest": "^30.4.2",
+    "supertest": "^7.2.2",
     "ts-jest": "^29.4.11",
     "tsx": "^4.15.4",
     "typescript": "^5.4.5"
