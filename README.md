@@ -63,7 +63,21 @@ npm run dev    # http://localhost:4000
 | `npm run start` | Run compiled server (`dist/main.js`) |
 | `npm run lint` | ESLint over `src` |
 | `npm run typecheck` | `tsc --noEmit` |
-| `npm run test` | Run the test suite |
+| `npm run test` | Run the unit test suite |
+| `npm run test:e2e` | Run the e2e test suite (supertest against a real booted app) |
+
+---
+
+## Docker
+
+```bash
+docker build -t vortex-backend .
+docker run -p 4000:4000 vortex-backend
+```
+
+No `.env` is required to boot — `ConfigModule`'s validation schema supplies
+defaults for every variable. Pass real values with `--env-file .env` or `-e`
+flags to override them.
 
 ---
 
