@@ -1,7 +1,9 @@
 import { Controller, Get } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { ApiTags } from "@nestjs/swagger";
 import { AppConfig } from "../config/configuration";
 
+@ApiTags("health")
 @Controller("health")
 export class HealthController {
   constructor(private readonly configService: ConfigService<AppConfig, true>) {}

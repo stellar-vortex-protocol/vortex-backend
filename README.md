@@ -14,10 +14,8 @@ of the multi-repo Vortex stack — see also
 > The relay currently uses an in-memory store and mock data. On-chain
 > integration (Soroban RPC reads/writes) is on the roadmap.
 
-> **Rebuild in progress:** the service was just re-scaffolded on NestJS. The
-> endpoints below describe the target API surface; they're being ported back
-> in module by module (see the Roadmap section), so not all of them are live
-> yet.
+> **Rebuild complete:** the service has been ported from Express to NestJS.
+> All endpoints below are live.
 
 ---
 
@@ -39,6 +37,7 @@ GET  /api/v1/tokens               — supported tokens (filter by chain)
 GET  /api/v1/stats                — protocol stats
 GET  /health                      — service health
 WS   /ws                          — real-time intent feed
+GET  /docs                        — Swagger / OpenAPI docs
 ```
 
 ---
