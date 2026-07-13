@@ -14,6 +14,7 @@ import {
   ValidationPipe,
 } from "@nestjs/common";
 import { IntentsService } from "./intents.service";
+import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { CreateIntentDto } from "./dto/create-intent.dto";
 import { AcceptIntentDto } from "./dto/accept-intent.dto";
@@ -27,6 +28,7 @@ export class IntentsController {
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
+    private readonly intentsGateway: IntentsGateway,
   ) {}
 
   @Get()
@@ -91,6 +93,7 @@ export class IntentsController {
       minDstAmount: dto.minDstAmount,
       deadline: dto.deadline ?? now + 1800,
     });
+    this.intentsGateway.broadcast({ type: "intent_created", intent });
     return intent;
   }
 
@@ -113,11 +116,13 @@ export class IntentsController {
       throw new ForbiddenException("Solver not registered or inactive");
     }
 
-    return this.intentsService.update(id, {
+    const updated = this.intentsService.update(id, {
       state: "accepted",
       solver: dto.solver,
       deadline: now + 300, // 5-minute fill window
     });
+    this.intentsGateway.broadcast({ type: "intent_accepted", intentId: id, solver: dto.solver });
+    return updated;
   }
 
   @Post(":id/fill")
@@ -146,12 +151,19 @@ export class IntentsController {
       });
     }
 
-    return this.intentsService.update(id, {
+    const updated = this.intentsService.update(id, {
       state: "filled",
       filledAt: now,
       fillAmount: dto.fillAmount,
       txHash: dto.txHash,
     });
+    this.intentsGateway.broadcast({
+      type: "intent_filled",
+      intentId: id,
+      solver: dto.solver,
+      fillAmount: dto.fillAmount,
+    });
+    return updated;
   }
 
   @Post(":id/cancel")
@@ -163,7 +175,9 @@ export class IntentsController {
       throw new ConflictException(`Cannot cancel intent in state: ${intent.state}`);
     }
 
-    return this.intentsService.update(id, { state: "cancelled" });
+    const updated = this.intentsService.update(id, { state: "cancelled" });
+    this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
+    return updated;
   }
 
   @Post("quote")
