@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend (Express)
+    name: Backend (Nest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
