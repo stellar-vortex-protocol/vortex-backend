@@ -5,9 +5,18 @@ import { TokensModule } from "./tokens/tokens.module";
 import { IntentsModule } from "./intents/intents.module";
 import { SolversModule } from "./solvers/solvers.module";
 import { StatsModule } from "./stats/stats.module";
+import { SorobanModule } from "./soroban/soroban.module";
 
 @Module({
-  imports: [ConfigModule, HealthModule, TokensModule, IntentsModule, SolversModule, StatsModule],
+  imports: [
+    ConfigModule,
+    HealthModule,
+    TokensModule,
+    IntentsModule,
+    SolversModule,
+    StatsModule,
+    SorobanModule,
+  ],
   controllers: [],
   providers: [],
 })
