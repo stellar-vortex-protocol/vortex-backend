@@ -70,6 +70,7 @@ npm run dev    # http://localhost:4000
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run test` | Run the unit test suite |
 | `npm run test:e2e` | Run the e2e test suite (supertest against a real booted app) |
+| `npm run solver:demo` | Run the reference solver bot ([`scripts/README.md`](./scripts/README.md)) |
 
 ---
 
@@ -90,7 +91,7 @@ flags to override them.
 
 - [x] **Soroban RPC reads** — health/ledger/network/account lookups via `/api/v1/chain/*`
 - [ ] **On-chain writes** — replace the in-memory intent store with real Soroban transactions
-- [ ] **Solver WS client** — reference implementation for a solver bot
+- [x] **Solver WS client** — reference implementation for a solver bot (`npm run solver:demo`, see [`scripts/README.md`](./scripts/README.md))
 
 ---
 
