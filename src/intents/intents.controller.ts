@@ -10,8 +10,6 @@ import {
   Param,
   Post,
   Query,
-  UsePipes,
-  ValidationPipe,
 } from "@nestjs/common";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
@@ -23,7 +21,6 @@ import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
 
 @Controller("api/v1/intents")
-@UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 export class IntentsController {
   constructor(
     private readonly intentsService: IntentsService,
