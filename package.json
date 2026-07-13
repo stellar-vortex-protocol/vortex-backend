@@ -6,10 +6,11 @@
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",
-    "lint": "eslint src test --ext .ts",
+    "lint": "eslint src test scripts --ext .ts",
     "typecheck": "tsc --noEmit",
     "test": "jest",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "solver:demo": "tsx scripts/solver-bot.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.28",
