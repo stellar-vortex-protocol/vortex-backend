@@ -5,13 +5,19 @@
 [![CI](https://github.com/vortex-protocol/vortex-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/vortex-protocol/vortex-backend/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 
-TypeScript / Express service that brokers swap intents between users and the
-solver network and streams the live intent feed. Part of the multi-repo Vortex
-stack — see also [`vortex-contract`](https://github.com/vortex-protocol/vortex-contract)
-and [`vortex-frontend`](https://github.com/vortex-protocol/vortex-frontend).
+TypeScript / [NestJS](https://nestjs.com) service that brokers swap intents
+between users and the solver network and streams the live intent feed. Part
+of the multi-repo Vortex stack — see also
+[`vortex-contract`](https://github.com/vortex-protocol/vortex-contract) and
+[`vortex-frontend`](https://github.com/vortex-protocol/vortex-frontend).
 
 > The relay currently uses an in-memory store and mock data. On-chain
 > integration (Soroban RPC reads/writes) is on the roadmap.
+
+> **Rebuild in progress:** the service was just re-scaffolded on NestJS. The
+> endpoints below describe the target API surface; they're being ported back
+> in module by module (see the Roadmap section), so not all of them are live
+> yet.
 
 ---
 
@@ -53,9 +59,9 @@ npm run dev    # http://localhost:4000
 
 | Script | Description |
 |---|---|
-| `npm run dev` | Watch-mode server (tsx) |
-| `npm run build` | Type-check + emit (`tsc`) |
-| `npm run start` | Run compiled server (`dist/`) |
+| `npm run dev` | Watch-mode Nest server (`nest start --watch`) |
+| `npm run build` | Build the Nest app (`dist/`) |
+| `npm run start` | Run compiled server (`dist/main.js`) |
 | `npm run lint` | ESLint over `src` |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run test` | Run the test suite |
