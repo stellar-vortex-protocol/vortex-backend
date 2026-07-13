@@ -4,9 +4,10 @@ import { HealthModule } from "./health/health.module";
 import { TokensModule } from "./tokens/tokens.module";
 import { IntentsModule } from "./intents/intents.module";
 import { SolversModule } from "./solvers/solvers.module";
+import { StatsModule } from "./stats/stats.module";
 
 @Module({
-  imports: [ConfigModule, HealthModule, TokensModule, IntentsModule, SolversModule],
+  imports: [ConfigModule, HealthModule, TokensModule, IntentsModule, SolversModule, StatsModule],
   controllers: [],
   providers: [],
 })
