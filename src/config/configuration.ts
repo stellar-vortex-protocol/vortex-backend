@@ -1,3 +1,19 @@
+export type FeePercentile =
+  | "min"
+  | "mode"
+  | "p10"
+  | "p20"
+  | "p30"
+  | "p40"
+  | "p50"
+  | "p60"
+  | "p70"
+  | "p80"
+  | "p90"
+  | "p95"
+  | "p99"
+  | "max";
+
 export interface AppConfig {
   nodeEnv: string;
   port: number;
@@ -6,6 +22,7 @@ export interface AppConfig {
     sorobanRpcUrl: string;
     settlementContractId: string;
     solverRegistryContractId: string;
+    feePercentile: FeePercentile;
   };
   corsOrigin: string;
 }
@@ -18,6 +35,7 @@ export default (): AppConfig => ({
     sorobanRpcUrl: process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org",
     settlementContractId: process.env.SETTLEMENT_CONTRACT_ID ?? "",
     solverRegistryContractId: process.env.SOLVER_REGISTRY_CONTRACT_ID ?? "",
+    feePercentile: (process.env.STELLAR_FEE_PERCENTILE ?? "p50") as FeePercentile,
   },
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
 });
