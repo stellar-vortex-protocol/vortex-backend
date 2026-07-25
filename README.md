@@ -59,6 +59,33 @@ cp .env.example .env
 npm run dev    # http://localhost:4000
 ```
 
+### Signing key
+
+`SOROBAN_SIGNING_KEY` holds the secret key the backend uses to submit its own
+on-chain writes (settlement, slashing). It's optional in development/test —
+leave it blank and those code paths simply have nothing to sign with — but
+**required and format-validated in production** (`NODE_ENV=production`); the
+process refuses to start without a well-formed Stellar secret seed rather
+than falling back to any placeholder.
+
+For local dev, generate a throwaway **testnet-only** keypair — never reuse a
+mainnet or otherwise real key:
+
+```bash
+npx @stellar/stellar-cli keys generate local-dev --network testnet
+npx @stellar/stellar-cli keys show local-dev        # paste into SOROBAN_SIGNING_KEY
+
+# or, ad hoc:
+node -e "console.log(require('@stellar/stellar-sdk').Keypair.random().secret())"
+
+# fund it via Friendbot before using it against testnet:
+curl "https://friendbot.stellar.org/?addr=<PUBLIC_KEY>"
+```
+
+Never commit a filled-in `.env`, and never point a real/funded key at
+anything but `mainnet` with `NODE_ENV=production` behind a proper secrets
+manager.
+
 ### Scripts
 
 | Script | Description |
