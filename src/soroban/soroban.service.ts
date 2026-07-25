@@ -27,4 +27,8 @@ export class SorobanService {
   getAccount(publicKey: string) {
     return this.server.getAccount(publicKey);
   }
+
+  getEvents(request: SorobanRpc.Server.GetEventsRequest) {
+    return this.server.getEvents(request);
+  }
 }
