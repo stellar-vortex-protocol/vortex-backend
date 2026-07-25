@@ -117,7 +117,7 @@ flags to override them.
 ## Roadmap
 
 - [x] **Soroban RPC reads** — health/ledger/network/account lookups via `/api/v1/chain/*`
-- [ ] **On-chain writes** — replace the in-memory intent store with real Soroban transactions
+- [ ] **On-chain writes** — replace the in-memory intent store with real Soroban transactions (target design: [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md))
 - [x] **Solver WS client** — reference implementation for a solver bot (`npm run solver:demo`, see [`scripts/README.md`](./scripts/README.md))
 
 ---
