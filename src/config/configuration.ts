@@ -8,6 +8,7 @@ export interface AppConfig {
     solverRegistryContractId: string;
     signerSecretKey: string;
   };
+  onchainIntentsEnabled: boolean;
   corsOrigin: string;
 }
 
@@ -21,5 +22,6 @@ export default (): AppConfig => ({
     solverRegistryContractId: process.env.SOLVER_REGISTRY_CONTRACT_ID ?? "",
     signerSecretKey: process.env.SOROBAN_SIGNER_SECRET_KEY ?? "",
   },
+  onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
 });

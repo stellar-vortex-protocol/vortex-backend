@@ -20,5 +20,11 @@ export const envValidationSchema = Joi.object({
       otherwise: Joi.string().allow("").default(""),
     }),
 
+  // Rollout flag: when false (default), IntentsService.create() stays fully
+  // in-memory as before. Flip on once the settlement contract + signer are
+  // ready in a given environment; flip back off to fall back instantly if
+  // on-chain registration misbehaves.
+  ONCHAIN_INTENTS_ENABLED: Joi.boolean().default(false),
+
   CORS_ORIGIN: Joi.string().default("*"),
 });
