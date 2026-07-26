@@ -9,5 +9,16 @@ export const envValidationSchema = Joi.object({
   SETTLEMENT_CONTRACT_ID: Joi.string().allow("").default(""),
   SOLVER_REGISTRY_CONTRACT_ID: Joi.string().allow("").default(""),
 
+  // Backend hot-wallet secret used to sign settlement transactions. Required in
+  // production so the app fails fast on boot rather than at first-submit; optional
+  // elsewhere so `npm run dev`/tests don't need a real key. Never logged.
+  SOROBAN_SIGNER_SECRET_KEY: Joi.string()
+    .pattern(/^S[A-Z2-7]{55}$/)
+    .when("NODE_ENV", {
+      is: "production",
+      then: Joi.required(),
+      otherwise: Joi.string().allow("").default(""),
+    }),
+
   CORS_ORIGIN: Joi.string().default("*"),
 });

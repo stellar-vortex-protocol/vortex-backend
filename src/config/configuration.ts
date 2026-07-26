@@ -6,6 +6,7 @@ export interface AppConfig {
     sorobanRpcUrl: string;
     settlementContractId: string;
     solverRegistryContractId: string;
+    signerSecretKey: string;
   };
   corsOrigin: string;
 }
@@ -18,6 +19,7 @@ export default (): AppConfig => ({
     sorobanRpcUrl: process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org",
     settlementContractId: process.env.SETTLEMENT_CONTRACT_ID ?? "",
     solverRegistryContractId: process.env.SOLVER_REGISTRY_CONTRACT_ID ?? "",
+    signerSecretKey: process.env.SOROBAN_SIGNER_SECRET_KEY ?? "",
   },
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
 });
