@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { SorobanRpc } from "@stellar/stellar-sdk";
+import { FeeBumpTransaction, SorobanRpc, Transaction } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 
 @Injectable()
@@ -26,5 +26,20 @@ export class SorobanService {
 
   getAccount(publicKey: string) {
     return this.server.getAccount(publicKey);
+  }
+
+  /** Simulates `tx` and returns it assembled with the resulting footprint/resource fees, ready to sign. */
+  prepareTransaction(tx: Transaction): Promise<Transaction> {
+    return this.server.prepareTransaction(tx);
+  }
+
+  /** Submits a signed transaction. Does not wait for it to land — see `getTransactionStatus`. */
+  sendTransaction(tx: Transaction | FeeBumpTransaction): Promise<SorobanRpc.Api.SendTransactionResponse> {
+    return this.server.sendTransaction(tx);
+  }
+
+  /** Looks up a submitted transaction by hash; status is NOT_FOUND until it lands. */
+  getTransactionStatus(hash: string): Promise<SorobanRpc.Api.GetTransactionResponse> {
+    return this.server.getTransaction(hash);
   }
 }
