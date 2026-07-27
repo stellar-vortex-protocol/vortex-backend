@@ -8,6 +8,8 @@ export interface AppConfig {
     solverRegistryContractId: string;
   };
   corsOrigin: string;
+  /** Maximum concurrent WebSocket connections (0 = unlimited). */
+  wsMaxConnections: number;
 }
 
 export default (): AppConfig => ({
@@ -20,4 +22,5 @@ export default (): AppConfig => ({
     solverRegistryContractId: process.env.SOLVER_REGISTRY_CONTRACT_ID ?? "",
   },
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
+  wsMaxConnections: parseInt(process.env.WS_MAX_CONNECTIONS ?? "1000", 10),
 });
