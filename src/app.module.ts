@@ -6,10 +6,12 @@ import { IntentsModule } from "./intents/intents.module";
 import { SolversModule } from "./solvers/solvers.module";
 import { StatsModule } from "./stats/stats.module";
 import { SorobanModule } from "./soroban/soroban.module";
+import { PrismaModule } from "./prisma/prisma.module";
 
 @Module({
   imports: [
     ConfigModule,
+    PrismaModule,
     HealthModule,
     TokensModule,
     IntentsModule,
