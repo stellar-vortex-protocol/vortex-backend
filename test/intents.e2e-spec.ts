@@ -44,6 +44,14 @@ describe("IntentsController (e2e)", () => {
     expect(res.body.limit).toBe(2);
   });
 
+  it("GET /api/v1/intents with limit > 100 returns 400", async () => {
+    const res = await request(app.getHttpServer())
+      .get("/api/v1/intents")
+      .query({ limit: 500 })
+      .expect(400);
+    expect(res.body.error).toBe("Limit exceeds maximum allowed value of 100");
+  });
+
   it("GET /api/v1/intents/open returns only open intents", async () => {
     const res = await request(app.getHttpServer()).get("/api/v1/intents/open").expect(200);
     expect(res.body.intents.every((i: { state: string }) => i.state === "open")).toBe(true);
@@ -163,5 +171,23 @@ describe("IntentsController (e2e)", () => {
       expect(amounts[i - 1] >= amounts[i]).toBe(true);
     }
     expect(res.body.bestQuote.dstAmount).toBe(res.body.quotes[0].dstAmount);
+  });
+
+  it("POST /api/v1/intents with idempotencyKey deduplicates requests", async () => {
+    const idempotencyKey = "test-key-" + Date.now();
+    const createBody = { ...validCreateBody, user: "GIDEMPOTENCY1234567", idempotencyKey };
+
+    const res1 = await request(app.getHttpServer())
+      .post("/api/v1/intents")
+      .send(createBody)
+      .expect(201);
+
+    const res2 = await request(app.getHttpServer())
+      .post("/api/v1/intents")
+      .send(createBody)
+      .expect(201);
+
+    expect(res1.body.intentId).toBe(res2.body.intentId);
+    expect(res1.body.createdAt).toBe(res2.body.createdAt);
   });
 });

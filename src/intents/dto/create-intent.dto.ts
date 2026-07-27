@@ -66,4 +66,9 @@ export class CreateIntentDto {
   @IsOptional()
   @IsInt()
   deadline?: number;
+
+  @ApiPropertyOptional({ description: "Idempotency key for deduplicating duplicate requests" })
+  @IsOptional()
+  @IsString()
+  idempotencyKey?: string;
 }
