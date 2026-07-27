@@ -1,13 +1,15 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Inject, Optional } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
 import { Intent, IntentState } from "./intents.types";
 import { buildSeedIntents } from "./intents.seed";
+import { IntentsRepository, InMemoryIntentsRepository } from "./intents.repository";
 
 @Injectable()
 export class IntentsService {
-  private readonly intents = new Map<string, Intent>();
+  private readonly repository: IntentsRepository;
 
-  constructor() {
+  constructor(@Optional() @Inject(IntentsRepository) repository?: IntentsRepository) {
+    this.repository = repository || new InMemoryIntentsRepository();
     this.seed();
   }
 
@@ -20,32 +22,27 @@ export class IntentsService {
       createdAt: now,
       deadline: data.deadline ?? now + 1800,
     };
-    this.intents.set(intent.intentId, intent);
-    return intent;
+    return this.repository.save(intent) as Intent;
   }
 
   get(id: string): Intent | undefined {
-    return this.intents.get(id);
+    return this.repository.findById(id) as Intent | undefined;
   }
 
   getAll(): Intent[] {
-    return [...this.intents.values()].sort((a, b) => b.createdAt - a.createdAt);
+    return this.repository.findAll() as Intent[];
   }
 
   getByState(state: IntentState): Intent[] {
-    return this.getAll().filter((i) => i.state === state);
+    return this.repository.findByState(state) as Intent[];
   }
 
   getByUser(user: string): Intent[] {
-    return this.getAll().filter((i) => i.user.toLowerCase() === user.toLowerCase());
+    return this.repository.findByUser(user) as Intent[];
   }
 
   update(id: string, patch: Partial<Intent>): Intent | null {
-    const existing = this.intents.get(id);
-    if (!existing) return null;
-    const updated = { ...existing, ...patch };
-    this.intents.set(id, updated);
-    return updated;
+    return this.repository.update(id, patch) as Intent | null;
   }
 
   private seed() {
@@ -56,7 +53,8 @@ export class IntentsService {
         intentId: uuidv4(),
         createdAt: now - Math.floor(Math.random() * 600),
       };
-      this.intents.set(intent.intentId, intent);
+      this.repository.save(intent);
     }
   }
 }
+
