@@ -1,4 +1,4 @@
-import { Controller, Get, NotFoundException, Param } from "@nestjs/common";
+import { Controller, Get, NotFoundException, Param, Post } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { SolversService } from "./solvers.service";
 
@@ -40,5 +40,19 @@ export class SolversController {
       avgFillTime: solver.avgFillTime,
       bondAmount: solver.bondAmount,
     };
+  }
+
+  @Post(":address/deactivate")
+  deactivate(@Param("address") address: string) {
+    const solver = this.solversService.deactivate(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+    return solver;
+  }
+
+  @Post(":address/reactivate")
+  reactivate(@Param("address") address: string) {
+    const solver = this.solversService.reactivate(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+    return solver;
   }
 }

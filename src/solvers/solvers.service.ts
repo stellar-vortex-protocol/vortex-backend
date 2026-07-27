@@ -32,6 +32,22 @@ export class SolversService {
     return solver;
   }
 
+  deactivate(address: string): SolverRecord | null {
+    const solver = this.solvers.get(address);
+    if (!solver) return null;
+    const updated = { ...solver, isActive: false };
+    this.solvers.set(address, updated);
+    return updated;
+  }
+
+  reactivate(address: string): SolverRecord | null {
+    const solver = this.solvers.get(address);
+    if (!solver) return null;
+    const updated = { ...solver, isActive: true };
+    this.solvers.set(address, updated);
+    return updated;
+  }
+
   private seed() {
     for (const s of buildSeedSolvers()) {
       this.solvers.set(s.address, s);
