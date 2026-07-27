@@ -1,15 +1,22 @@
-import { Injectable } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
+import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
 import { Intent, IntentState } from "./intents.types";
-import { buildSeedIntents } from "./intents.seed";
 
+/**
+ * Orchestration layer for intents.
+ *
+ * Business logic (ID generation, default state, deadline defaulting) lives
+ * here.  All persistence is delegated to the injected IIntentsRepository so
+ * the storage adapter can be swapped (in-memory → Prisma → on-chain) without
+ * touching this service.
+ */
 @Injectable()
 export class IntentsService {
-  private readonly intents = new Map<string, Intent>();
-
-  constructor() {
-    this.seed();
-  }
+  constructor(
+    @Inject(INTENTS_REPOSITORY)
+    private readonly repo: IIntentsRepository,
+  ) {}
 
   create(data: Omit<Intent, "intentId" | "createdAt" | "state">): Intent {
     const now = Math.floor(Date.now() / 1000);
@@ -20,43 +27,26 @@ export class IntentsService {
       createdAt: now,
       deadline: data.deadline ?? now + 1800,
     };
-    this.intents.set(intent.intentId, intent);
-    return intent;
+    return this.repo.save(intent);
   }
 
   get(id: string): Intent | undefined {
-    return this.intents.get(id);
+    return this.repo.findById(id);
   }
 
   getAll(): Intent[] {
-    return [...this.intents.values()].sort((a, b) => b.createdAt - a.createdAt);
+    return this.repo.findAll();
   }
 
   getByState(state: IntentState): Intent[] {
-    return this.getAll().filter((i) => i.state === state);
+    return this.repo.findByState(state);
   }
 
   getByUser(user: string): Intent[] {
-    return this.getAll().filter((i) => i.user.toLowerCase() === user.toLowerCase());
+    return this.repo.findByUser(user);
   }
 
   update(id: string, patch: Partial<Intent>): Intent | null {
-    const existing = this.intents.get(id);
-    if (!existing) return null;
-    const updated = { ...existing, ...patch };
-    this.intents.set(id, updated);
-    return updated;
-  }
-
-  private seed() {
-    const now = Math.floor(Date.now() / 1000);
-    for (const data of buildSeedIntents(now)) {
-      const intent: Intent = {
-        ...data,
-        intentId: uuidv4(),
-        createdAt: now - Math.floor(Math.random() * 600),
-      };
-      this.intents.set(intent.intentId, intent);
-    }
+    return this.repo.update(id, patch);
   }
 }
