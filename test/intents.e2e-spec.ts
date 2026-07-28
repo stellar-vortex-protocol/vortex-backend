@@ -114,6 +114,21 @@ describe("IntentsController (e2e)", () => {
     });
   });
 
+  it("POST /api/v1/intents/:id/fill with non-numeric fillAmount returns 400", async () => {
+    const created = await createIntent({ user: "GFILLAMOUNT123456" });
+    await request(app.getHttpServer())
+      .post(`/api/v1/intents/${created.intentId}/accept`)
+      .send({ solver: "SOLVER_ALPHA" })
+      .expect(201);
+
+    const res = await request(app.getHttpServer())
+      .post(`/api/v1/intents/${created.intentId}/fill`)
+      .send({ solver: "SOLVER_ALPHA", fillAmount: "abc", txHash: "e2e-hash" })
+      .expect(400);
+    expect(res.body.error).toBe("Validation failed");
+    expect(Array.isArray(res.body.details)).toBe(true);
+  });
+
   it("accept with an unknown/inactive solver is forbidden", async () => {
     const created = await createIntent({ user: "GUNKNOWNSOLVER12345" });
     await request(app.getHttpServer())
