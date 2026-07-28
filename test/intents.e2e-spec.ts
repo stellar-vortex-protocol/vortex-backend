@@ -44,6 +44,24 @@ describe("IntentsController (e2e)", () => {
     expect(res.body.limit).toBe(2);
   });
 
+  it("GET /api/v1/intents with non-numeric limit returns 400", async () => {
+    const res = await request(app.getHttpServer())
+      .get("/api/v1/intents")
+      .query({ limit: "abc" })
+      .expect(400);
+    expect(res.body.error).toBe("Validation failed");
+    expect(Array.isArray(res.body.details)).toBe(true);
+  });
+
+  it("GET /api/v1/intents with non-numeric offset returns 400", async () => {
+    const res = await request(app.getHttpServer())
+      .get("/api/v1/intents")
+      .query({ offset: "xyz" })
+      .expect(400);
+    expect(res.body.error).toBe("Validation failed");
+    expect(Array.isArray(res.body.details)).toBe(true);
+  });
+
   it("GET /api/v1/intents/open returns only open intents", async () => {
     const res = await request(app.getHttpServer()).get("/api/v1/intents/open").expect(200);
     expect(res.body.intents.every((i: { state: string }) => i.state === "open")).toBe(true);

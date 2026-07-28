@@ -20,6 +20,7 @@ import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
+import { ListIntentsDto } from "./dto/list-intents.dto";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -31,21 +32,15 @@ export class IntentsController {
   ) {}
 
   @Get()
-  list(
-    @Query("state") state?: string,
-    @Query("user") user?: string,
-    @Query("chain") chain?: string,
-    @Query("limit") limitRaw = "20",
-    @Query("offset") offsetRaw = "0",
-  ) {
+  list(@Query() dto: ListIntentsDto) {
     let intents = this.intentsService.getAll();
 
-    if (state) intents = intents.filter((i) => i.state === state);
-    if (user) intents = intents.filter((i) => i.user.toLowerCase() === user.toLowerCase());
-    if (chain) intents = intents.filter((i) => i.srcChain === chain);
+    if (dto.state) intents = intents.filter((i) => i.state === dto.state);
+    if (dto.user) intents = intents.filter((i) => i.user.toLowerCase() === dto.user.toLowerCase());
+    if (dto.chain) intents = intents.filter((i) => i.srcChain === dto.chain);
 
-    const limit = Math.min(parseInt(limitRaw, 10), 100);
-    const offset = parseInt(offsetRaw, 10);
+    const limit = Math.min(dto.limit, 100);
+    const offset = dto.offset;
     const page = intents.slice(offset, offset + limit);
 
     return { intents: page, total: intents.length, limit, offset };
