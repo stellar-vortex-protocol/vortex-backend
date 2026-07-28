@@ -11,6 +11,9 @@ import { HttpExceptionFilter } from "./common/http-exception.filter";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  app.enableShutdownHooks();
+
   app.useWebSocketAdapter(new WsAdapter(app));
   app.useGlobalInterceptors(new LoggingInterceptor());
   app.useGlobalFilters(new HttpExceptionFilter());
@@ -26,7 +29,21 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService<AppConfig, true>);
   const port = configService.get("port", { infer: true });
-  await app.listen(port);
+  const server = await app.listen(port);
+
+  const gracefulShutdown = async (signal: string) => {
+    console.log(`\n${signal} received — starting graceful shutdown...`);
+    server.close(() => {
+      console.log("HTTP server closed");
+    });
+    await app.close();
+    console.log("Nest application closed");
+    process.exit(0);
+  };
+
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
   console.log(`\nVortex backend (Nest) running on :${port}`);
   console.log(`WS    → ws://localhost:${port}/ws`);
   console.log(`Docs  → http://localhost:${port}/docs`);

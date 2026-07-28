@@ -1,9 +1,12 @@
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
+import { OnModuleDestroy } from "@nestjs/common";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
 
 @WebSocketGateway({ path: "/ws" })
-export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class IntentsGateway
+  implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
+{
   private readonly subscribers = new Set<WebSocket>();
 
   constructor(private readonly intentsService: IntentsService) {}
@@ -29,5 +32,12 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
         client.send(payload);
       }
     }
+  }
+
+  onModuleDestroy() {
+    for (const client of this.subscribers) {
+      client.close(1001, "Server shutting down");
+    }
+    this.subscribers.clear();
   }
 }
