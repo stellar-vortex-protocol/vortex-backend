@@ -1,4 +1,5 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException } from "@nestjs/common";
+import { captureException } from "./sentry";
 import { logger } from "./logger";
 
 interface JsonResponse {
@@ -47,6 +48,9 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
     const err = exception instanceof Error ? exception : new Error("Unknown error");
     logger.error(err.stack ?? err.message);
+    // Alert on-call engineers — only fires for unexpected exceptions, not
+    // routine HttpExceptions, so alert fatigue on 404 / 400 is avoided.
+    captureException(err);
     response.status(500).json({ error: err.message || "Internal server error" });
   }
 }

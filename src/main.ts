@@ -8,6 +8,11 @@ import { AppModule } from "./app.module";
 import { AppConfig } from "./config/configuration";
 import { LoggingInterceptor } from "./common/logging.interceptor";
 import { HttpExceptionFilter } from "./common/http-exception.filter";
+import { initSentry } from "./common/sentry";
+
+// Initialise Sentry before the NestJS app boots so that any startup errors
+// are also captured.  No-op when SENTRY_DSN is not set.
+initSentry();
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
