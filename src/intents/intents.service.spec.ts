@@ -66,4 +66,78 @@ describe("IntentsService", () => {
       expect(intent.state).toBe("filled");
     }
   });
+
+  describe("acceptIfOpen", () => {
+    it("transitions an open intent to accepted and returns it", () => {
+      const [open] = service.getByState("open");
+      const result = service.acceptIfOpen(open.intentId, "SOLVER_X");
+
+      expect(result).not.toBeNull();
+      expect(result!.state).toBe("accepted");
+      expect(result!.solver).toBe("SOLVER_X");
+      expect(service.get(open.intentId)!.state).toBe("accepted");
+    });
+
+    it("returns null for a non-existent intent", () => {
+      expect(service.acceptIfOpen("does-not-exist", "SOLVER_X")).toBeNull();
+    });
+
+    it("returns null when the intent is already accepted", () => {
+      const [accepted] = service.getByState("accepted");
+      expect(service.acceptIfOpen(accepted.intentId, "SOLVER_X")).toBeNull();
+    });
+
+    it("only the first caller wins under simulated concurrency", () => {
+      const [open] = service.getByState("open");
+      const results = Array.from({ length: 10 }, (_, i) =>
+        service.acceptIfOpen(open.intentId, `SOLVER_${i}`),
+      );
+
+      const successes = results.filter((r) => r !== null);
+      expect(successes).toHaveLength(1);
+      expect(successes[0]!.state).toBe("accepted");
+    });
+  });
+
+  describe("fillIfAccepted", () => {
+    it("transitions an accepted intent to filled when solver matches", () => {
+      const [accepted] = service.getByState("accepted");
+      const result = service.fillIfAccepted(accepted.intentId, accepted.solver!, {
+        fillAmount: "100",
+        txHash: "test-hash",
+        filledAt: Math.floor(Date.now() / 1000),
+      });
+
+      expect(result).not.toBeNull();
+      expect(result!.state).toBe("filled");
+      expect(result!.fillAmount).toBe("100");
+    });
+
+    it("returns null when solver does not match", () => {
+      const [accepted] = service.getByState("accepted");
+      const result = service.fillIfAccepted(accepted.intentId, "WRONG_SOLVER", {
+        fillAmount: "100",
+      });
+      expect(result).toBeNull();
+    });
+
+    it("returns null for a non-existent intent", () => {
+      expect(service.fillIfAccepted("nope", "SOLVER_X", {})).toBeNull();
+    });
+
+    it("only the first caller wins under simulated concurrency", () => {
+      const [accepted] = service.getByState("accepted");
+      const results = Array.from({ length: 10 }, () =>
+        service.fillIfAccepted(accepted.intentId, accepted.solver!, {
+          fillAmount: "100",
+          txHash: "race-hash",
+          filledAt: Math.floor(Date.now() / 1000),
+        }),
+      );
+
+      const successes = results.filter((r) => r !== null);
+      expect(successes).toHaveLength(1);
+      expect(successes[0]!.state).toBe("filled");
+    });
+  });
 });
