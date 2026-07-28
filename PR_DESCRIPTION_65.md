@@ -4,6 +4,11 @@
 
 - Closes #65
 
+## PR Links
+
+- PR #159: https://github.com/stellar-vortex-protocol/vortex-backend/pull/159
+- Branch: `fix/fill-amount-validation`
+
 ## Summary
 
 `IntentsController.fill()` calls `BigInt(dto.fillAmount)` directly. While `FillIntentDto` already has `@Matches(/^\d+$/)` on `fillAmount` (matching the pattern used on `CreateIntentDto.srcAmount`), there was no e2e test asserting that a non-numeric `fillAmount` returns a clean 400 validation error instead of an ungraceful 500 `SyntaxError` from `BigInt()`.

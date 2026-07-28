@@ -4,6 +4,11 @@
 
 - Closes #64
 
+## PR Links
+
+- PR #158: https://github.com/stellar-vortex-protocol/vortex-backend/pull/158
+- Branch: `fix/pagination-nan-validation`
+
 ## Summary
 
 `IntentsController.list()` was using `parseInt()` on raw query parameters (`limitRaw`, `offsetRaw`) without any validation. When a non-numeric value was provided (e.g., `?limit=abc`), `parseInt()` returned `NaN`, which silently corrupted the pagination slice (`intents.slice(offset, offset + limit)`) instead of returning a clear 400 error.
