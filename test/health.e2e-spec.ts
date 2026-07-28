@@ -7,20 +7,32 @@ describe("HealthController (e2e)", () => {
 
   beforeAll(async () => {
     app = await createTestApp();
-  });
+  }, 30000);
 
   afterAll(async () => {
     await app.close();
   });
 
-  it("GET /health returns service status", async () => {
-    const res = await request(app.getHttpServer()).get("/health").expect(200);
+  it("GET /health returns service status (degraded if Soroban unreachable)", async () => {
+    const res = await request(app.getHttpServer()).get("/health");
 
-    expect(res.body).toMatchObject({
-      status: "ok",
-      service: "vortex-backend",
-      network: "stellar-testnet",
-    });
-    expect(typeof res.body.uptime).toBe("number");
+    if (res.status === 200) {
+      expect(res.body).toMatchObject({
+        status: "ok",
+        service: "vortex-backend",
+        network: "stellar-testnet",
+      });
+      expect(res.body.soroban).toBeDefined();
+      expect(typeof res.body.uptime).toBe("number");
+    } else {
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({
+        status: "degraded",
+        service: "vortex-backend",
+        network: "stellar-testnet",
+      });
+      expect(res.body.soroban).toEqual({ status: "unreachable" });
+      expect(typeof res.body.uptime).toBe("number");
+    }
   });
 });
