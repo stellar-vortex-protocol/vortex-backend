@@ -141,7 +141,16 @@ export class IntentsController {
     }
 
     const fillAmount = BigInt(dto.fillAmount);
-    const minAmount = BigInt(intent.minDstAmount);
+    let minAmount: bigint;
+    try {
+      minAmount = BigInt(intent.minDstAmount);
+    } catch {
+      throw new BadRequestException({
+        error: "Data integrity error: intent minDstAmount is not a valid integer",
+        intentId: id,
+        minDstAmount: intent.minDstAmount,
+      });
+    }
     if (fillAmount < minAmount) {
       throw new BadRequestException({
         error: "Fill amount below minimum",
