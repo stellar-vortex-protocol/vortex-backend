@@ -7,6 +7,25 @@ export type SupportedChain =
   | "optimism"
   | "avalanche";
 
+/**
+ * A single entry in the append-only audit log for an intent.
+ * Every state transition — cancel, expire, accept, fill — appends one entry.
+ * Once persistence lands (issue #36) this will be written to an `intent_audit_log`
+ * table; for now it lives in-memory alongside the intent map.
+ */
+export interface IntentAuditEntry {
+  /** ISO-8601 UTC timestamp of the transition. */
+  timestamp: string;
+  /** State the intent moved INTO. */
+  toState: IntentState;
+  /** Actor who triggered the transition: a user address, solver address, or "system". */
+  actor: string;
+  /** Human-readable explanation, e.g. "user cancelled", "deadline passed". */
+  reason: string;
+  /** Optional extra data (fill amount, tx hash, …). */
+  metadata?: Record<string, unknown>;
+}
+
 export type IntentState =
   | "open"
   | "accepted"
