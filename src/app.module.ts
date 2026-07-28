@@ -6,6 +6,7 @@ import { IntentsModule } from "./intents/intents.module";
 import { SolversModule } from "./solvers/solvers.module";
 import { StatsModule } from "./stats/stats.module";
 import { SorobanModule } from "./soroban/soroban.module";
+import { MetricsModule } from "./metrics/metrics.module";
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { SorobanModule } from "./soroban/soroban.module";
     SolversModule,
     StatsModule,
     SorobanModule,
+    MetricsModule,
   ],
   controllers: [],
   providers: [],

@@ -1,16 +1,24 @@
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
+import { MetricsService } from "../metrics/metrics.service";
 
 @WebSocketGateway({ path: "/ws" })
 export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly subscribers = new Set<WebSocket>();
 
-  constructor(private readonly intentsService: IntentsService) {}
+  constructor(
+    private readonly intentsService: IntentsService,
+    private readonly metricsService: MetricsService,
+  ) {}
 
   handleConnection(client: WebSocket) {
     this.subscribers.add(client);
-    client.on("error", () => this.subscribers.delete(client));
+    this.metricsService.incWsConnection();
+    client.on("error", () => {
+      this.subscribers.delete(client);
+      this.metricsService.decWsConnection();
+    });
 
     client.send(JSON.stringify({ type: "connected", message: "Vortex intent stream" }));
 
@@ -20,6 +28,7 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
   handleDisconnect(client: WebSocket) {
     this.subscribers.delete(client);
+    this.metricsService.decWsConnection();
   }
 
   broadcast(event: { type: string; [key: string]: unknown }) {

@@ -2,12 +2,13 @@ import { Injectable } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
 import { Intent, IntentState } from "./intents.types";
 import { buildSeedIntents } from "./intents.seed";
+import { MetricsService } from "../metrics/metrics.service";
 
 @Injectable()
 export class IntentsService {
   private readonly intents = new Map<string, Intent>();
 
-  constructor() {
+  constructor(private readonly metricsService: MetricsService) {
     this.seed();
   }
 
@@ -44,6 +45,9 @@ export class IntentsService {
     const existing = this.intents.get(id);
     if (!existing) return null;
     const updated = { ...existing, ...patch };
+    if (patch.state && patch.state !== existing.state) {
+      this.metricsService.incIntentStateTransition(existing.state, patch.state);
+    }
     this.intents.set(id, updated);
     return updated;
   }

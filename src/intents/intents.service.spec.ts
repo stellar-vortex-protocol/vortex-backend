@@ -1,10 +1,14 @@
 import { IntentsService } from "./intents.service";
 
+const mockMetricsService = {
+  incIntentStateTransition: jest.fn(),
+};
+
 describe("IntentsService", () => {
   let service: IntentsService;
 
   beforeEach(() => {
-    service = new IntentsService();
+    service = new IntentsService(mockMetricsService as any);
   });
 
   it("seeds 5 intents on construction", () => {
