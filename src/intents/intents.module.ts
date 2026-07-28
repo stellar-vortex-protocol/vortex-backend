@@ -9,6 +9,6 @@ import { SolversModule } from "../solvers/solvers.module";
   imports: [SolversModule],
   controllers: [IntentsController],
   providers: [IntentsService, IntentsGateway, IntentsSweeperService],
-  exports: [IntentsService],
+  exports: [IntentsService, IntentsGateway],
 })
 export class IntentsModule {}

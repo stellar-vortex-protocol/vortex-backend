@@ -30,4 +30,8 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
       }
     }
   }
+
+  getSubscriberCount(): number {
+    return this.subscribers.size;
+  }
 }
