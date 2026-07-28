@@ -4,6 +4,9 @@
   "testEnvironment": "node",
   "testRegex": "test/.*\\.e2e-spec\\.ts$",
   "transform": {
-    "^.+\\.ts$": "ts-jest"
+    "^.+\\.ts$": ["ts-jest", { "diagnostics": false }]
+  },
+  "moduleNameMapper": {
+    "^@stellar/stellar-sdk$": "<rootDir>/test/__mocks__/@stellar/stellar-sdk.ts"
   }
 }
