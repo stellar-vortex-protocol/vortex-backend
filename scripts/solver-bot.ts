@@ -1,9 +1,24 @@
 // Reference solver bot - see scripts/README.md.
 import WebSocket from "ws";
+import { Keypair } from "@stellar/stellar-sdk";
+import { buildAcceptMessage, buildFillMessage } from "../src/common/stellar-signature";
 
 const API_BASE = process.env.API_BASE ?? "http://localhost:4000";
 const WS_URL = process.env.WS_URL ?? "ws://localhost:4000/ws";
-const SOLVER_ADDRESS = process.env.SOLVER_ADDRESS ?? "SOLVER_ALPHA";
+
+// The bot requires a Stellar secret key (S...) to sign requests.
+// Set SOLVER_SECRET to the solver keypair's secret key.
+// The derived public key (G...) is used as the solver address.
+const SOLVER_SECRET = process.env.SOLVER_SECRET;
+if (!SOLVER_SECRET) {
+  console.error("[solver-bot] SOLVER_SECRET env var is required (Stellar secret key S...)");
+  process.exit(1);
+}
+
+const keypair = Keypair.fromSecret(SOLVER_SECRET);
+const SOLVER_ADDRESS = keypair.publicKey();
+
+console.log(`[solver-bot] solver address: ${SOLVER_ADDRESS}`);
 
 interface Intent {
   intentId: string;
@@ -12,11 +27,19 @@ interface Intent {
   deadline: number;
 }
 
+/** Sign a UTF-8 message with the solver keypair; return base64 signature. */
+function sign(message: string): string {
+  return keypair.sign(Buffer.from(message, "utf8")).toString("base64");
+}
+
 async function acceptIntent(intentId: string): Promise<boolean> {
+  const message = buildAcceptMessage(intentId, SOLVER_ADDRESS);
+  const signature = sign(message);
+
   const res = await fetch(`${API_BASE}/api/v1/intents/${intentId}/accept`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ solver: SOLVER_ADDRESS }),
+    body: JSON.stringify({ solver: SOLVER_ADDRESS, signature }),
   });
   if (!res.ok) {
     console.log(`[solver-bot] accept ${intentId} failed: ${res.status} ${await res.text()}`);
@@ -27,6 +50,9 @@ async function acceptIntent(intentId: string): Promise<boolean> {
 }
 
 async function fillIntent(intentId: string, minDstAmount: string): Promise<void> {
+  const message = buildFillMessage(intentId, SOLVER_ADDRESS);
+  const signature = sign(message);
+
   const res = await fetch(`${API_BASE}/api/v1/intents/${intentId}/fill`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -34,6 +60,7 @@ async function fillIntent(intentId: string, minDstAmount: string): Promise<void>
       solver: SOLVER_ADDRESS,
       fillAmount: minDstAmount,
       txHash: `demo-${Date.now()}`,
+      signature,
     }),
   });
   if (!res.ok) {

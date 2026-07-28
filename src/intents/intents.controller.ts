@@ -20,6 +20,12 @@ import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
+import {
+  verifyStellarSignature,
+  buildCancelMessage,
+  buildAcceptMessage,
+  buildFillMessage,
+} from "../common/stellar-signature";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -115,6 +121,9 @@ export class IntentsController {
       throw new ForbiddenException("Solver not registered or inactive");
     }
 
+    // Verify the solver controls the claimed address
+    verifyStellarSignature(dto.solver, buildAcceptMessage(id, dto.solver), dto.signature);
+
     const updated = this.intentsService.update(id, {
       state: "accepted",
       solver: dto.solver,
@@ -139,6 +148,9 @@ export class IntentsController {
     if (intent.deadline <= now) {
       throw new GoneException("Fill window has expired");
     }
+
+    // Verify the solver controls the claimed address
+    verifyStellarSignature(dto.solver, buildFillMessage(id, dto.solver), dto.signature);
 
     const fillAmount = BigInt(dto.fillAmount);
     const minAmount = BigInt(intent.minDstAmount);
@@ -173,6 +185,9 @@ export class IntentsController {
     if (intent.state !== "open") {
       throw new ConflictException(`Cannot cancel intent in state: ${intent.state}`);
     }
+
+    // Verify the user controls the claimed address
+    verifyStellarSignature(dto.user, buildCancelMessage(id), dto.signature);
 
     const updated = this.intentsService.update(id, { state: "cancelled" });
     this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
