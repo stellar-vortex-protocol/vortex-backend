@@ -28,6 +28,7 @@ export interface AppConfig {
     // a placeholder. Never log this value.
     signingKey: string;
   };
+  onchainIntentsEnabled: boolean;
   corsOrigin: string;
 }
 
@@ -41,5 +42,6 @@ export default (): AppConfig => ({
     solverRegistryContractId: process.env.SOLVER_REGISTRY_CONTRACT_ID ?? "",
     signingKey: process.env.SOROBAN_SIGNING_KEY ?? "",
   },
+  onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
 });
