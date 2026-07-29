@@ -22,7 +22,11 @@ export interface AppConfig {
     sorobanRpcUrl: string;
     settlementContractId: string;
     solverRegistryContractId: string;
-    feePercentile: FeePercentile;
+    // Secret key for the backend's Soroban signer. Empty outside production
+    // (no on-chain write path exists yet); envValidationSchema requires and
+    // format-checks it in production so it can never silently fall back to
+    // a placeholder. Never log this value.
+    signingKey: string;
   };
   corsOrigin: string;
 }
@@ -35,7 +39,7 @@ export default (): AppConfig => ({
     sorobanRpcUrl: process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org",
     settlementContractId: process.env.SETTLEMENT_CONTRACT_ID ?? "",
     solverRegistryContractId: process.env.SOLVER_REGISTRY_CONTRACT_ID ?? "",
-    feePercentile: (process.env.STELLAR_FEE_PERCENTILE ?? "p50") as FeePercentile,
+    signingKey: process.env.SOROBAN_SIGNING_KEY ?? "",
   },
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
 });

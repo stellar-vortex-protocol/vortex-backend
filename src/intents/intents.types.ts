@@ -48,6 +48,8 @@ export interface Intent {
   filledAt?: number;
   fillAmount?: string;
   txHash?: string; // fill tx on Stellar
+  slashedAt?: number;
+  slashReason?: string;
 }
 
 export interface Quote {

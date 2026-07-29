@@ -28,15 +28,7 @@ export class SorobanService {
     return this.server.getAccount(publicKey);
   }
 
-  getFeeStats() {
-    return this.server.getFeeStats();
-  }
-
-  simulateTransaction(transaction: Transaction | FeeBumpTransaction) {
-    return this.server.simulateTransaction(transaction);
-  }
-
-  prepareTransaction(transaction: Transaction | FeeBumpTransaction) {
-    return this.server.prepareTransaction(transaction);
+  getEvents(request: SorobanRpc.Server.GetEventsRequest) {
+    return this.server.getEvents(request);
   }
 }
