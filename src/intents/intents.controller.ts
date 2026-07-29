@@ -15,6 +15,8 @@ import { ApiTags } from "@nestjs/swagger";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
+import { TokensService } from "../tokens/tokens.service";
+import { RoutingService } from "../routing/routing.service";
 import { CreateIntentDto } from "./dto/create-intent.dto";
 import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
@@ -28,6 +30,8 @@ export class IntentsController {
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
     private readonly intentsGateway: IntentsGateway,
+    private readonly tokensService: TokensService,
+    private readonly routingService: RoutingService,
   ) {}
 
   @Get()
@@ -73,6 +77,15 @@ export class IntentsController {
   @Post()
   create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
+    const chainData = this.tokensService.getByChain(dto.srcChain);
+    const stellarData = this.tokensService.getStellarTokens();
+    
+    const srcTokenList = dto.srcChain === "stellar" ? stellarData.tokens : chainData.tokens;
+    const srcToken = srcTokenList.find((t: any) => 
+      dto.srcChain === "stellar" ? t.contract === dto.srcTokenAddress : t.address === dto.srcTokenAddress
+    );
+    const dstToken = stellarData.tokens.find((t: any) => t.contract === dto.dstTokenContract);
+    
     const intent = this.intentsService.create({
       user: dto.user,
       srcChain: dto.srcChain,
@@ -82,12 +95,14 @@ export class IntentsController {
         name: dto.srcTokenSymbol,
         decimals: dto.srcTokenDecimals,
         chain: dto.srcChain,
+        priceUSD: srcToken?.priceUSD,
       },
       srcAmount: dto.srcAmount,
       dstToken: {
         contract: dto.dstTokenContract,
         symbol: dto.dstTokenSymbol,
         decimals: dto.dstTokenDecimals,
+        priceUSD: dstToken?.priceUSD,
       },
       minDstAmount: dto.minDstAmount,
       deadline: dto.deadline ?? now + 1800,
@@ -182,11 +197,27 @@ export class IntentsController {
   @Post("quote")
   quote(@Body() dto: QuoteRequestDto) {
     const solvers = this.solversService.getAll().filter((s) => s.isActive);
+    const chainData = this.tokensService.getByChain(dto.srcChain);
+    const stellarData = this.tokensService.getStellarTokens();
+    
+    const srcTokenList = dto.srcChain === "stellar" ? stellarData.tokens : chainData.tokens;
+    const srcToken = srcTokenList.find((t: any) => 
+      dto.srcChain === "stellar" ? t.contract === dto.srcTokenAddress : t.address === dto.srcTokenAddress
+    );
+    const dstToken = stellarData.tokens.find((t: any) => t.contract === dto.dstTokenContract);
+    
     const quotes = solvers
       .map((solver) => {
-        const variance = 1 - Math.random() * 0.008; // 0-0.8% variance
+        const variance = 1 - Math.random() * 0.008;
         const dstAmount = Math.floor(Number(dto.srcAmount) * variance);
-        const fee = Math.floor(dstAmount * 0.0005); // 0.05%
+        const fee = Math.floor(dstAmount * 0.0005);
+        const route = srcToken && dstToken 
+          ? this.routingService.createDirectRoute(
+              { address: dto.srcTokenAddress, symbol: dto.srcTokenSymbol, name: dto.srcTokenSymbol, decimals: dto.srcTokenDecimals, chain: dto.srcChain, priceUSD: srcToken.priceUSD },
+              { address: dto.dstTokenContract, symbol: dto.dstTokenSymbol, name: dto.dstTokenSymbol, decimals: dto.dstTokenDecimals, chain: "stellar", priceUSD: dstToken.priceUSD },
+              solver.address
+            )
+          : null;
         return {
           solver: solver.address,
           solverName: solver.name,
@@ -194,6 +225,7 @@ export class IntentsController {
           fee: fee.toString(),
           fillTime: solver.avgFillTime + Math.floor(Math.random() * 30),
           expiresAt: Math.floor(Date.now() / 1000) + 60,
+          route,
         };
       })
       .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
