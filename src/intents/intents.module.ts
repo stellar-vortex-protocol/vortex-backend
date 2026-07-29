@@ -4,24 +4,14 @@ import { IntentsController } from "./intents.controller";
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsSweeperService } from "./intents-sweeper.service";
 import { SolversModule } from "../solvers/solvers.module";
-import { INTENTS_REPOSITORY } from "./intents.repository";
-import { InMemoryIntentsRepository } from "./in-memory-intents.repository";
+import { SorobanModule } from "../soroban/soroban.module";
+import { EventIngestionService } from "../soroban/event-ingestion.service";
 
 @Module({
-  imports: [SolversModule],
+  imports: [SolversModule, SorobanModule],
   controllers: [IntentsController],
-  providers: [
-    // Bind the in-memory adapter to the repository token.
-    // Swap this binding (and only this binding) to use a different storage
-    // backend — IntentsService and everything above it stay unchanged.
-    {
-      provide: INTENTS_REPOSITORY,
-      useClass: InMemoryIntentsRepository,
-    },
-    IntentsService,
-    IntentsGateway,
-    IntentsSweeperService,
-  ],
+  providers: [IntentsService, IntentsGateway, IntentsSweeperService, EventIngestionService],
   exports: [IntentsService],
 })
 export class IntentsModule {}
+
