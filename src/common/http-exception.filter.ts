@@ -5,48 +5,61 @@ interface JsonResponse {
   status: (code: number) => { json: (body: unknown) => void };
 }
 
+interface RequestWithId {
+  requestId?: string;
+}
+
+function addRequestId(body: Record<string, unknown>, requestId?: string): Record<string, unknown> {
+  if (requestId) body.requestId = requestId;
+  return body;
+}
+
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
     const response = host.switchToHttp().getResponse<JsonResponse>();
+    const request = host.switchToHttp().getRequest<RequestWithId>();
+    const requestId = request.requestId;
 
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
       const body = exception.getResponse();
 
       if (typeof body === "string") {
-        response.status(status).json({ error: body });
+        response.status(status).json(addRequestId({ error: body }, requestId));
         return;
       }
 
       if (typeof body === "object" && body !== null) {
         const b = body as Record<string, unknown>;
 
-        // class-validator ValidationPipe shape: { message: string[], error, statusCode }
         if (Array.isArray(b.message)) {
-          response.status(status).json({ error: "Validation failed", details: b.message });
+          response.status(status).json(
+            addRequestId({ error: "Validation failed", details: b.message }, requestId),
+          );
           return;
         }
 
-        // Already custom-shaped bodies passed directly to an exception constructor,
-        // e.g. new BadRequestException({ error: "...", fillAmount, minDstAmount })
         if (typeof b.error === "string" && typeof b.message !== "string") {
-          response.status(status).json(b);
+          response.status(status).json(addRequestId(b, requestId));
           return;
         }
 
         if (typeof b.message === "string") {
-          response.status(status).json({ error: b.message });
+          response.status(status).json(addRequestId({ error: b.message }, requestId));
           return;
         }
       }
 
-      response.status(status).json({ error: exception.message });
+      response.status(status).json(addRequestId({ error: exception.message }, requestId));
       return;
     }
 
     const err = exception instanceof Error ? exception : new Error("Unknown error");
-    logger.error(err.stack ?? err.message);
-    response.status(500).json({ error: err.message || "Internal server error" });
+    logger.error(`[${requestId}] ${err.stack ?? err.message}`);
+    response.status(500).json(addRequestId(
+      { error: err.message || "Internal server error" },
+      requestId,
+    ));
   }
 }
