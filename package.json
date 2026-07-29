@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "test:mutation": "stryker run",
     "solver:demo": "tsx scripts/solver-bot.ts"
   },
   "dependencies": {
@@ -51,6 +52,8 @@
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.11",
     "tsx": "^4.15.4",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "@stryker-mutator/core": "^8.0.0",
+    "@stryker-mutator/jest-runner": "^8.0.0"
   }
 }

@@ -114,6 +114,9 @@ export class IntentsController {
     if (!solver?.isActive) {
       throw new ForbiddenException("Solver not registered or inactive");
     }
+    if (!solver.bondAmount || BigInt(solver.bondAmount) <= 0n) {
+      throw new ForbiddenException("Solver has insufficient bond");
+    }
 
     const updated = this.intentsService.update(id, {
       state: "accepted",
