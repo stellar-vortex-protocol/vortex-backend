@@ -1,93 +1,122 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { SorobanRpc, scValToNative } from "@stellar/stellar-sdk";
+import { scValToNative, SorobanRpc } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 import { SorobanService } from "./soroban.service";
-import { IntentsGateway } from "../intents/intents.gateway";
 
-const POLL_INTERVAL_MS = 5_000;
+const POLL_INTERVAL_MS = 10_000;
 
-/**
- * Polls Soroban RPC for events emitted by the settlement contract and
- * forwards them onto IntentsGateway.broadcast(), so state changes made by
- * other actors calling the contract directly (not just this backend's own
- * HTTP handlers) still reach WebSocket subscribers.
- */
+// Bound the in-memory dedupe set so long-lived processes don't leak memory.
+// Once we've tracked this many keys we drop the oldest (lowest-ledger) ones,
+// which is safe because we never re-poll ledgers that far behind the cursor.
+const MAX_TRACKED_KEYS = 10_000;
+
+export interface DedupeKeyParts {
+  ledgerSequence: number;
+  eventIndex: number;
+}
+
+// Soroban RPC event ids are "<ledgerSeq>-<eventIndexInLedger>"; we only use
+// the trailing segment here since `EventResponse.ledger` is the source of
+// truth for the ledger sequence.
+export function parseEventIndex(eventId: string): number {
+  const parts = eventId.split("-");
+  const index = Number(parts[parts.length - 1]);
+  return Number.isFinite(index) ? index : 0;
+}
+
+export function buildDedupeKey({ ledgerSequence, eventIndex }: DedupeKeyParts): string {
+  return `${ledgerSequence}:${eventIndex}`;
+}
+
 @Injectable()
 export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(EventIngestionService.name);
-  private readonly contractId: string;
-
-  private timer?: NodeJS.Timeout;
-  private cursor?: string;
+  private interval?: NodeJS.Timeout;
+  private readonly seenKeys = new Set<string>();
   private nextStartLedger?: number;
-  private polling = false;
+  processedCount = 0;
+  duplicateCount = 0;
 
   constructor(
-    configService: ConfigService<AppConfig, true>,
     private readonly sorobanService: SorobanService,
-    private readonly intentsGateway: IntentsGateway,
-  ) {
-    this.contractId = configService.get("stellar.settlementContractId", { infer: true });
-  }
+    private readonly configService: ConfigService<AppConfig, true>,
+  ) {}
 
-  async onModuleInit() {
-    if (!this.contractId) {
-      this.logger.warn("SETTLEMENT_CONTRACT_ID not configured — event ingestion disabled");
-      return;
-    }
-
-    try {
-      const { sequence } = await this.sorobanService.getLatestLedger();
-      this.nextStartLedger = sequence;
-    } catch (err) {
-      this.logger.error(`Could not resolve a starting ledger, will retry on next poll: ${errorMessage(err)}`);
-    }
-
-    this.timer = setInterval(() => void this.poll(), POLL_INTERVAL_MS);
+  onModuleInit() {
+    this.interval = setInterval(() => {
+      this.poll().catch((err) => console.error("[event-ingestion] poll failed", err));
+    }, POLL_INTERVAL_MS);
   }
 
   onModuleDestroy() {
-    if (this.timer) clearInterval(this.timer);
+    if (this.interval) clearInterval(this.interval);
   }
 
-  private async poll() {
-    if (this.polling) return; // previous poll still in flight, skip this tick
-    this.polling = true;
+  async poll(): Promise<void> {
+    const settlementContractId = this.configService.get("stellar.settlementContractId", { infer: true });
+    if (!settlementContractId) return;
 
-    try {
-      const response = await this.sorobanService.getEvents({
-        filters: [{ type: "contract", contractIds: [this.contractId] }],
-        cursor: this.cursor,
-        startLedger: this.cursor ? undefined : this.nextStartLedger,
-        limit: 100,
-      });
+    let startLedger = this.nextStartLedger;
+    if (startLedger === undefined) {
+      const latest = await this.sorobanService.getLatestLedger();
+      startLedger = latest.sequence;
+    }
 
-      for (const event of response.events) {
-        this.cursor = event.pagingToken;
-        if (event.inSuccessfulContractCall) this.handleEvent(event);
-      }
-    } catch (err) {
-      this.logger.error(`Event poll failed, will retry: ${errorMessage(err)}`);
-    } finally {
-      this.polling = false;
+    const response = await this.sorobanService.getEvents({
+      startLedger,
+      filters: [{ type: "contract", contractIds: [settlementContractId] }],
+    });
+
+    for (const event of response.events) {
+      this.ingest(event);
+    }
+
+    this.nextStartLedger = response.latestLedger + 1;
+  }
+
+  // Skips events already seen at this ledger+index, which protects against
+  // redelivery after a restart (cursor rewinds) or overlapping poll windows.
+  ingest(event: SorobanRpc.Api.EventResponse): boolean {
+    const dedupeKey = buildDedupeKey({
+      ledgerSequence: event.ledger,
+      eventIndex: parseEventIndex(event.id),
+    });
+
+    if (this.seenKeys.has(dedupeKey)) {
+      this.duplicateCount++;
+      return false;
+    }
+
+    this.markSeen(dedupeKey);
+    this.processEvent(event);
+    this.processedCount++;
+    return true;
+  }
+
+  private markSeen(dedupeKey: string) {
+    this.seenKeys.add(dedupeKey);
+    if (this.seenKeys.size > MAX_TRACKED_KEYS) {
+      const oldest = this.seenKeys.values().next().value;
+      if (oldest !== undefined) this.seenKeys.delete(oldest);
     }
   }
 
-  private handleEvent(event: SorobanRpc.Api.EventResponse) {
-    const [topicSymbol, ...restTopics] = event.topic.map((scv) => scValToNative(scv));
-
-    this.intentsGateway.broadcast({
-      type: `chain_${String(topicSymbol ?? "event").toLowerCase()}`,
-      contractId: this.contractId,
-      ledger: event.ledger,
-      txHash: event.txHash,
-      topics: restTopics,
-      data: scValToNative(event.value),
+  private processEvent(event: SorobanRpc.Api.EventResponse): void {
+    const topic = event.topic.map((scVal) => {
+      try {
+        return scValToNative(scVal);
+      } catch {
+        return undefined;
+      }
     });
-  }
-}
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+    const eventName = typeof topic[0] === "string" ? topic[0] : undefined;
+    if (eventName === "intent_filled") {
+      this.handleIntentFilled(event, topic);
+    }
+  }
+
+  private handleIntentFilled(event: SorobanRpc.Api.EventResponse, topic: unknown[]): void {
+    console.log(`[event-ingestion] intent_filled event at ledger=${event.ledger} txHash=${event.txHash}`, topic);
+  }
 }
