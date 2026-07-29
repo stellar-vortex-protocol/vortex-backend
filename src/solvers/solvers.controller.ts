@@ -1,4 +1,10 @@
-import { Controller, Get, NotFoundException, Param } from "@nestjs/common";
+import {
+  Controller,
+  Get,
+  NotFoundException,
+  Param,
+  Post,
+} from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { SolversService } from "./solvers.service";
 
@@ -29,6 +35,13 @@ export class SolversController {
 
     const total = solver.fillsCompleted + solver.fillsFailed;
     const successRate = total > 0 ? solver.fillsCompleted / total : 0;
+    const ageDays = Math.max(
+      0,
+      (Date.now() / 1000 - solver.registeredAt) / 86400,
+    );
+    const reputationScore = parseFloat(
+      (successRate * Math.exp(-ageDays / 180)).toFixed(4),
+    );
 
     return {
       address: solver.address,
@@ -36,9 +49,17 @@ export class SolversController {
       fillsCompleted: solver.fillsCompleted,
       fillsFailed: solver.fillsFailed,
       successRate: parseFloat(successRate.toFixed(4)),
+      reputationScore,
       totalVolume: solver.totalVolume,
       avgFillTime: solver.avgFillTime,
       bondAmount: solver.bondAmount,
     };
+  }
+
+  @Post(":address/deregister")
+  deregisterSolver(@Param("address") address: string) {
+    const solver = this.solversService.deregister(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+    return { ...solver, withdrawalStatus: "pending" };
   }
 }

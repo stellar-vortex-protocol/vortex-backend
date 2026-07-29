@@ -55,4 +55,17 @@ describe("SolversService", () => {
     expect(service.getAll()).toHaveLength(before);
     expect(service.get("SOLVER_ALPHA")?.name).toBe("Replaced Alpha");
   });
+
+  it("marks a solver inactive when deregistered", () => {
+    const solver = service.deregister("SOLVER_ALPHA");
+
+    expect(solver?.isActive).toBe(false);
+    expect(service.get("SOLVER_ALPHA")?.isActive).toBe(false);
+  });
+
+  it("marks a solver active when it comes online", () => {
+    service.markLive("SOLVER_ALPHA");
+
+    expect(service.get("SOLVER_ALPHA")?.isActive).toBe(true);
+  });
 });

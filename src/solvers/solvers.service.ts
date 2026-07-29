@@ -19,7 +19,10 @@ export class SolversService {
   }
 
   register(
-    data: Omit<SolverRecord, "registeredAt" | "fillsCompleted" | "fillsFailed" | "totalVolume">,
+    data: Omit<
+      SolverRecord,
+      "registeredAt" | "fillsCompleted" | "fillsFailed" | "totalVolume"
+    >,
   ): SolverRecord {
     const solver: SolverRecord = {
       ...data,
@@ -30,6 +33,33 @@ export class SolversService {
     };
     this.solvers.set(solver.address, solver);
     return solver;
+  }
+
+  deregister(address: string): SolverRecord | undefined {
+    const solver = this.solvers.get(address);
+    if (solver) {
+      solver.isActive = false;
+      return solver;
+    }
+    return undefined;
+  }
+
+  markLive(address: string): SolverRecord | undefined {
+    const solver = this.solvers.get(address);
+    if (solver) {
+      solver.isActive = true;
+      return solver;
+    }
+    return undefined;
+  }
+
+  markOffline(address: string): SolverRecord | undefined {
+    const solver = this.solvers.get(address);
+    if (solver) {
+      solver.isActive = false;
+      return solver;
+    }
+    return undefined;
   }
 
   private seed() {

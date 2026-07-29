@@ -4,6 +4,7 @@ import WebSocket from "ws";
 const API_BASE = process.env.API_BASE ?? "http://localhost:4000";
 const WS_URL = process.env.WS_URL ?? "ws://localhost:4000/ws";
 const SOLVER_ADDRESS = process.env.SOLVER_ADDRESS ?? "SOLVER_ALPHA";
+const MIN_MARGIN_BPS = Number(process.env.MIN_MARGIN_BPS ?? "0");
 
 interface Intent {
   intentId: string;
@@ -19,14 +20,19 @@ async function acceptIntent(intentId: string): Promise<boolean> {
     body: JSON.stringify({ solver: SOLVER_ADDRESS }),
   });
   if (!res.ok) {
-    console.log(`[solver-bot] accept ${intentId} failed: ${res.status} ${await res.text()}`);
+    console.log(
+      `[solver-bot] accept ${intentId} failed: ${res.status} ${await res.text()}`,
+    );
     return false;
   }
   console.log(`[solver-bot] accepted ${intentId}`);
   return true;
 }
 
-async function fillIntent(intentId: string, minDstAmount: string): Promise<void> {
+async function fillIntent(
+  intentId: string,
+  minDstAmount: string,
+): Promise<void> {
   const res = await fetch(`${API_BASE}/api/v1/intents/${intentId}/fill`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -37,7 +43,9 @@ async function fillIntent(intentId: string, minDstAmount: string): Promise<void>
     }),
   });
   if (!res.ok) {
-    console.log(`[solver-bot] fill ${intentId} failed: ${res.status} ${await res.text()}`);
+    console.log(
+      `[solver-bot] fill ${intentId} failed: ${res.status} ${await res.text()}`,
+    );
     return;
   }
   console.log(`[solver-bot] filled ${intentId}`);
@@ -46,6 +54,16 @@ async function fillIntent(intentId: string, minDstAmount: string): Promise<void>
 async function tryFillOpenIntent(intent: Intent): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   if (intent.state !== "open" || intent.deadline <= now) return;
+
+  if (
+    MIN_MARGIN_BPS > 0 &&
+    Number(intent.minDstAmount) < 1_000_000 * (MIN_MARGIN_BPS / 10000)
+  ) {
+    console.log(
+      `[solver-bot] skipped ${intent.intentId} below min margin ${MIN_MARGIN_BPS} bps`,
+    );
+    return;
+  }
 
   const accepted = await acceptIntent(intent.intentId);
   if (!accepted) return;
@@ -65,7 +83,9 @@ function main() {
         console.log(`[solver-bot] ${event.message}`);
         break;
       case "snapshot":
-        console.log(`[solver-bot] snapshot: ${event.intents.length} open intent(s)`);
+        console.log(
+          `[solver-bot] snapshot: ${event.intents.length} open intent(s)`,
+        );
         for (const intent of event.intents as Intent[]) {
           void tryFillOpenIntent(intent);
         }
