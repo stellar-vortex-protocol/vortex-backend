@@ -1,54 +1,76 @@
+import { Injectable } from "@nestjs/common";
 import { Intent, IntentState } from "./intents.types";
 
-/**
- * NestJS injection token for the intents repository.
- *
- * Use this token instead of a concrete class so any module can swap
- * InMemoryIntentsRepository for a Prisma-backed or on-chain adapter
- * without touching IntentsService.
- *
- * @example
- *   \@Inject(INTENTS_REPOSITORY) private readonly repo: IIntentsRepository
- */
-export const INTENTS_REPOSITORY = Symbol("INTENTS_REPOSITORY");
+export abstract class IntentsRepository {
+  abstract save(intent: Intent): Intent | Promise<Intent>;
+  abstract findById(id: string): Intent | undefined | Promise<Intent | undefined>;
+  abstract findAll(): Intent[] | Promise<Intent[]>;
+  abstract findByState(state: IntentState): Intent[] | Promise<Intent[]>;
+  abstract findByUser(user: string): Intent[] | Promise<Intent[]>;
+  abstract update(id: string, patch: Partial<Intent>): Intent | null | Promise<Intent | null>;
+}
+
+@Injectable()
+export class InMemoryIntentsRepository implements IntentsRepository {
+  private readonly intents = new Map<string, Intent>();
+
+  save(intent: Intent): Intent {
+    this.intents.set(intent.intentId, intent);
+    return intent;
+  }
+
+  findById(id: string): Intent | undefined {
+    return this.intents.get(id);
+  }
+
+  findAll(): Intent[] {
+    return [...this.intents.values()].sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  findByState(state: IntentState): Intent[] {
+    return this.findAll().filter((i) => i.state === state);
+  }
+
+  findByUser(user: string): Intent[] {
+    return this.findAll().filter((i) => i.user.toLowerCase() === user.toLowerCase());
+  }
+
+  update(id: string, patch: Partial<Intent>): Intent | null {
+    const existing = this.intents.get(id);
+    if (!existing) return null;
+    const updated = { ...existing, ...patch };
+    this.intents.set(id, updated);
+    return updated;
+  }
+}
 
 /**
- * Storage contract for intents.
- *
- * All methods mirror the shape the rest of the application already relies on,
- * making it a drop-in replacement for the Map-based logic that previously
- * lived directly inside IntentsService.
+ * Postgres implementation stub for production persistent storage integration.
  */
-export interface IIntentsRepository {
-  /**
-   * Persist a fully-formed intent and return it.
-   */
-  save(intent: Intent): Intent;
+@Injectable()
+export class PostgresIntentsRepository implements IntentsRepository {
+  // Database connection / ORM entity manager would be injected here
+  save(intent: Intent): Intent {
+    throw new Error("Method not implemented. Configure Postgres connection.");
+  }
 
-  /**
-   * Find a single intent by its public UUID.
-   * Returns `undefined` when the intent does not exist.
-   */
-  findById(id: string): Intent | undefined;
+  findById(id: string): Intent | undefined {
+    throw new Error("Method not implemented. Configure Postgres connection.");
+  }
 
-  /**
-   * Return all intents sorted by `createdAt` descending (newest first).
-   */
-  findAll(): Intent[];
+  findAll(): Intent[] {
+    throw new Error("Method not implemented. Configure Postgres connection.");
+  }
 
-  /**
-   * Return all intents that match the given state, sorted newest-first.
-   */
-  findByState(state: IntentState): Intent[];
+  findByState(state: IntentState): Intent[] {
+    throw new Error("Method not implemented. Configure Postgres connection.");
+  }
 
-  /**
-   * Return all intents belonging to `user` (case-insensitive), newest-first.
-   */
-  findByUser(user: string): Intent[];
+  findByUser(user: string): Intent[] {
+    throw new Error("Method not implemented. Configure Postgres connection.");
+  }
 
-  /**
-   * Shallow-merge `patch` into the stored intent identified by `id`.
-   * Returns the updated intent, or `null` if the intent does not exist.
-   */
-  update(id: string, patch: Partial<Intent>): Intent | null;
+  update(id: string, patch: Partial<Intent>): Intent | null {
+    throw new Error("Method not implemented. Configure Postgres connection.");
+  }
 }
