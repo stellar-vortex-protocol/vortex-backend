@@ -12,6 +12,15 @@ cross-chain settlement. A real solver would price the fill against live
 market rates, verify the trade is profitable, execute the actual bridge/swap,
 and only then call `/fill` with the real transaction hash.
 
+## Reconnection behaviour
+
+The bot automatically reconnects to the WebSocket feed on disconnect with
+exponential backoff (1s → 2s → 4s → … → 30s max). The backoff resets on
+each successful connection. The bot responds to `SIGINT`/`SIGTERM` for
+graceful shutdown. Once the server supports event sequence IDs (issue #62),
+the bot will resume from the last-seen event rather than re-fetching a fresh
+snapshot.
+
 ## Usage
 
 ```bash

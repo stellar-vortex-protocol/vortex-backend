@@ -5,6 +5,12 @@ const API_BASE = process.env.API_BASE ?? "http://localhost:4000";
 const WS_URL = process.env.WS_URL ?? "ws://localhost:4000/ws";
 const SOLVER_ADDRESS = process.env.SOLVER_ADDRESS ?? "SOLVER_ALPHA";
 
+const BACKOFF_INITIAL_MS = 1_000;
+const BACKOFF_MAX_MS = 30_000;
+const BACKOFF_FACTOR = 2;
+
+let shouldReconnect = true;
+
 interface Intent {
   intentId: string;
   state: string;
@@ -53,8 +59,11 @@ async function tryFillOpenIntent(intent: Intent): Promise<void> {
   await fillIntent(intent.intentId, intent.minDstAmount);
 }
 
-function main() {
-  console.log(`[solver-bot] connecting as ${SOLVER_ADDRESS} to ${WS_URL}`);
+function connectWithBackoff(delayMs: number): void {
+  if (!shouldReconnect) return;
+
+  console.log(`[solver-bot] connecting as ${SOLVER_ADDRESS} to ${WS_URL}` +
+    (delayMs > 0 ? ` (reconnect in ${delayMs}ms)` : ""));
   const ws = new WebSocket(WS_URL);
 
   ws.on("message", (raw) => {
@@ -85,8 +94,30 @@ function main() {
     }
   });
 
-  ws.on("close", () => console.log("[solver-bot] disconnected"));
-  ws.on("error", (err) => console.error("[solver-bot] error", err));
+  ws.on("close", () => {
+    console.log(`[solver-bot] disconnected`);
+    const nextDelay = Math.min(delayMs * BACKOFF_FACTOR, BACKOFF_MAX_MS);
+    setTimeout(() => connectWithBackoff(nextDelay), delayMs);
+  });
+
+  ws.on("error", (err) => {
+    console.error(`[solver-bot] error`, err);
+    ws.close();
+  });
+}
+
+function main() {
+  process.on("SIGINT", () => {
+    shouldReconnect = false;
+    process.exit(0);
+  });
+
+  process.on("SIGTERM", () => {
+    shouldReconnect = false;
+    process.exit(0);
+  });
+
+  connectWithBackoff(BACKOFF_INITIAL_MS);
 }
 
 main();
