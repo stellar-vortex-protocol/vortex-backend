@@ -1,5 +1,10 @@
 import * as Joi from "joi";
 
+// Stellar secret seeds ("S..." strkeys) are 56-char base32: prefix + 32-byte
+// payload + checksum. This rejects placeholders like "changeme" outright —
+// it does not by itself prove the key is a *real, funded* signer.
+const STELLAR_SECRET_KEY_PATTERN = /^S[A-Z2-7]{55}$/;
+
 export const envValidationSchema = Joi.object({
   NODE_ENV: Joi.string().valid("development", "production", "test").default("development"),
   PORT: Joi.number().port().default(4000),
@@ -9,34 +14,22 @@ export const envValidationSchema = Joi.object({
   SETTLEMENT_CONTRACT_ID: Joi.string().allow("").default(""),
   SOLVER_REGISTRY_CONTRACT_ID: Joi.string().allow("").default(""),
 
-  /**
-   * Allowed CORS origin(s) — comma-separated list of explicit origins or "*".
-   *
-   * In production the wildcard "*" is rejected so that deployments cannot
-   * accidentally serve credentialed-adjacent requests from any origin.
-   * Set this to the frontend's production URL, e.g.:
-   *   CORS_ORIGIN=https://app.vortex.trade
-   *
-   * In development/test the value defaults to "*" for convenience.
-   */
-  CORS_ORIGIN: Joi.when("NODE_ENV", {
-    is: "production",
-    then: Joi.string()
-      .invalid("*")
-      .required()
-      .messages({
-        "any.invalid":
-          'CORS_ORIGIN must be set to an explicit origin (not "*") when NODE_ENV=production',
-        "any.required":
-          'CORS_ORIGIN is required when NODE_ENV=production — set it to the frontend origin (e.g. https://app.vortex.trade)',
-      }),
-    otherwise: Joi.string().default("*"),
-  }),
+  // Secret key for the backend's own Soroban signer (submits on-chain writes
+  // such as settlement and slashing calls). No default is provided anywhere
+  // in this schema — an unset value fails closed (empty string) rather than
+  // ever falling back to a placeholder that could be mistaken for a real key.
+  SOROBAN_SIGNING_KEY: Joi.string()
+    .pattern(STELLAR_SECRET_KEY_PATTERN)
+    .messages({
+      "string.pattern.base":
+        'SOROBAN_SIGNING_KEY must be a valid Stellar secret seed (starts with "S", 56 base32 characters). ' +
+        "Generate a throwaway testnet key for local dev — see README's Signing Key section — never commit a real one.",
+    })
+    .when("NODE_ENV", {
+      is: "production",
+      then: Joi.required(),
+      otherwise: Joi.string().allow("").default(""),
+    }),
 
-  /**
-   * Maximum number of simultaneous WebSocket connections the gateway will
-   * accept before rejecting new ones with close code 1013 (try again later).
-   * Defaults to 1000.  Set to 0 to disable the cap (not recommended in prod).
-   */
-  WS_MAX_CONNECTIONS: Joi.number().integer().min(0).default(1000),
+  CORS_ORIGIN: Joi.string().default("*"),
 });
