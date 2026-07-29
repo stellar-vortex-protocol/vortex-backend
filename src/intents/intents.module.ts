@@ -14,3 +14,4 @@ import { EventIngestionService } from "../soroban/event-ingestion.service";
   exports: [IntentsService],
 })
 export class IntentsModule {}
+

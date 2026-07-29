@@ -83,27 +83,23 @@ export class IntentsService {
   }
 
   get(id: string): Intent | undefined {
-    return this.intents.get(id);
+    return this.repository.findById(id) as Intent | undefined;
   }
 
   getAll(): Intent[] {
-    return [...this.intents.values()].sort((a, b) => b.createdAt - a.createdAt);
+    return this.repository.findAll() as Intent[];
   }
 
   getByState(state: IntentState): Intent[] {
-    return this.getAll().filter((i) => i.state === state);
+    return this.repository.findByState(state) as Intent[];
   }
 
   getByUser(user: string): Intent[] {
-    return this.getAll().filter((i) => i.user.toLowerCase() === user.toLowerCase());
+    return this.repository.findByUser(user) as Intent[];
   }
 
   update(id: string, patch: Partial<Intent>): Intent | null {
-    const existing = this.intents.get(id);
-    if (!existing) return null;
-    const updated = { ...existing, ...patch };
-    this.intents.set(id, updated);
-    return updated;
+    return this.repository.update(id, patch) as Intent | null;
   }
 
   private seed() {
@@ -114,7 +110,8 @@ export class IntentsService {
         intentId: uuidv4(),
         createdAt: now - Math.floor(Math.random() * 600),
       };
-      this.intents.set(intent.intentId, intent);
+      this.repository.save(intent);
     }
   }
 }
+
