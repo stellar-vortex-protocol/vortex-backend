@@ -3,6 +3,8 @@ import { Keypair } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { IntentsService } from "./intents.service";
+import { InMemoryIntentsRepository } from "./in-memory-intents.repository";
+import { INTENTS_REPOSITORY } from "./intents.repository";
 
 const VALID_CONTRACT_ID = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
 
@@ -67,6 +69,21 @@ describe("IntentsService", () => {
     expect(service.getAll()).toHaveLength(before + 1);
   });
 
+  it("create defaults deadline to now + 1800 when omitted", () => {
+    const before = Math.floor(Date.now() / 1000);
+    const intent = service.create({
+      user: "GTEST...0000",
+      srcChain: "ethereum",
+      srcToken: { address: "0xabc", symbol: "USDC", name: "USD Coin", decimals: 6, chain: "ethereum" },
+      srcAmount: "1000000",
+      dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+      minDstAmount: "990000",
+      deadline: undefined as unknown as number,
+    });
+
+    expect(intent.deadline).toBeGreaterThanOrEqual(before + 1800);
+  });
+
   it("get returns undefined for an unknown id", () => {
     expect(service.get("does-not-exist")).toBeUndefined();
   });
@@ -86,7 +103,6 @@ describe("IntentsService", () => {
 
   it("getByUser is case-insensitive", () => {
     const [existing] = service.getAll();
-    // seed data users are already uppercase, so lowercase actually exercises the transform
     const found = service.getByUser(existing.user.toLowerCase());
     expect(found.some((i) => i.intentId === existing.intentId)).toBe(true);
   });

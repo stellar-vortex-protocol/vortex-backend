@@ -7,6 +7,14 @@ import { buildSeedIntents } from "./intents.seed";
 import { AppConfig } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 
+/**
+ * Orchestration layer for intents.
+ *
+ * Business logic (ID generation, default state, deadline defaulting) lives
+ * here.  All persistence is delegated to the injected IIntentsRepository so
+ * the storage adapter can be swapped (in-memory → Prisma → on-chain) without
+ * touching this service.
+ */
 @Injectable()
 export class IntentsService {
   private readonly logger = new Logger(IntentsService.name);
