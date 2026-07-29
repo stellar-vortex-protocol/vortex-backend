@@ -1,182 +1,134 @@
-import { Keypair, Networks, SorobanRpc, Transaction } from "@stellar/stellar-sdk";
-import { SignerService } from "./signer.service";
+import {
+  Account,
+  Asset,
+  BASE_FEE,
+  Keypair,
+  Networks,
+  Operation,
+  SorobanRpc,
+  Transaction,
+  TransactionBuilder,
+} from "@stellar/stellar-sdk";
+import { ConfigService } from "@nestjs/config";
+import { StellarTxService } from "./stellar-tx.service";
 import { SorobanService } from "./soroban.service";
-import { SorobanSubmissionError, StellarTxService, nativeArgs } from "./stellar-tx.service";
+import { AppConfig } from "../config/configuration";
 
-const CONTRACT_ID = "CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE";
-const FAST_OPTS = { baseBackoffMs: 1, maxBackoffMs: 1, pollIntervalMs: 1, pollTimeoutMs: 20 };
-
-function fakeSigner(keypair = Keypair.random()) {
-  return {
-    getPublicKey: jest.fn(() => keypair.publicKey()),
-    getNetworkPassphrase: jest.fn(() => Networks.TESTNET),
-    sign: jest.fn((tx: Transaction) => tx),
-    withNextSequence: jest.fn(async (fn: (sequence: string) => Promise<unknown>) => fn("101")),
-  } as unknown as jest.Mocked<SignerService>;
+function buildTestTransaction(fee = "100"): Transaction {
+  const keypair = Keypair.random();
+  const account = new Account(keypair.publicKey(), "1");
+  return new TransactionBuilder(account, { fee, networkPassphrase: Networks.TESTNET })
+    .addOperation(Operation.payment({ destination: keypair.publicKey(), asset: Asset.native(), amount: "1" }))
+    .setTimeout(30)
+    .build();
 }
 
-function fakeSoroban() {
-  return {
-    prepareTransaction: jest.fn(async (tx: Transaction) => tx),
-    sendTransaction: jest.fn(),
-    getTransactionStatus: jest.fn(),
-  } as unknown as jest.Mocked<SorobanService>;
+function feeStats(sorobanInclusionFeeP50: string): SorobanRpc.Api.GetFeeStatsResponse {
+  const distribution = {
+    max: sorobanInclusionFeeP50,
+    min: sorobanInclusionFeeP50,
+    mode: sorobanInclusionFeeP50,
+    p10: sorobanInclusionFeeP50,
+    p20: sorobanInclusionFeeP50,
+    p30: sorobanInclusionFeeP50,
+    p40: sorobanInclusionFeeP50,
+    p50: sorobanInclusionFeeP50,
+    p60: sorobanInclusionFeeP50,
+    p70: sorobanInclusionFeeP50,
+    p80: sorobanInclusionFeeP50,
+    p90: sorobanInclusionFeeP50,
+    p95: sorobanInclusionFeeP50,
+    p99: sorobanInclusionFeeP50,
+    transactionCount: "1",
+    ledgerCount: 1,
+  };
+  return { sorobanInclusionFee: distribution, inclusionFee: distribution, latestLedger: 1 };
 }
 
-function successResponse(): SorobanRpc.Api.GetSuccessfulTransactionResponse {
+function simulationSuccess(minResourceFee: string): SorobanRpc.Api.SimulateTransactionSuccessResponse {
   return {
-    status: SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+    id: "1",
     latestLedger: 1,
-    latestLedgerCloseTime: 1,
-    oldestLedger: 1,
-    oldestLedgerCloseTime: 1,
-    ledger: 1,
-    createdAt: 1,
-    applicationOrder: 1,
-    feeBump: false,
-  } as SorobanRpc.Api.GetSuccessfulTransactionResponse;
-}
-
-function failedResponse(): SorobanRpc.Api.GetFailedTransactionResponse {
-  return { ...successResponse(), status: SorobanRpc.Api.GetTransactionStatus.FAILED } as SorobanRpc.Api.GetFailedTransactionResponse;
-}
-
-function notFoundResponse(): SorobanRpc.Api.GetMissingTransactionResponse {
-  return {
-    status: SorobanRpc.Api.GetTransactionStatus.NOT_FOUND,
-    latestLedger: 1,
-    latestLedgerCloseTime: 1,
-    oldestLedger: 1,
-    oldestLedgerCloseTime: 1,
+    events: [],
+    _parsed: true,
+    minResourceFee,
+    transactionData: {} as SorobanRpc.Api.SimulateTransactionSuccessResponse["transactionData"],
+    cost: { cpuInsns: "0", memBytes: "0" },
   };
 }
 
+function simulationError(message: string): SorobanRpc.Api.SimulateTransactionErrorResponse {
+  return { id: "1", error: message, latestLedger: 1, events: [], _parsed: true };
+}
+
 describe("StellarTxService", () => {
-  describe("buildContractInvocation", () => {
-    it("builds a transaction sourced from the signer's account at the given sequence", async () => {
-      const keypair = Keypair.random();
-      const signer = fakeSigner(keypair);
-      const service = new StellarTxService(fakeSoroban(), signer);
+  let sorobanService: jest.Mocked<Pick<SorobanService, "getFeeStats" | "simulateTransaction" | "prepareTransaction">>;
+  let configService: jest.Mocked<Pick<ConfigService<AppConfig, true>, "get">>;
+  let service: StellarTxService;
 
-      const tx = await service.buildContractInvocation({
-        contractId: CONTRACT_ID,
-        method: "create_intent",
-        args: nativeArgs("intent-1"),
-        sequence: "101",
-      });
+  beforeEach(() => {
+    sorobanService = {
+      getFeeStats: jest.fn(),
+      simulateTransaction: jest.fn(),
+      prepareTransaction: jest.fn(),
+    };
+    configService = { get: jest.fn().mockReturnValue("p50") };
+    service = new StellarTxService(
+      sorobanService as unknown as SorobanService,
+      configService as unknown as ConfigService<AppConfig, true>,
+    );
+  });
 
-      expect(tx.source).toBe(keypair.publicKey());
-      expect(tx.sequence).toBe("101"); // not "102" -- Account must be built one behind the target
-      expect(tx.operations).toHaveLength(1);
-      expect(tx.operations[0].type).toBe("invokeHostFunction");
+  describe("estimateBaseFee", () => {
+    it("returns the configured fee percentile from network fee stats", async () => {
+      sorobanService.getFeeStats.mockResolvedValue(feeStats("250"));
+
+      await expect(service.estimateBaseFee()).resolves.toBe("250");
+    });
+
+    it("falls back to BASE_FEE when the reported fee is 0", async () => {
+      sorobanService.getFeeStats.mockResolvedValue(feeStats("0"));
+
+      await expect(service.estimateBaseFee()).resolves.toBe(BASE_FEE);
+    });
+
+    it("falls back to BASE_FEE when fee stats are unavailable", async () => {
+      sorobanService.getFeeStats.mockRejectedValue(new Error("rpc unavailable"));
+
+      await expect(service.estimateBaseFee()).resolves.toBe(BASE_FEE);
     });
   });
 
-  describe("signAndSubmit", () => {
-    it("resolves once the transaction is confirmed on the first attempt", async () => {
-      const soroban = fakeSoroban();
-      soroban.sendTransaction.mockResolvedValue({ status: "PENDING", hash: "abc", latestLedger: 1, latestLedgerCloseTime: 1 });
-      soroban.getTransactionStatus.mockResolvedValue(successResponse());
+  describe("estimateFee", () => {
+    it("combines the network base fee with the simulated resource fee", async () => {
+      sorobanService.getFeeStats.mockResolvedValue(feeStats("300"));
+      sorobanService.simulateTransaction.mockResolvedValue(simulationSuccess("45000"));
 
-      const service = new StellarTxService(soroban, fakeSigner());
-      const tx = await service.buildContractInvocation({ contractId: CONTRACT_ID, method: "ping", sequence: "101" });
+      const estimate = await service.estimateFee(buildTestTransaction());
 
-      const result = await service.signAndSubmit(tx, FAST_OPTS);
-
-      expect(result.status).toBe(SorobanRpc.Api.GetTransactionStatus.SUCCESS);
-      expect(soroban.sendTransaction).toHaveBeenCalledTimes(1);
+      expect(estimate).toEqual({ baseFee: "300", resourceFee: "45000", totalFee: "45300" });
     });
 
-    it("checks tx status before resubmitting after a transient failure, instead of blindly resending", async () => {
-      const soroban = fakeSoroban();
-      soroban.sendTransaction
-        .mockRejectedValueOnce(new Error("ECONNRESET"))
-        .mockResolvedValueOnce({ status: "PENDING", hash: "abc", latestLedger: 1, latestLedgerCloseTime: 1 });
-      soroban.getTransactionStatus
-        .mockResolvedValueOnce(notFoundResponse()) // idempotency check before 2nd send: not landed yet
-        .mockResolvedValueOnce(successResponse()); // poll after 2nd send
+    it("throws when simulation fails, without marking anything as prepared", async () => {
+      sorobanService.getFeeStats.mockResolvedValue(feeStats("300"));
+      sorobanService.simulateTransaction.mockResolvedValue(simulationError("boom"));
 
-      const service = new StellarTxService(soroban, fakeSigner());
-      const tx = await service.buildContractInvocation({ contractId: CONTRACT_ID, method: "ping", sequence: "101" });
-
-      const result = await service.signAndSubmit(tx, FAST_OPTS);
-
-      expect(result.status).toBe(SorobanRpc.Api.GetTransactionStatus.SUCCESS);
-      expect(soroban.sendTransaction).toHaveBeenCalledTimes(2);
-      expect(soroban.getTransactionStatus).toHaveBeenCalledTimes(2);
-    });
-
-    it("does not resend when the idempotency check finds the tx already landed", async () => {
-      const soroban = fakeSoroban();
-      soroban.sendTransaction.mockRejectedValueOnce(new Error("timed out, unknown outcome"));
-      soroban.getTransactionStatus.mockResolvedValueOnce(successResponse()); // already landed from the "failed" attempt
-
-      const service = new StellarTxService(soroban, fakeSigner());
-      const tx = await service.buildContractInvocation({ contractId: CONTRACT_ID, method: "ping", sequence: "101" });
-
-      const result = await service.signAndSubmit(tx, FAST_OPTS);
-
-      expect(result.status).toBe(SorobanRpc.Api.GetTransactionStatus.SUCCESS);
-      expect(soroban.sendTransaction).toHaveBeenCalledTimes(1); // never resent
-    });
-
-    it("caps retry attempts and throws a clear error after exhaustion", async () => {
-      const soroban = fakeSoroban();
-      soroban.sendTransaction.mockRejectedValue(new Error("TRY_AGAIN_LATER"));
-      soroban.getTransactionStatus.mockResolvedValue(notFoundResponse());
-
-      const service = new StellarTxService(soroban, fakeSigner());
-      const tx = await service.buildContractInvocation({ contractId: CONTRACT_ID, method: "ping", sequence: "101" });
-
-      await expect(service.signAndSubmit(tx, { ...FAST_OPTS, maxAttempts: 3 })).rejects.toMatchObject({
-        name: "SorobanSubmissionError",
-        attempts: 3,
-      });
-      expect(soroban.sendTransaction).toHaveBeenCalledTimes(3);
-    });
-
-    it("throws immediately on a confirmed on-chain FAILED status, without burning the retry budget", async () => {
-      const soroban = fakeSoroban();
-      soroban.sendTransaction.mockResolvedValue({ status: "PENDING", hash: "abc", latestLedger: 1, latestLedgerCloseTime: 1 });
-      soroban.getTransactionStatus.mockResolvedValue(failedResponse());
-
-      const service = new StellarTxService(soroban, fakeSigner());
-      const tx = await service.buildContractInvocation({ contractId: CONTRACT_ID, method: "ping", sequence: "101" });
-
-      await expect(service.signAndSubmit(tx, { ...FAST_OPTS, maxAttempts: 5 })).rejects.toMatchObject({
-        name: "SorobanSubmissionError",
-        terminal: true,
-      });
-      expect(soroban.sendTransaction).toHaveBeenCalledTimes(1); // FAILED is terminal, not retried
-    });
-
-    it("times out waiting for confirmation if it never resolves out of NOT_FOUND", async () => {
-      const soroban = fakeSoroban();
-      soroban.sendTransaction.mockResolvedValue({ status: "PENDING", hash: "abc", latestLedger: 1, latestLedgerCloseTime: 1 });
-      soroban.getTransactionStatus.mockResolvedValue(notFoundResponse());
-
-      const service = new StellarTxService(soroban, fakeSigner());
-      const tx = await service.buildContractInvocation({ contractId: CONTRACT_ID, method: "ping", sequence: "101" });
-
-      await expect(service.signAndSubmit(tx, { ...FAST_OPTS, maxAttempts: 1 })).rejects.toThrow(SorobanSubmissionError);
+      await expect(service.estimateFee(buildTestTransaction())).rejects.toThrow(/simulation error: boom/);
+      expect(sorobanService.prepareTransaction).not.toHaveBeenCalled();
     });
   });
 
-  describe("invokeContract", () => {
-    it("reserves a sequence, builds, and submits under the signer's lock", async () => {
-      const soroban = fakeSoroban();
-      soroban.sendTransaction.mockResolvedValue({ status: "PENDING", hash: "abc", latestLedger: 1, latestLedgerCloseTime: 1 });
-      soroban.getTransactionStatus.mockResolvedValue(successResponse());
-      const signer = fakeSigner();
+  describe("prepareTransaction", () => {
+    it("submits the transaction with the estimated base fee applied", async () => {
+      sorobanService.getFeeStats.mockResolvedValue(feeStats("300"));
+      const prepared = buildTestTransaction("45300");
+      sorobanService.prepareTransaction.mockResolvedValue(prepared);
 
-      const service = new StellarTxService(soroban, signer);
-      const result = await service.invokeContract(
-        { contractId: CONTRACT_ID, method: "create_intent", args: nativeArgs("intent-1") },
-        FAST_OPTS,
-      );
+      const result = await service.prepareTransaction(buildTestTransaction());
 
-      expect(signer.withNextSequence).toHaveBeenCalledTimes(1);
-      expect(result.status).toBe(SorobanRpc.Api.GetTransactionStatus.SUCCESS);
+      expect(result).toBe(prepared);
+      const [submittedTx] = sorobanService.prepareTransaction.mock.calls[0];
+      expect((submittedTx as Transaction).fee).toBe("300");
     });
   });
 });
