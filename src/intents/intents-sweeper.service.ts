@@ -1,6 +1,7 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
+import { logger } from "../common/logger";
 
 const SWEEP_INTERVAL_MS = 30_000;
 
@@ -34,7 +35,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (expiredCount > 0) {
-      console.log(`[sweeper] Expired ${expiredCount} intent(s)`);
+      logger.info(`[sweeper] Expired ${expiredCount} intent(s)`);
     }
   }
 }
