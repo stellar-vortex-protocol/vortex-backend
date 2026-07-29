@@ -32,6 +32,21 @@ export class SolversService {
     return solver;
   }
 
+  /**
+   * Records that a solver accepted an intent and then missed its fill
+   * deadline. Bumps the local fillsFailed counter for read paths (e.g. the
+   * leaderboard); the authoritative bond reduction happens on-chain via
+   * SolverRegistryService.slashSolver and should reconcile bondAmount here
+   * once event ingestion exists (see docs/architecture/onchain-settlement.md).
+   */
+  recordFailedFill(address: string): SolverRecord | null {
+    const solver = this.solvers.get(address);
+    if (!solver) return null;
+    const updated = { ...solver, fillsFailed: solver.fillsFailed + 1 };
+    this.solvers.set(address, updated);
+    return updated;
+  }
+
   private seed() {
     for (const s of buildSeedSolvers()) {
       this.solvers.set(s.address, s);
