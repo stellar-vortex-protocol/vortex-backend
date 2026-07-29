@@ -1,3 +1,19 @@
+export type FeePercentile =
+  | "min"
+  | "mode"
+  | "p10"
+  | "p20"
+  | "p30"
+  | "p40"
+  | "p50"
+  | "p60"
+  | "p70"
+  | "p80"
+  | "p90"
+  | "p95"
+  | "p99"
+  | "max";
+
 export interface AppConfig {
   nodeEnv: string;
   port: number;

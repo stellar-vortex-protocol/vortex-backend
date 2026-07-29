@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { SorobanRpc } from "@stellar/stellar-sdk";
+import { FeeBumpTransaction, SorobanRpc, Transaction } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 
 @Injectable()
