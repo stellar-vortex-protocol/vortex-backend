@@ -30,6 +30,8 @@ export interface AppConfig {
   };
   onchainIntentsEnabled: boolean;
   corsOrigin: string;
+  /** Maximum concurrent WebSocket connections (0 = unlimited). */
+  wsMaxConnections: number;
 }
 
 export default (): AppConfig => ({
@@ -44,4 +46,5 @@ export default (): AppConfig => ({
   },
   onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
+  wsMaxConnections: parseInt(process.env.WS_MAX_CONNECTIONS ?? "1000", 10),
 });
