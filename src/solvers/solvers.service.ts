@@ -1,21 +1,28 @@
-import { Injectable } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
+import { SOLVERS_REPOSITORY, ISolversRepository } from "./solvers.repository";
 import { SolverRecord } from "./solvers.types";
-import { buildSeedSolvers } from "./solvers.seed";
 
+/**
+ * Orchestration layer for solver records.
+ *
+ * Business logic (counter initialisation, timestamp generation) lives here.
+ * All persistence is delegated to the injected ISolversRepository so the
+ * storage adapter can be swapped (in-memory → Prisma) without touching this
+ * service or anything above it.
+ */
 @Injectable()
 export class SolversService {
-  private readonly solvers = new Map<string, SolverRecord>();
-
-  constructor() {
-    this.seed();
-  }
+  constructor(
+    @Inject(SOLVERS_REPOSITORY)
+    private readonly repo: ISolversRepository,
+  ) {}
 
   getAll(): SolverRecord[] {
-    return [...this.solvers.values()];
+    return this.repo.findAll();
   }
 
   get(address: string): SolverRecord | undefined {
-    return this.solvers.get(address);
+    return this.repo.findByAddress(address);
   }
 
   register(
