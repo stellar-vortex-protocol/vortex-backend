@@ -11,6 +11,7 @@ import {
   Post,
   Query,
 } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { ApiTags } from "@nestjs/swagger";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
@@ -20,6 +21,7 @@ import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
+import { AppConfig } from "../config/configuration";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -28,6 +30,7 @@ export class IntentsController {
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
     private readonly intentsGateway: IntentsGateway,
+    private readonly configService: ConfigService<AppConfig>,
   ) {}
 
   @Get()
@@ -113,6 +116,14 @@ export class IntentsController {
     const solver = this.solversService.get(dto.solver);
     if (!solver?.isActive) {
       throw new ForbiddenException("Solver not registered or inactive");
+    }
+
+    const maxConcurrent = this.configService.get("maxConcurrentIntentsPerSolver", 10);
+    const currentCount = this.intentsService.getAcceptedCountBySolver(dto.solver);
+    if (currentCount >= maxConcurrent) {
+      throw new ForbiddenException(
+        `Solver has reached maximum concurrent accepted intents limit (${maxConcurrent})`,
+      );
     }
 
     const updated = this.intentsService.update(id, {

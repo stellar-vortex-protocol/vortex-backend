@@ -8,6 +8,7 @@ export interface AppConfig {
     solverRegistryContractId: string;
   };
   corsOrigin: string;
+  maxConcurrentIntentsPerSolver: number;
 }
 
 export default (): AppConfig => ({
@@ -20,4 +21,5 @@ export default (): AppConfig => ({
     solverRegistryContractId: process.env.SOLVER_REGISTRY_CONTRACT_ID ?? "",
   },
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
+  maxConcurrentIntentsPerSolver: parseInt(process.env.MAX_CONCURRENT_INTENTS_PER_SOLVER ?? "10", 10),
 });

@@ -40,6 +40,10 @@ export class IntentsService {
     return this.getAll().filter((i) => i.user.toLowerCase() === user.toLowerCase());
   }
 
+  getAcceptedCountBySolver(solver: string): number {
+    return this.getAll().filter((i) => i.state === "accepted" && i.solver === solver).length;
+  }
+
   update(id: string, patch: Partial<Intent>): Intent | null {
     const existing = this.intents.get(id);
     if (!existing) return null;
