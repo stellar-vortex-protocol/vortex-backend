@@ -103,6 +103,27 @@ manager.
 
 ## Docker
 
+### Full local stack (backend + Postgres)
+
+```bash
+docker compose up --build   # first run / after source changes
+docker compose up           # subsequent runs
+docker compose down -v      # tear down and remove volumes
+```
+
+`docker-compose.yml` starts PostgreSQL 16 and the backend together. The
+backend is reachable at `http://localhost:4000`; Swagger at `/docs`.
+
+### Database only (for `npm run dev` on the host)
+
+```bash
+docker compose up postgres
+# then in another terminal:
+npm install && cp .env.example .env && npm run dev
+```
+
+### Backend image only
+
 ```bash
 docker build -t vortex-backend .
 docker run -p 4000:4000 vortex-backend
@@ -119,6 +140,46 @@ flags to override them.
 - [x] **Soroban RPC reads** — health/ledger/network/account lookups via `/api/v1/chain/*`
 - [ ] **On-chain writes** — replace the in-memory intent store with real Soroban transactions (target design: [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md))
 - [x] **Solver WS client** — reference implementation for a solver bot (`npm run solver:demo`, see [`scripts/README.md`](./scripts/README.md))
+
+---
+
+## Intent State Machine
+
+An intent moves through the following states. Transitions are enforced by
+`IntentsController` and the background expiry sweeper.
+
+```mermaid
+stateDiagram-v2
+    [*] --> open : POST /api/v1/intents
+
+    open --> accepted  : POST /:id/accept\n(registered solver, before deadline)
+    open --> cancelled : POST /:id/cancel\n(intent owner only)
+    open --> expired   : deadline passed\n(sweeper / lazy check on accept)
+
+    accepted --> filled    : POST /:id/fill\n(same solver, before deadline,\nfillAmount ≥ minDstAmount)
+    accepted --> expired   : deadline passed\n(fill window closed)
+    accepted --> slashed   : solver failed to fill\n(on-chain settlement — roadmap)
+
+    filled    --> [*]
+    cancelled --> [*]
+    expired   --> [*]
+    slashed   --> [*]
+```
+
+### Transition rules
+
+| From       | To          | Trigger                                                           | Guard                                              |
+|------------|-------------|-------------------------------------------------------------------|----------------------------------------------------|
+| —          | `open`      | `POST /api/v1/intents`                                           | Valid payload, rate limit not exceeded             |
+| `open`     | `accepted`  | `POST /api/v1/intents/:id/accept`                                | Solver registered & active, has bond, before deadline |
+| `open`     | `cancelled` | `POST /api/v1/intents/:id/cancel`                                | Caller is the intent owner (verified by signature) |
+| `open`     | `expired`   | Sweeper tick or lazy check on `accept`                           | `deadline ≤ now`                                   |
+| `accepted` | `filled`    | `POST /api/v1/intents/:id/fill`                                  | Same solver, `fillAmount ≥ minDstAmount`, before deadline, valid signature |
+| `accepted` | `expired`   | Sweeper tick or lazy check on `fill`                             | `deadline ≤ now`                                   |
+| `accepted` | `slashed`   | On-chain settlement contract                                     | Solver failed to fill within window _(roadmap)_    |
+
+Terminal states (`filled`, `cancelled`, `expired`, `slashed`) are immutable —
+no further transitions are possible once an intent reaches one.
 
 ---
 

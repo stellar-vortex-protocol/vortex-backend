@@ -1,0 +1,68 @@
+# docker-compose.yml — local development stack
+#
+# Starts:
+#   - postgres  : PostgreSQL 16 database (matches .env.example credentials)
+#   - backend   : vortex-backend (built from local source, auto-migrates on start)
+#
+# Usage:
+#   docker compose up --build        # first run or after source changes
+#   docker compose up                # subsequent runs (uses cached image)
+#   docker compose down -v           # tear down and remove volumes
+#
+# The backend is reachable at http://localhost:4000
+# Swagger docs at              http://localhost:4000/docs
+# WebSocket feed at            ws://localhost:4000/ws
+#
+# To run only the database (and the backend via npm run dev on the host):
+#   docker compose up postgres
+#
+# Environment variables are loaded from .env if it exists; fall back to the
+# defaults defined in .env.example.  Never commit a filled-in .env file.
+
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vortex
+      POSTGRES_PASSWORD: vortex
+      POSTGRES_DB: vortex
+    ports:
+      # Expose 5432 so the backend running on the host (npm run dev) can also
+      # reach the database.  Change the host port if 5432 is already in use.
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vortex -d vortex"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Backend ─────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      # Use .env when it exists; if not, the image's own defaults apply.
+      # path is relative to the compose file.
+      - path: .env
+        required: false
+    environment:
+      # Override the DATABASE_URL to use the Docker network hostname.
+      # Values here take precedence over .env so the backend always finds
+      # the containerised postgres regardless of what .env says.
+      DATABASE_URL: postgresql://vortex:vortex@postgres:5432/vortex?schema=public
+      NODE_ENV: development
+      PORT: "4000"
+    ports:
+      - "4000:4000"
+
+volumes:
+  postgres_data:
