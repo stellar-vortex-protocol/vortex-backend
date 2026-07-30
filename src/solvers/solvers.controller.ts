@@ -1,6 +1,7 @@
-import { Controller, Get, NotFoundException, Param } from "@nestjs/common";
+import { Controller, Get, Post, Body, NotFoundException, Param } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { SolversService } from "./solvers.service";
+import { RegisterSolverDto } from "./dto/register-solver.dto";
 
 @ApiTags("solvers")
 @Controller("api/v1/solvers")
@@ -40,5 +41,19 @@ export class SolversController {
       avgFillTime: solver.avgFillTime,
       bondAmount: solver.bondAmount,
     };
+  }
+
+  @Post()
+  register(@Body() dto: RegisterSolverDto) {
+    const solver = this.solversService.register({
+      address: dto.address,
+      name: dto.name,
+      bondAmount: dto.bondAmount,
+      avgFillTime: dto.avgFillTime,
+      isActive: true,
+      supportedChains: dto.supportedChains,
+      supportedTokens: dto.supportedTokens,
+    });
+    return solver;
   }
 }
