@@ -8,6 +8,7 @@ import { IntentsModule } from "./intents/intents.module";
 import { SolversModule } from "./solvers/solvers.module";
 import { StatsModule } from "./stats/stats.module";
 import { SorobanModule } from "./soroban/soroban.module";
+import { RoutingModule } from "./routing/routing.module";
 import { PrismaModule } from "./prisma/prisma.module";
 
 @Module({
@@ -28,6 +29,7 @@ import { PrismaModule } from "./prisma/prisma.module";
     SolversModule,
     StatsModule,
     SorobanModule,
+    RoutingModule,
   ],
   controllers: [],
   providers: [

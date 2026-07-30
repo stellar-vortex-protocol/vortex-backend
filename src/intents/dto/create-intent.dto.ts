@@ -1,6 +1,7 @@
-import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min, MinLength } from "class-validator";
+import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { SupportedChain } from "../intents.types";
+import { IsValidAddress } from "../../common/validators/is-valid-address.validator";
 import { IsValidDeadline } from "../../common/validators/deadline.validator";
 
 const SUPPORTED_CHAINS: SupportedChain[] = [
@@ -24,8 +25,7 @@ export class CreateIntentDto {
   srcChain!: SupportedChain;
 
   @ApiProperty({ description: "Source token contract/address on srcChain" })
-  @IsString()
-  @MinLength(10)
+  @IsValidAddress()
   srcTokenAddress!: string;
 
   @ApiProperty({ description: "Source token symbol, e.g. USDC" })
@@ -45,7 +45,7 @@ export class CreateIntentDto {
 
   @ApiProperty({ description: "Destination Stellar token contract" })
   @IsString()
-  @MinLength(10)
+  @Matches(/^[A-Z0-9]{56}$/)
   dstTokenContract!: string;
 
   @ApiProperty({ description: "Destination token symbol, e.g. USDC" })
