@@ -187,6 +187,9 @@ export class IntentsController {
       throw new GoneException("Fill window has expired");
     }
 
+    // Verify the solver controls the claimed address
+    verifyStellarSignature(dto.solver, buildFillMessage(id, dto.solver), dto.signature);
+
     const fillAmount = BigInt(dto.fillAmount);
     let minAmount: bigint;
     try {
@@ -239,6 +242,9 @@ export class IntentsController {
     if (intent.state !== "open") {
       throw new ConflictException(`Cannot cancel intent in state: ${intent.state}`);
     }
+
+    // Verify the user controls the claimed address
+    verifyStellarSignature(dto.user, buildCancelMessage(id), dto.signature);
 
     const updated = this.intentsService.update(id, { state: "cancelled" });
 

@@ -52,6 +52,10 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService<AppConfig, true>);
   const port = configService.get("port", { infer: true });
+  const corsOrigin = configService.get("corsOrigin", { infer: true });
+
+  app.enableCors({ origin: corsOrigin });
+
   await app.listen(port);
   console.log(`\nVortex backend (Nest) running on :${port}`);
   console.log(`WS    → ws://localhost:${port}/ws`);

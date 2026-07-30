@@ -3,6 +3,7 @@ import { Test } from "@nestjs/testing";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { json } from "express";
 import { AppModule } from "../../src/app.module";
+import { AppConfig } from "../../src/config/configuration";
 import { HttpExceptionFilter } from "../../src/common/http-exception.filter";
 import { PrismaService } from "../../src/prisma/prisma.service";
 
@@ -37,6 +38,12 @@ export async function createTestApp(): Promise<INestApplication> {
   app.useWebSocketAdapter(new WsAdapter(app));
   app.useGlobalFilters(new HttpExceptionFilter());
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+
+  // Wire CORS the same way main.ts does so the e2e environment is faithful.
+  const configService = app.get(ConfigService<AppConfig, true>);
+  const corsOrigin = configService.get("corsOrigin", { infer: true });
+  app.enableCors({ origin: corsOrigin });
+
   await app.init();
   return app;
 }

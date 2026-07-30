@@ -1,5 +1,7 @@
 // Reference solver bot - see scripts/README.md.
 import WebSocket from "ws";
+import { Keypair } from "@stellar/stellar-sdk";
+import { buildAcceptMessage, buildFillMessage } from "../src/common/stellar-signature";
 
 const API_BASE = process.env.API_BASE ?? "http://localhost:4000";
 const WS_URL = process.env.WS_URL ?? "ws://localhost:4000/ws";
@@ -14,11 +16,19 @@ interface Intent {
   srcChain: string;
 }
 
+/** Sign a UTF-8 message with the solver keypair; return base64 signature. */
+function sign(message: string): string {
+  return keypair.sign(Buffer.from(message, "utf8")).toString("base64");
+}
+
 async function acceptIntent(intentId: string): Promise<boolean> {
+  const message = buildAcceptMessage(intentId, SOLVER_ADDRESS);
+  const signature = sign(message);
+
   const res = await fetch(`${API_BASE}/api/v1/intents/${intentId}/accept`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ solver: SOLVER_ADDRESS }),
+    body: JSON.stringify({ solver: SOLVER_ADDRESS, signature }),
   });
   if (!res.ok) {
     console.log(`[solver-bot] accept ${intentId} failed: ${res.status} ${await res.text()}`);
@@ -29,6 +39,9 @@ async function acceptIntent(intentId: string): Promise<boolean> {
 }
 
 async function fillIntent(intentId: string, minDstAmount: string): Promise<void> {
+  const message = buildFillMessage(intentId, SOLVER_ADDRESS);
+  const signature = sign(message);
+
   const res = await fetch(`${API_BASE}/api/v1/intents/${intentId}/fill`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -36,6 +49,7 @@ async function fillIntent(intentId: string, minDstAmount: string): Promise<void>
       solver: SOLVER_ADDRESS,
       fillAmount: minDstAmount,
       txHash: `demo-${Date.now()}`,
+      signature,
     }),
   });
   if (!res.ok) {
