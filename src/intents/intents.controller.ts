@@ -10,7 +10,10 @@ import {
   Param,
   Post,
   Query,
+  UseGuards,
 } from "@nestjs/common";
+import { ApiTags, ApiTooManyRequestsResponse } from "@nestjs/swagger";
+import { Throttle } from "@nestjs/throttler";
 import {
   ApiTags,
   ApiNotFoundResponse,
@@ -28,6 +31,7 @@ import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
+import { UserThrottlerGuard } from "./user-throttler.guard";
 import { ListIntentsDto } from "./dto/list-intents.dto";
 import { QuoteResponseDto } from "./dto/quote-response.dto";
 
@@ -88,6 +92,15 @@ export class IntentsController {
     return intent;
   }
 
+  /**
+   * Issue #44 — global IP throttle already applied via AppModule guard.
+   * Issue #45 — additionally throttle per dto.user: 10 creates / 60 s.
+   */
+  @Post()
+  @UseGuards(UserThrottlerGuard)
+  @ApiTooManyRequestsResponse({
+    description: "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)",
+  })
   @Get(":id/quote")
   getQuote(@Param("id") id: string) {
     const intent = this.intentsService.get(id);
@@ -232,7 +245,14 @@ export class IntentsController {
     return updated;
   }
 
+  /**
+   * Issue #44 — document 429 on quote too, since it's under the global guard.
+   */
   @Post("quote")
+  @ApiTooManyRequestsResponse({
+    description: "Rate limit exceeded — max 100 req/min per IP globally",
+  })
+  quote(@Body() dto: QuoteRequestDto) {
   @ApiOkResponse({ type: QuoteResponseDto })
   quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {
     const solvers = this.solversService.getAll().filter((s) => s.isActive);

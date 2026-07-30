@@ -4,6 +4,8 @@ import { ConfigService } from "@nestjs/config";
 import { ValidationPipe } from "@nestjs/common";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
+import helmet from "helmet";
+import { json } from "express";
 import { AppModule } from "./app.module";
 import { AppConfig } from "./config/configuration";
 import { LoggingInterceptor } from "./common/logging.interceptor";
@@ -11,6 +13,30 @@ import { HttpExceptionFilter } from "./common/http-exception.filter";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  // Issue #46 — explicit, tight body-size cap (DTOs are tiny)
+  app.use(json({ limit: "10kb" }));
+
+  // Issue #43 — baseline HTTP security headers via helmet.
+  // Swagger UI (/docs) inlines scripts and loads CDN assets, so we relax
+  // script-src and require-trusted-types-for only for that path.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          // Swagger UI bundles need inline scripts and CDN resources
+          scriptSrc: ["'self'", "'unsafe-inline'", "cdn.jsdelivr.net"],
+          styleSrc: ["'self'", "'unsafe-inline'", "cdn.jsdelivr.net"],
+          imgSrc: ["'self'", "data:", "cdn.jsdelivr.net"],
+          connectSrc: ["'self'"],
+        },
+      },
+      // Swagger UI uses inline event handlers; this policy would block it
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
+
   app.useWebSocketAdapter(new WsAdapter(app));
   app.useGlobalInterceptors(new LoggingInterceptor());
   app.useGlobalFilters(new HttpExceptionFilter());
