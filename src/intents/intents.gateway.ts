@@ -297,4 +297,11 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
     }
     return null;
   }
+
+  onModuleDestroy() {
+    for (const client of this.subscribers) {
+      client.close(1001, "Server shutting down");
+    }
+    this.subscribers.clear();
+  }
 }
