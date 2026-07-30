@@ -36,6 +36,18 @@ export class IntentsService {
     private readonly stellarTxService: StellarTxService,
   ) {
     this.seed();
+    this.sizeLogTimer = setInterval(() => this.logStoreSize(), STORE_SIZE_LOG_INTERVAL_MS);
+    // Allow the process to exit even if the timer is still active.
+    this.sizeLogTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    clearInterval(this.sizeLogTimer);
+  }
+
+  /** Logs the current intent map size so unbounded growth is observable. */
+  logStoreSize(): void {
+    this.logger.log(`[store-monitor] intents map size: ${this.intents.size}`);
   }
 
   create(data: Omit<Intent, "intentId" | "createdAt" | "state">, idempotencyKey?: string): Intent {
