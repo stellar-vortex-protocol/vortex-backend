@@ -1,9 +1,35 @@
+import { OnModuleDestroy } from "@nestjs/common";
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
 import { Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
 import { AppConfig } from "../config/configuration";
+
+const HEARTBEAT_INTERVAL_MS = 30_000;
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+declare const setInterval: (fn: (...args: any[]) => void, ms: number) => any;
+declare const clearInterval: (handle: any) => void;
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+@WebSocketGateway({ path: "/ws" })
+export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
+  private readonly subscribers = new Set<WebSocket>();
+  private readonly alive = new WeakMap<WebSocket, boolean>();
+  private heartbeatTimer: any;
+
+  constructor(private readonly intentsService: IntentsService) {
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
+  }
+
+  handleConnection(client: WebSocket) {
+    this.subscribers.add(client);
+    this.alive.set(client, true);
+
+    client.on("pong", () => {
+      this.alive.set(client, true);
+    });
 
 interface SubscriberFilter {
   chains?: string[];
@@ -102,6 +128,10 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
     }
   }
 
+  onModuleDestroy() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+  }
+
   broadcast(event: { type: string; [key: string]: unknown }) {
     const payload = JSON.stringify(event);
     for (const [client, filter] of this.subscribers) {
@@ -114,6 +144,29 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
     }
   }
 
+  getAliveCount(): number {
+    let count = 0;
+    for (const client of this.subscribers) {
+      if (this.alive.get(client) === true) count++;
+    }
+    return count;
+  }
+
+  private heartbeat() {
+    for (const client of this.subscribers) {
+      if (this.alive.get(client) === false) {
+        client.terminate();
+        this.subscribers.delete(client);
+        continue;
+      }
+
+      this.alive.set(client, false);
+      if (client.readyState === WebSocket.OPEN) {
+        client.ping();
+      }
+    }
+  }
+}
   private getEventChain(event: { type: string; [key: string]: unknown }): string | null {
     if (event.type === "intent_created" && event.intent) {
       return (event.intent as { srcChain?: string }).srcChain ?? null;
