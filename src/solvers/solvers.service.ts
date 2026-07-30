@@ -38,47 +38,44 @@ export class SolversService {
       totalVolume: "0",
       registeredAt: Math.floor(Date.now() / 1000),
     };
-    this.solvers.set(solver.address, solver);
-    return solver;
+    return this.repo.save(solver);
   }
 
   deregister(address: string): SolverRecord | undefined {
-    const solver = this.solvers.get(address);
-    if (solver) {
-      solver.isActive = false;
-      return solver;
-    }
-    return undefined;
+    const solver = this.repo.findByAddress(address);
+    if (!solver) return undefined;
+    const updated = { ...solver, isActive: false };
+    return this.repo.save(updated);
   }
 
   markLive(address: string): SolverRecord | undefined {
-    const solver = this.solvers.get(address);
-    if (solver) {
-      solver.isActive = true;
-      return solver;
-    }
-    return undefined;
+    const solver = this.repo.findByAddress(address);
+    if (!solver) return undefined;
+    const updated = { ...solver, isActive: true };
+    return this.repo.save(updated);
   }
 
   markOffline(address: string): SolverRecord | undefined {
-    const solver = this.solvers.get(address);
-    if (solver) {
-      solver.isActive = false;
-      return solver;
-    }
-    return undefined;
+    const solver = this.repo.findByAddress(address);
+    if (!solver) return undefined;
+    const updated = { ...solver, isActive: false };
+    return this.repo.save(updated);
+  }
+
   deactivate(address: string): SolverRecord | null {
-    const solver = this.solvers.get(address);
+    const solver = this.repo.findByAddress(address);
     if (!solver) return null;
     const updated = { ...solver, isActive: false };
-    this.solvers.set(address, updated);
-    return updated;
+    return this.repo.save(updated);
   }
 
   reactivate(address: string): SolverRecord | null {
-    const solver = this.solvers.get(address);
+    const solver = this.repo.findByAddress(address);
     if (!solver) return null;
     const updated = { ...solver, isActive: true };
+    return this.repo.save(updated);
+  }
+
   /**
    * Records that a solver accepted an intent and then missed its fill
    * deadline. Bumps the local fillsFailed counter for read paths (e.g. the
@@ -87,16 +84,9 @@ export class SolversService {
    * once event ingestion exists (see docs/architecture/onchain-settlement.md).
    */
   recordFailedFill(address: string): SolverRecord | null {
-    const solver = this.solvers.get(address);
+    const solver = this.repo.findByAddress(address);
     if (!solver) return null;
     const updated = { ...solver, fillsFailed: solver.fillsFailed + 1 };
-    this.solvers.set(address, updated);
-    return updated;
-  }
-
-  private seed() {
-    for (const s of buildSeedSolvers()) {
-      this.solvers.set(s.address, s);
-    }
+    return this.repo.save(updated);
   }
 }

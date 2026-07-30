@@ -13,7 +13,7 @@ function makeContext(method = "GET", originalUrl = "/api/v1/intents", statusCode
   } as any;
 }
 
-function makeHandler(observable = of({ data: "ok" })) {
+function makeHandler(observable: import("rxjs").Observable<unknown> = of({ data: "ok" })) {
   return { handle: () => observable } as any;
 }
 

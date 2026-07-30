@@ -31,7 +31,8 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
   }
 
   async sweep() {
-    const now = Math.floor(Date.now() / 1000);
+    const startMs = Date.now();
+    const now = Math.floor(startMs / 1000);
     let expiredCount = 0;
 
     for (const intent of this.intentsService.getByState("open")) {
@@ -52,17 +53,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
 
     const durationMs = Date.now() - startMs;
 
-    // ── metrics ──────────────────────────────────────────────────────────────
-    MetricsRegistry.sweeper.sweepDurationMs.observe(durationMs);
-    if (expiredCount > 0) {
-      MetricsRegistry.sweeper.expiredTotal.inc(expiredCount);
-    }
-    // ─────────────────────────────────────────────────────────────────────────
-
-    this.logger.debug(
-      `sweep complete: expired=${expiredCount} duration=${durationMs}ms ` +
-        `totalExpired=${MetricsRegistry.sweeper.expiredTotal.get()}`,
-    );
+    this.logger.debug(`sweep complete: expired=${expiredCount} duration=${durationMs}ms`);
 
     if (expiredCount > 0) {
       this.logger.log(`[sweeper] Expired ${expiredCount} intent(s) in ${durationMs}ms`);
@@ -77,7 +68,11 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async slashMissedFill(intentId: string, solver: string | undefined, now: number) {
+  private async slashMissedFill(
+    intentId: string,
+    solver: string | undefined,
+    now: number,
+  ) {
     const reason = "accepted intent not filled before deadline";
 
     this.intentsService.update(intentId, {

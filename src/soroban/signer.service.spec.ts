@@ -7,7 +7,7 @@ import { SorobanService } from "./soroban.service";
 
 function configWith(signerSecretKey: string, network: AppConfig["stellar"]["network"] = "testnet") {
   const values: Record<string, unknown> = {
-    "stellar.signerSecretKey": signerSecretKey,
+    "stellar.signingKey": signerSecretKey,
     "stellar.network": network,
   };
   return { get: (path: string) => values[path] } as ConfigService<AppConfig, true>;

@@ -44,7 +44,7 @@ export class SignerService {
     configService: ConfigService<AppConfig, true>,
     private readonly sorobanService: SorobanService,
   ) {
-    this.secretKey = configService.get("stellar.signerSecretKey", { infer: true });
+    this.secretKey = configService.get("stellar.signingKey", { infer: true });
     this.networkPassphrase = NETWORK_PASSPHRASES[configService.get("stellar.network", { infer: true })];
   }
 

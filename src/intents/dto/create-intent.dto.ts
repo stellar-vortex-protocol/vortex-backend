@@ -1,4 +1,4 @@
-import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min } from "class-validator";
+import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min, MinLength } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { SupportedChain } from "../intents.types";
 import { IsValidAddress } from "../../common/validators/is-valid-address.validator";

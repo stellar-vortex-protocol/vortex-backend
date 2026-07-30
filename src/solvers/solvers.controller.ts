@@ -1,12 +1,11 @@
 import {
+  Body,
   Controller,
   Get,
   NotFoundException,
   Param,
   Post,
 } from "@nestjs/common";
-import { Controller, Get, NotFoundException, Param, Post } from "@nestjs/common";
-import { Controller, Get, Post, Body, NotFoundException, Param } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { SolversService } from "./solvers.service";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
@@ -16,17 +15,14 @@ import { RegisterSolverDto } from "./dto/register-solver.dto";
 export class SolversController {
   constructor(private readonly solversService: SolversService) {}
 
-  @Post("register")
+  @Post()
   register(@Body() dto: RegisterSolverDto) {
-    // Prove the caller controls the claimed solver address before registering.
-    verifyStellarSignature(dto.address, buildRegisterMessage(dto.address), dto.signature);
-
     const solver = this.solversService.register({
       address: dto.address,
       name: dto.name,
       bondAmount: dto.bondAmount,
-      isActive: dto.isActive ?? false,
-      avgFillTime: 0,
+      avgFillTime: dto.avgFillTime,
+      isActive: true,
       supportedChains: dto.supportedChains,
       supportedTokens: dto.supportedTokens,
     });
@@ -55,10 +51,7 @@ export class SolversController {
 
     const total = solver.fillsCompleted + solver.fillsFailed;
     const successRate = total > 0 ? solver.fillsCompleted / total : 0;
-    const ageDays = Math.max(
-      0,
-      (Date.now() / 1000 - solver.registeredAt) / 86400,
-    );
+    const ageDays = Math.max(0, (Date.now() / 1000 - solver.registeredAt) / 86400);
     const reputationScore = parseFloat(
       (successRate * Math.exp(-ageDays / 180)).toFixed(4),
     );
@@ -81,6 +74,8 @@ export class SolversController {
     const solver = this.solversService.deregister(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return { ...solver, withdrawalStatus: "pending" };
+  }
+
   @Post(":address/deactivate")
   deactivate(@Param("address") address: string) {
     const solver = this.solversService.deactivate(address);
@@ -92,17 +87,6 @@ export class SolversController {
   reactivate(@Param("address") address: string) {
     const solver = this.solversService.reactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
-  @Post()
-  register(@Body() dto: RegisterSolverDto) {
-    const solver = this.solversService.register({
-      address: dto.address,
-      name: dto.name,
-      bondAmount: dto.bondAmount,
-      avgFillTime: dto.avgFillTime,
-      isActive: true,
-      supportedChains: dto.supportedChains,
-      supportedTokens: dto.supportedTokens,
-    });
     return solver;
   }
 }
