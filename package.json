@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "seed": "tsx scripts/seed.ts",
+    "solver:demo": "tsx scripts/solver-bot.ts"
     "solver:demo": "tsx scripts/solver-bot.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

@@ -36,6 +36,14 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     for (const intent of this.intentsService.getByState("open")) {
       if (intent.deadline <= now) {
         this.intentsService.update(intent.intentId, { state: "expired" });
+        // Audit trail (issue #62): system-driven expiration.
+        this.intentsService.appendAuditEntry(
+          intent.intentId,
+          "expired",
+          "system",
+          "deadline passed",
+          { deadline: intent.deadline, sweepedAt: now },
+        );
         expiredCount++;
         this.intentsGateway.broadcast({ type: "intent_expired", intentId: intent.intentId });
       }

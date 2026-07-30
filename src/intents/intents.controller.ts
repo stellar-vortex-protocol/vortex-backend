@@ -241,6 +241,10 @@ export class IntentsController {
     }
 
     const updated = this.intentsService.update(id, { state: "cancelled" });
+
+    // Audit trail (issue #62): record who cancelled and when.
+    this.intentsService.appendAuditEntry(id, "cancelled", dto.user, "user cancelled");
+
     this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
     return updated;
   }
