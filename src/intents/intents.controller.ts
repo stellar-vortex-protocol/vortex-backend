@@ -29,6 +29,7 @@ import { SolversService } from "../solvers/solvers.service";
 import { TokensService } from "../tokens/tokens.service";
 import { RoutingService } from "../routing/routing.service";
 import { CreateIntentDto } from "./dto/create-intent.dto";
+import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
@@ -152,7 +153,7 @@ export class IntentsController {
         priceUSD: dstToken?.priceUSD,
       },
       minDstAmount: dto.minDstAmount,
-      deadline: dto.deadline ?? now + 1800,
+      deadline: dto.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[dto.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
     }, dto.idempotencyKey);
     this.intentsGateway.broadcast({ type: "intent_created", intent });
     return intent;
@@ -281,39 +282,43 @@ export class IntentsController {
   @ApiTooManyRequestsResponse({
     description: "Rate limit exceeded — max 100 req/min per IP globally",
   })
-  quote(@Body() dto: QuoteRequestDto) {
   @ApiOkResponse({ type: QuoteResponseDto })
   quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {
     const solvers = this.solversService.getAll().filter((s) => s.isActive);
     const chainData = this.tokensService.getByChain(dto.srcChain);
     const stellarData = this.tokensService.getStellarTokens();
-    
+
     const srcTokenList = dto.srcChain === "stellar" ? stellarData.tokens : chainData.tokens;
-    const srcToken = srcTokenList.find((t: any) => 
+    const srcToken = srcTokenList.find((t: any) =>
       dto.srcChain === "stellar" ? t.contract === dto.srcTokenAddress : t.address === dto.srcTokenAddress
     );
     const dstToken = stellarData.tokens.find((t: any) => t.contract === dto.dstTokenContract);
-    
-    const quotes = solvers
-      .map((solver) => {
-        const variance = 1 - Math.random() * 0.008;
-        const dstAmount = Math.floor(Number(dto.srcAmount) * variance);
-        const fee = Math.floor(dstAmount * 0.0005);
-        const route = srcToken && dstToken 
-          ? this.routingService.createDirectRoute(
-              { address: dto.srcTokenAddress, symbol: dto.srcTokenSymbol, name: dto.srcTokenSymbol, decimals: dto.srcTokenDecimals, chain: dto.srcChain, priceUSD: srcToken.priceUSD },
-              { address: dto.dstTokenContract, symbol: dto.dstTokenSymbol, name: dto.dstTokenSymbol, decimals: dto.dstTokenDecimals, chain: "stellar", priceUSD: dstToken.priceUSD },
-              solver.address
-            )
-          : null;
+
     const srcAmountBigInt = BigInt(dto.srcAmount);
+    const dstPriceUSD: number = dstToken?.priceUSD ?? 1;
+    const srcPriceUSD: number = srcToken?.priceUSD ?? dstPriceUSD;
 
     const quotes = solvers
       .map((solver) => {
-        // Variance: 0-0.8% downside; represented as 992-1000 in 1000ths
-        const varianceScaled = 992 + Math.floor(Math.random() * 9); // 992-1000
+        // Issue #118: weight variance by solver performance history.
+        const totalFills = solver.fillsCompleted + solver.fillsFailed;
+        const successRate = totalFills > 0 ? solver.fillsCompleted / totalFills : 0.5;
+        const fillCountScore = Math.min(solver.fillsCompleted / 100, 1);
+        const perfScore = successRate * 0.7 + fillCountScore * 0.3;
+        const variancePct = (1 - perfScore) * 0.008;
+        const varianceScaled = Math.round(1000 * (1 - variancePct));
         const dstAmount = (srcAmountBigInt * BigInt(varianceScaled)) / BigInt(1000);
         const fee = (dstAmount * BigInt(5)) / BigInt(10000); // 0.05%
+
+        // Issue #126: compute USD fee total and price impact.
+        const feeUnits = Number(fee) / Math.pow(10, dstToken?.decimals ?? 7);
+        const totalFeesUSD = feeUnits * dstPriceUSD;
+        const srcUnits = Number(srcAmountBigInt) / Math.pow(10, srcToken?.decimals ?? 7);
+        const dstUnits = Number(dstAmount) / Math.pow(10, dstToken?.decimals ?? 7);
+        const priceImpact = srcPriceUSD > 0 && dstPriceUSD > 0
+          ? Math.max(0, 1 - (dstUnits * dstPriceUSD) / (srcUnits * srcPriceUSD))
+          : 0;
+
         return {
           solver: solver.address,
           solverName: solver.name,
@@ -321,24 +326,27 @@ export class IntentsController {
           fee: fee.toString(),
           fillTime: solver.avgFillTime + Math.floor(Math.random() * 30),
           expiresAt: Math.floor(Date.now() / 1000) + 60,
-          route,
+          totalFeesUSD,
+          priceImpact,
         };
       })
       .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
 
-    // Persist quoted amount if intentId is provided
     if (dto.intentId && quotes.length > 0) {
       this.intentsService.update(dto.intentId, { quotedDstAmount: quotes[0].dstAmount });
     }
 
+    const best = quotes[0] ?? null;
     return {
       quotes,
-      bestQuote: quotes[0] ?? null,
+      bestQuote: best,
       srcChain: dto.srcChain,
       srcTokenSymbol: dto.srcTokenSymbol,
       srcAmount: dto.srcAmount,
       dstTokenSymbol: dto.dstTokenSymbol,
-      estimatedFillTime: quotes[0]?.fillTime ?? 0,
+      estimatedFillTime: best?.fillTime ?? 0,
+      totalFeesUSD: best?.totalFeesUSD ?? 0,
+      priceImpact: best?.priceImpact ?? 0,
     };
   }
 }

@@ -14,6 +14,23 @@ export type FeePercentile =
   | "p99"
   | "max";
 
+/**
+ * Default fill-window in seconds per source chain.
+ * Chains with slower finality get a longer window.
+ */
+export const CHAIN_DEADLINE_DEFAULTS: Record<string, number> = {
+  stellar: 900,    // ~15 min — fast finality
+  base: 1800,      // ~30 min
+  optimism: 1800,
+  arbitrum: 1800,
+  ethereum: 3600,  // ~1 hr — slower finality
+  polygon: 2700,   // ~45 min
+  avalanche: 1800,
+};
+
+/** Fallback when chain is not in the map. */
+export const DEFAULT_DEADLINE_SECONDS = 1800;
+
 export interface AppConfig {
   nodeEnv: string;
   port: number;
