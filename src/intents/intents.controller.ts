@@ -84,9 +84,9 @@ export class IntentsController {
   }
 
   @Post()
-  create(@Body() dto: CreateIntentDto) {
+  async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
-    const intent = this.intentsService.create({
+    const intent = await this.intentsService.create({
       user: dto.user,
       srcChain: dto.srcChain,
       srcToken: {
