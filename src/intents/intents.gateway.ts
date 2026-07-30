@@ -1,3 +1,23 @@
+import {
+  OnGatewayConnection,
+  OnGatewayDisconnect,
+  WebSocketGateway,
+} from "@nestjs/websockets";
+import { WebSocket } from "ws";
+import { IntentsService } from "./intents.service";
+import { SolversService } from "../solvers/solvers.service";
+
+@WebSocketGateway({ path: "/ws" })
+export class IntentsGateway
+  implements OnGatewayConnection, OnGatewayDisconnect
+{
+  private readonly subscribers = new Set<WebSocket>();
+  private readonly solverConnections = new Map<WebSocket, string>();
+
+  constructor(
+    private readonly intentsService: IntentsService,
+    private readonly solversService: SolversService,
+  ) {}
 import { OnModuleDestroy } from "@nestjs/common";
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
 import { Logger } from "@nestjs/common";
@@ -77,7 +97,12 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect,
   }
 
   handleConnection(client: WebSocket) {
+    const solverAddress = this.getSolverAddress(client);
     this.subscribers.add(client);
+    if (solverAddress) {
+      this.solverConnections.set(client, solverAddress);
+      this.solversService.markLive(solverAddress);
+    }
     this.alive.set(client, true);
 
     client.on("pong", () => {
@@ -152,6 +177,8 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
       this.logger.debug(`WS client error/drop — active subscribers: ${this.subscribers.size}`);
     });
 
+    client.send(
+      JSON.stringify({ type: "connected", message: "Vortex intent stream" }),
     logger.info(`ws client connected (subscribers=${this.subscribers.size})`);
 
     const currentSeq = this.nextSeq - 1;
@@ -171,6 +198,11 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
   }
 
   handleDisconnect(client: WebSocket) {
+    const solverAddress = this.solverConnections.get(client);
+    if (solverAddress) {
+      this.solversService.markOffline(solverAddress);
+    }
+    this.solverConnections.delete(client);
     this.subscribers.delete(client);
     this.logger.debug(`WS client disconnected — active subscribers: ${this.subscribers.size}`);
   }
@@ -195,6 +227,11 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
   onModuleDestroy() {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+  }
+
+  private getSolverAddress(client: WebSocket): string | undefined {
+    const match = /(?:^|&)solver=([^&]+)/.exec(client.url ?? "");
+    return match ? decodeURIComponent(match[1]) : undefined;
   }
 
   broadcast(event: { type: string; [key: string]: unknown }) {

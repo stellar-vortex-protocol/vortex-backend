@@ -6,6 +6,7 @@ import { buildAcceptMessage, buildFillMessage } from "../src/common/stellar-sign
 const API_BASE = process.env.API_BASE ?? "http://localhost:4000";
 const WS_URL = process.env.WS_URL ?? "ws://localhost:4000/ws";
 const SOLVER_ADDRESS = process.env.SOLVER_ADDRESS ?? "SOLVER_ALPHA";
+const MIN_MARGIN_BPS = Number(process.env.MIN_MARGIN_BPS ?? "0");
 const SOLVER_CHAINS = (process.env.SOLVER_CHAINS ?? "stellar,ethereum,base,polygon,arbitrum,optimism,avalanche").split(",");
 
 interface Intent {
@@ -37,13 +38,19 @@ async function acceptIntent(intentId: string): Promise<boolean> {
     body: JSON.stringify({ solver: SOLVER_ADDRESS, signature }),
   });
   if (!res.ok) {
-    console.log(`[solver-bot] accept ${intentId} failed: ${res.status} ${await res.text()}`);
+    console.log(
+      `[solver-bot] accept ${intentId} failed: ${res.status} ${await res.text()}`,
+    );
     return false;
   }
   console.log(`[solver-bot] accepted ${intentId}`);
   return true;
 }
 
+async function fillIntent(
+  intentId: string,
+  minDstAmount: string,
+): Promise<void> {
 async function fillIntent(intentId: string, minDstAmount: string): Promise<void> {
   const message = buildFillMessage(intentId, SOLVER_ADDRESS);
   const signature = sign(message);
@@ -59,7 +66,9 @@ async function fillIntent(intentId: string, minDstAmount: string): Promise<void>
     }),
   });
   if (!res.ok) {
-    console.log(`[solver-bot] fill ${intentId} failed: ${res.status} ${await res.text()}`);
+    console.log(
+      `[solver-bot] fill ${intentId} failed: ${res.status} ${await res.text()}`,
+    );
     return;
   }
   console.log(`[solver-bot] filled ${intentId}`);
@@ -70,6 +79,16 @@ async function tryFillOpenIntent(intent: Intent): Promise<void> {
   if (intent.state !== "open" || intent.deadline <= now) return;
   if (!SOLVER_CHAINS.includes(intent.srcChain)) {
     console.log(`[solver-bot] skipping ${intent.intentId} on ${intent.srcChain} (not subscribed)`);
+    return;
+  }
+
+  if (
+    MIN_MARGIN_BPS > 0 &&
+    Number(intent.minDstAmount) < 1_000_000 * (MIN_MARGIN_BPS / 10000)
+  ) {
+    console.log(
+      `[solver-bot] skipped ${intent.intentId} below min margin ${MIN_MARGIN_BPS} bps`,
+    );
     return;
   }
 
@@ -111,6 +130,9 @@ function main() {
         break;
 
       case "snapshot":
+        console.log(
+          `[solver-bot] snapshot: ${event.intents.length} open intent(s)`,
+        );
         console.log(`[solver-bot] snapshot: ${(event.intents as Intent[]).length} open intent(s) seq=${event.seq ?? 0}`);
         for (const intent of event.intents as Intent[]) {
           void tryFillOpenIntent(intent);
