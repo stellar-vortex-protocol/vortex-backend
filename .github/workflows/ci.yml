@@ -35,8 +35,11 @@ jobs:
       - run: npm audit --audit-level=high
 
   backend:
-    name: Backend (Nest)
+    name: Backend (Nest) – Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
 
     # Spin up a PostgreSQL service container so Prisma can connect during the
     # migrate step (migrate deploy requires a live DB).
@@ -64,6 +67,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
+          node-version: ${{ matrix.node-version }}
+      - run: npm install
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:e2e
           node-version: 20
           cache: npm
 
