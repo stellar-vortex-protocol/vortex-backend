@@ -7,20 +7,36 @@ describe("HealthController (e2e)", () => {
 
   beforeAll(async () => {
     app = await createTestApp();
-  });
+  }, 30000);
 
   afterAll(async () => {
     await app.close();
   });
 
-  it("GET /health returns service status", async () => {
+  it("GET /health returns service status with db field", async () => {
     const res = await request(app.getHttpServer()).get("/health").expect(200);
 
+    // Top-level fields are always present.
     expect(res.body).toMatchObject({
       status: "ok",
       service: "vortex-backend",
       network: "stellar-testnet",
     });
     expect(typeof res.body.uptime).toBe("number");
+
+    // db field is always present regardless of connectivity.
+    expect(res.body.db).toBeDefined();
+    expect(["ok", "unreachable"]).toContain(res.body.db.status);
+
+    if (res.body.db.status === "ok") {
+      // When the database is reachable latencyMs must be a non-negative number.
+      expect(typeof res.body.db.latencyMs).toBe("number");
+      expect(res.body.db.latencyMs).toBeGreaterThanOrEqual(0);
+      expect(res.body.db.error).toBeUndefined();
+    } else {
+      // When the database is unreachable an error message must be present.
+      expect(typeof res.body.db.error).toBe("string");
+      expect(res.body.db.latencyMs).toBeUndefined();
+    }
   });
 });
