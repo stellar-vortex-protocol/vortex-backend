@@ -130,6 +130,41 @@ export class IntentsService {
     return this.repository.update(id, patch) as Intent | null;
   }
 
+  /**
+   * Atomically accept an intent only if it is currently "open".
+   * Mirrors the DB pattern: UPDATE intents SET state='accepted' WHERE id=$1 AND state='open' RETURNING *
+   * Returns null when the intent is not found or is not in the "open" state (already taken).
+   */
+  acceptIfOpen(id: string, solver: string): Intent | null {
+    const existing = this.intents.get(id);
+    if (!existing || existing.state !== "open") return null;
+
+    const now = Math.floor(Date.now() / 1000);
+    const updated: Intent = {
+      ...existing,
+      state: "accepted",
+      solver,
+      deadline: now + 300,
+    };
+    this.intents.set(id, updated);
+    return updated;
+  }
+
+  /**
+   * Atomically fill an intent only if it is currently "accepted" by the given solver.
+   * Mirrors the DB pattern:
+   *   UPDATE intents SET state='filled', ... WHERE id=$1 AND state='accepted' AND solver=$2 RETURNING *
+   * Returns null when the intent is not found, not accepted, or assigned to a different solver.
+   */
+  fillIfAccepted(id: string, solver: string, patch: Omit<Partial<Intent>, "state" | "solver">): Intent | null {
+    const existing = this.intents.get(id);
+    if (!existing || existing.state !== "accepted" || existing.solver !== solver) return null;
+
+    const updated: Intent = { ...existing, ...patch, state: "filled" };
+    this.intents.set(id, updated);
+    return updated;
+  }
+
   private seed() {
     const now = Math.floor(Date.now() / 1000);
     for (const data of buildSeedIntents(now)) {

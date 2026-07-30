@@ -137,9 +137,6 @@ export class IntentsController {
   accept(@Param("id") id: string, @Body() dto: AcceptIntentDto) {
     const intent = this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
-    if (intent.state !== "open") {
-      throw new ConflictException(`Intent is ${intent.state}, cannot accept`);
-    }
 
     const now = Math.floor(Date.now() / 1000);
     if (intent.deadline <= now) {
@@ -152,11 +149,12 @@ export class IntentsController {
       throw new ForbiddenException("Solver not registered or inactive");
     }
 
-    const updated = this.intentsService.update(id, {
-      state: "accepted",
-      solver: dto.solver,
-      deadline: now + 300, // 5-minute fill window
-    });
+    const updated = this.intentsService.acceptIfOpen(id, dto.solver);
+    if (!updated) {
+      const current = this.intentsService.get(id);
+      throw new ConflictException(`Intent is ${current?.state ?? "unknown"}, cannot accept`);
+    }
+
     this.intentsGateway.broadcast({ type: "intent_accepted", intentId: id, solver: dto.solver });
     return updated;
   }
@@ -170,12 +168,6 @@ export class IntentsController {
   fill(@Param("id") id: string, @Body() dto: FillIntentDto) {
     const intent = this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
-    if (intent.state !== "accepted") {
-      throw new ConflictException(`Intent is ${intent.state}, cannot fill`);
-    }
-    if (intent.solver !== dto.solver) {
-      throw new ForbiddenException("Wrong solver for this intent");
-    }
 
     const now = Math.floor(Date.now() / 1000);
     if (intent.deadline <= now) {
@@ -201,12 +193,19 @@ export class IntentsController {
       });
     }
 
-    const updated = this.intentsService.update(id, {
-      state: "filled",
+    const updated = this.intentsService.fillIfAccepted(id, dto.solver, {
       filledAt: now,
       fillAmount: dto.fillAmount,
       txHash: dto.txHash,
     });
+    if (!updated) {
+      const current = this.intentsService.get(id);
+      if (current?.solver !== dto.solver) {
+        throw new ForbiddenException("Wrong solver for this intent");
+      }
+      throw new ConflictException(`Intent is ${current?.state ?? "unknown"}, cannot fill`);
+    }
+
     this.intentsGateway.broadcast({
       type: "intent_filled",
       intentId: id,
