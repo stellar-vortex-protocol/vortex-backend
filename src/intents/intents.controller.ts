@@ -28,6 +28,7 @@ import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
+import { ListIntentsDto } from "./dto/list-intents.dto";
 import { QuoteResponseDto } from "./dto/quote-response.dto";
 
 @ApiTags("intents")
@@ -40,6 +41,7 @@ export class IntentsController {
   ) {}
 
   @Get()
+  list(@Query() dto: ListIntentsDto) {
   @ApiBadRequestResponse({ description: "Invalid limit or offset" })
   list(
     @Query("state") state?: string,
@@ -50,10 +52,12 @@ export class IntentsController {
   ) {
     let intents = this.intentsService.getAll();
 
-    if (state) intents = intents.filter((i) => i.state === state);
-    if (user) intents = intents.filter((i) => i.user.toLowerCase() === user.toLowerCase());
-    if (chain) intents = intents.filter((i) => i.srcChain === chain);
+    if (dto.state) intents = intents.filter((i) => i.state === dto.state);
+    if (dto.user) intents = intents.filter((i) => i.user.toLowerCase() === dto.user.toLowerCase());
+    if (dto.chain) intents = intents.filter((i) => i.srcChain === dto.chain);
 
+    const limit = Math.min(dto.limit, 100);
+    const offset = dto.offset;
     const limit = parseInt(limitRaw, 10);
     if (limit > 100) {
       throw new BadRequestException("Limit exceeds maximum allowed value of 100");
