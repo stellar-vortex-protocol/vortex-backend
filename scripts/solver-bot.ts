@@ -5,26 +5,15 @@ import { buildAcceptMessage, buildFillMessage } from "../src/common/stellar-sign
 
 const API_BASE = process.env.API_BASE ?? "http://localhost:4000";
 const WS_URL = process.env.WS_URL ?? "ws://localhost:4000/ws";
-
-// The bot requires a Stellar secret key (S...) to sign requests.
-// Set SOLVER_SECRET to the solver keypair's secret key.
-// The derived public key (G...) is used as the solver address.
-const SOLVER_SECRET = process.env.SOLVER_SECRET;
-if (!SOLVER_SECRET) {
-  console.error("[solver-bot] SOLVER_SECRET env var is required (Stellar secret key S...)");
-  process.exit(1);
-}
-
-const keypair = Keypair.fromSecret(SOLVER_SECRET);
-const SOLVER_ADDRESS = keypair.publicKey();
-
-console.log(`[solver-bot] solver address: ${SOLVER_ADDRESS}`);
+const SOLVER_ADDRESS = process.env.SOLVER_ADDRESS ?? "SOLVER_ALPHA";
+const SOLVER_CHAINS = (process.env.SOLVER_CHAINS ?? "stellar,ethereum,base,polygon,arbitrum,optimism,avalanche").split(",");
 
 interface Intent {
   intentId: string;
   state: string;
   minDstAmount: string;
   deadline: number;
+  srcChain: string;
 }
 
 /** Sign a UTF-8 message with the solver keypair; return base64 signature. */
@@ -73,6 +62,10 @@ async function fillIntent(intentId: string, minDstAmount: string): Promise<void>
 async function tryFillOpenIntent(intent: Intent): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   if (intent.state !== "open" || intent.deadline <= now) return;
+  if (!SOLVER_CHAINS.includes(intent.srcChain)) {
+    console.log(`[solver-bot] skipping ${intent.intentId} on ${intent.srcChain} (not subscribed)`);
+    return;
+  }
 
   const accepted = await acceptIntent(intent.intentId);
   if (!accepted) return;
@@ -82,6 +75,7 @@ async function tryFillOpenIntent(intent: Intent): Promise<void> {
 
 function main() {
   console.log(`[solver-bot] connecting as ${SOLVER_ADDRESS} to ${WS_URL}`);
+  console.log(`[solver-bot] subscribed chains: ${SOLVER_CHAINS.join(", ")}`);
   const ws = new WebSocket(WS_URL);
 
   ws.on("message", (raw) => {
@@ -90,6 +84,10 @@ function main() {
     switch (event.type) {
       case "connected":
         console.log(`[solver-bot] ${event.message}`);
+        ws.send(JSON.stringify({ type: "subscribe", chains: SOLVER_CHAINS }));
+        break;
+      case "subscribed":
+        console.log(`[solver-bot] subscribed with filter: ${JSON.stringify(event.filter)}`);
         break;
       case "snapshot":
         console.log(`[solver-bot] snapshot: ${event.intents.length} open intent(s)`);
@@ -98,7 +96,7 @@ function main() {
         }
         break;
       case "intent_created":
-        console.log(`[solver-bot] new intent ${event.intent.intentId}`);
+        console.log(`[solver-bot] new intent ${event.intent.intentId} on ${event.intent.srcChain}`);
         void tryFillOpenIntent(event.intent as Intent);
         break;
       case "intent_accepted":

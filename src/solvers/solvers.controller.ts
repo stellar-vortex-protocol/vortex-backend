@@ -1,8 +1,8 @@
-import { Body, Controller, Get, NotFoundException, Param, Post } from "@nestjs/common";
+import { Controller, Get, NotFoundException, Param, Post } from "@nestjs/common";
+import { Controller, Get, Post, Body, NotFoundException, Param } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { SolversService } from "./solvers.service";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
-import { verifyStellarSignature, buildRegisterMessage } from "../common/stellar-signature";
 
 @ApiTags("solvers")
 @Controller("api/v1/solvers")
@@ -59,5 +59,30 @@ export class SolversController {
       avgFillTime: solver.avgFillTime,
       bondAmount: solver.bondAmount,
     };
+  }
+
+  @Post(":address/deactivate")
+  deactivate(@Param("address") address: string) {
+    const solver = this.solversService.deactivate(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+    return solver;
+  }
+
+  @Post(":address/reactivate")
+  reactivate(@Param("address") address: string) {
+    const solver = this.solversService.reactivate(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+  @Post()
+  register(@Body() dto: RegisterSolverDto) {
+    const solver = this.solversService.register({
+      address: dto.address,
+      name: dto.name,
+      bondAmount: dto.bondAmount,
+      avgFillTime: dto.avgFillTime,
+      isActive: true,
+      supportedChains: dto.supportedChains,
+      supportedTokens: dto.supportedTokens,
+    });
+    return solver;
   }
 }

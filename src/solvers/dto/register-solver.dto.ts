@@ -1,5 +1,5 @@
-import { IsArray, IsBoolean, IsIn, IsOptional, IsString, Matches, MinLength } from "class-validator";
-import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import { IsIn, IsInt, IsNotEmpty, IsString, MinLength, Min, IsArray } from "class-validator";
+import { ApiProperty } from "@nestjs/swagger";
 import { SupportedChain } from "../../intents/intents.types";
 
 const SUPPORTED_CHAINS: SupportedChain[] = [
@@ -13,42 +13,33 @@ const SUPPORTED_CHAINS: SupportedChain[] = [
 ];
 
 export class RegisterSolverDto {
-  @ApiProperty({ description: "Stellar G-address of the solver" })
+  @ApiProperty({ description: "Solver's Stellar address" })
   @IsString()
   @MinLength(10)
   address!: string;
 
-  @ApiProperty({ description: "Human-readable solver name" })
+  @ApiProperty({ description: "Solver's display name" })
   @IsString()
-  @MinLength(1)
+  @IsNotEmpty()
   name!: string;
 
-  @ApiProperty({ description: "Bond amount as a non-negative integer string (base units)" })
+  @ApiProperty({ description: "Bond amount as a non-negative integer string (in USDC base units)" })
   @IsString()
-  @Matches(/^\d+$/)
+  @IsNotEmpty()
   bondAmount!: string;
 
-  @ApiPropertyOptional({ default: false, description: "Whether the solver is immediately active" })
-  @IsOptional()
-  @IsBoolean()
-  isActive?: boolean;
+  @ApiProperty({ description: "Average fill time in seconds" })
+  @IsInt()
+  @Min(0)
+  avgFillTime!: number;
 
-  @ApiProperty({ enum: SUPPORTED_CHAINS, isArray: true, description: "Chains the solver supports" })
+  @ApiProperty({ enum: SUPPORTED_CHAINS, isArray: true, description: "Chains this solver supports" })
   @IsArray()
   @IsIn(SUPPORTED_CHAINS, { each: true })
   supportedChains!: SupportedChain[];
 
-  @ApiProperty({ isArray: true, description: "Token symbols the solver supports" })
+  @ApiProperty({ isArray: true, description: "Token symbols this solver supports" })
   @IsArray()
   @IsString({ each: true })
   supportedTokens!: string[];
-
-  @ApiProperty({
-    description:
-      'Base64-encoded Ed25519 signature of the message "register:<address>" ' +
-      "produced by the solver's private key — proves key ownership",
-  })
-  @IsString()
-  @MinLength(10)
-  signature!: string;
 }
