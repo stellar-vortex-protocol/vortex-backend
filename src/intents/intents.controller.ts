@@ -11,6 +11,14 @@ import {
   Post,
   Query,
 } from "@nestjs/common";
+import {
+  ApiTags,
+  ApiNotFoundResponse,
+  ApiConflictResponse,
+  ApiForbiddenResponse,
+  ApiGoneResponse,
+  ApiBadRequestResponse,
+} from "@nestjs/swagger";
 import { ApiTags, ApiOkResponse } from "@nestjs/swagger";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
@@ -32,6 +40,7 @@ export class IntentsController {
   ) {}
 
   @Get()
+  @ApiBadRequestResponse({ description: "Invalid limit or offset" })
   list(
     @Query("state") state?: string,
     @Query("user") user?: string,
@@ -45,7 +54,10 @@ export class IntentsController {
     if (user) intents = intents.filter((i) => i.user.toLowerCase() === user.toLowerCase());
     if (chain) intents = intents.filter((i) => i.srcChain === chain);
 
-    const limit = Math.min(parseInt(limitRaw, 10), 100);
+    const limit = parseInt(limitRaw, 10);
+    if (limit > 100) {
+      throw new BadRequestException("Limit exceeds maximum allowed value of 100");
+    }
     const offset = parseInt(offsetRaw, 10);
     const page = intents.slice(offset, offset + limit);
 
@@ -65,6 +77,7 @@ export class IntentsController {
   }
 
   @Get(":id")
+  @ApiNotFoundResponse({ description: "Intent not found" })
   getOne(@Param("id") id: string) {
     const intent = this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
@@ -85,6 +98,8 @@ export class IntentsController {
   }
 
   @Post()
+  @ApiBadRequestResponse({ description: "Invalid request body" })
+  create(@Body() dto: CreateIntentDto) {
   async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
     const intent = await this.intentsService.create({
@@ -105,12 +120,16 @@ export class IntentsController {
       },
       minDstAmount: dto.minDstAmount,
       deadline: dto.deadline ?? now + 1800,
-    });
+    }, dto.idempotencyKey);
     this.intentsGateway.broadcast({ type: "intent_created", intent });
     return intent;
   }
 
   @Post(":id/accept")
+  @ApiNotFoundResponse({ description: "Intent not found" })
+  @ApiConflictResponse({ description: "Intent is not in open state" })
+  @ApiGoneResponse({ description: "Intent has expired" })
+  @ApiForbiddenResponse({ description: "Solver not registered or inactive" })
   accept(@Param("id") id: string, @Body() dto: AcceptIntentDto) {
     const intent = this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
@@ -139,6 +158,11 @@ export class IntentsController {
   }
 
   @Post(":id/fill")
+  @ApiNotFoundResponse({ description: "Intent not found" })
+  @ApiConflictResponse({ description: "Intent is not in accepted state" })
+  @ApiForbiddenResponse({ description: "Wrong solver for this intent" })
+  @ApiGoneResponse({ description: "Fill window has expired" })
+  @ApiBadRequestResponse({ description: "Fill amount below minimum" })
   fill(@Param("id") id: string, @Body() dto: FillIntentDto) {
     const intent = this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
@@ -180,6 +204,9 @@ export class IntentsController {
   }
 
   @Post(":id/cancel")
+  @ApiNotFoundResponse({ description: "Intent not found" })
+  @ApiForbiddenResponse({ description: "Unauthorized" })
+  @ApiConflictResponse({ description: "Intent is not in open state" })
   cancel(@Param("id") id: string, @Body() dto: CancelIntentDto) {
     const intent = this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");

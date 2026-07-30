@@ -19,6 +19,7 @@ import { StellarTxService } from "../soroban/stellar-tx.service";
 export class IntentsService {
   private readonly logger = new Logger(IntentsService.name);
   private readonly intents = new Map<string, Intent>();
+  private readonly idempotencyCache = new Map<string, { intentId: string; expiresAt: number }>();
 
   constructor(
     private readonly configService: ConfigService<AppConfig, true>,
@@ -27,8 +28,21 @@ export class IntentsService {
     this.seed();
   }
 
+  create(data: Omit<Intent, "intentId" | "createdAt" | "state">, idempotencyKey?: string): Intent {
   async create(data: Omit<Intent, "intentId" | "createdAt" | "state">): Promise<Intent> {
     const now = Math.floor(Date.now() / 1000);
+
+    if (idempotencyKey) {
+      const cached = this.idempotencyCache.get(idempotencyKey);
+      if (cached && cached.expiresAt > now) {
+        const cachedIntent = this.intents.get(cached.intentId);
+        if (cachedIntent) {
+          return cachedIntent;
+        }
+      }
+      this.idempotencyCache.delete(idempotencyKey);
+    }
+
     const intent: Intent = {
       ...data,
       intentId: uuidv4(),
@@ -42,6 +56,12 @@ export class IntentsService {
     }
 
     this.intents.set(intent.intentId, intent);
+
+    if (idempotencyKey) {
+      const ttl = 86400; // 24 hours
+      this.idempotencyCache.set(idempotencyKey, { intentId: intent.intentId, expiresAt: now + ttl });
+    }
+
     return intent;
   }
 
