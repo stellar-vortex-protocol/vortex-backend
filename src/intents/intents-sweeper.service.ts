@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
@@ -8,6 +8,7 @@ const SWEEP_INTERVAL_MS = 30_000;
 
 @Injectable()
 export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(IntentsSweeperService.name);
   private interval?: NodeJS.Timeout;
 
   constructor(
@@ -49,8 +50,22 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    const durationMs = Date.now() - startMs;
+
+    // ── metrics ──────────────────────────────────────────────────────────────
+    MetricsRegistry.sweeper.sweepDurationMs.observe(durationMs);
     if (expiredCount > 0) {
-      console.log(`[sweeper] Expired ${expiredCount} intent(s)`);
+      MetricsRegistry.sweeper.expiredTotal.inc(expiredCount);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    this.logger.debug(
+      `sweep complete: expired=${expiredCount} duration=${durationMs}ms ` +
+        `totalExpired=${MetricsRegistry.sweeper.expiredTotal.get()}`,
+    );
+
+    if (expiredCount > 0) {
+      this.logger.log(`[sweeper] Expired ${expiredCount} intent(s) in ${durationMs}ms`);
     }
 
     const missedFills = this.intentsService

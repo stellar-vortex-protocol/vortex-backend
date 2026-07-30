@@ -13,6 +13,58 @@ declare const setInterval: (fn: (...args: any[]) => void, ms: number) => any;
 declare const clearInterval: (handle: any) => void;
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
+/** How many sequenced events to keep in the replay buffer. */
+const REPLAY_BUFFER_SIZE = 500;
+
+export interface SequencedEvent {
+  seq: number;
+  type: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Fixed-size ring buffer that retains the last `capacity` events so
+ * reconnecting clients can request a replay from a known sequence number.
+ */
+export class EventRingBuffer {
+  private readonly buf: SequencedEvent[] = [];
+  private readonly capacity: number;
+
+  constructor(capacity = REPLAY_BUFFER_SIZE) {
+    this.capacity = capacity;
+  }
+
+  push(event: SequencedEvent): void {
+    if (this.buf.length >= this.capacity) {
+      this.buf.shift();
+    }
+    this.buf.push(event);
+  }
+
+  /**
+   * Return all buffered events whose seq is strictly greater than `fromSeq`.
+   * Returns an empty array when `fromSeq` is older than the earliest buffered
+   * event (the caller should request a fresh snapshot instead).
+   */
+  since(fromSeq: number): SequencedEvent[] {
+    return this.buf.filter((e) => e.seq > fromSeq);
+  }
+
+  /** Lowest seq still in the buffer, or -1 when empty. */
+  oldestSeq(): number {
+    return this.buf.length === 0 ? -1 : this.buf[0].seq;
+  }
+
+  /** Highest seq in the buffer, or 0 when empty. */
+  latestSeq(): number {
+    return this.buf.length === 0 ? 0 : this.buf[this.buf.length - 1].seq;
+  }
+
+  size(): number {
+    return this.buf.length;
+  }
+}
+
 @WebSocketGateway({ path: "/ws" })
 export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   private readonly subscribers = new Set<WebSocket>();
@@ -102,10 +154,20 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
     logger.info(`ws client connected (subscribers=${this.subscribers.size})`);
 
-    client.send(JSON.stringify({ type: "connected", message: "Vortex intent stream" }));
+    const currentSeq = this.nextSeq - 1;
+
+    client.send(
+      JSON.stringify({
+        type: "connected",
+        message: "Vortex intent stream",
+        seq: currentSeq,
+      }),
+    );
 
     const open = this.intentsService.getByState("open").slice(0, 20);
-    client.send(JSON.stringify({ type: "snapshot", intents: open }));
+    client.send(JSON.stringify({ type: "snapshot", intents: open, seq: currentSeq }));
+
+    this.logger.debug(`client connected; subscribers=${this.subscribers.size} seq=${currentSeq}`);
   }
 
   handleDisconnect(client: WebSocket) {
