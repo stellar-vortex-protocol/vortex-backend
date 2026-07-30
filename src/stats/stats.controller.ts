@@ -11,4 +11,9 @@ export class StatsController {
   getStats() {
     return this.statsService.getProtocolStats();
   }
+
+  @Get("ws")
+  getWsStats() {
+    return this.statsService.getWsStats();
+  }
 }
