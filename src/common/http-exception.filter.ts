@@ -28,9 +28,9 @@ export class HttpExceptionFilter implements ExceptionFilter {
           return;
         }
 
-        // Already custom-shaped bodies passed directly to an exception constructor,
+        // Custom-shaped bodies passed directly to an exception constructor,
         // e.g. new BadRequestException({ error: "...", fillAmount, minDstAmount })
-        if (typeof b.error === "string" && typeof b.message !== "string") {
+        if (typeof b.error === "string" && !b.statusCode) {
           response.status(status).json(b);
           return;
         }
