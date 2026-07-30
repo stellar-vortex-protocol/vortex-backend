@@ -16,4 +16,13 @@ export class FillIntentDto {
   @IsOptional()
   @IsString()
   txHash?: string;
+
+  @ApiProperty({
+    description:
+      'Base64-encoded Ed25519 signature of the message "fill:<intentId>:<solver>" ' +
+      "produced by the solver's private key",
+  })
+  @IsString()
+  @MinLength(10)
+  signature!: string;
 }
