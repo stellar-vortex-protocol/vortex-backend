@@ -5,15 +5,22 @@ import { SUPPORTED_TOKENS, STELLAR_TOKENS } from "./tokens.data";
 export class TokensService {
   getByChain(chain?: string) {
     if (chain === "stellar") {
-      return { tokens: STELLAR_TOKENS, chain: "stellar" };
+      return { tokens: STELLAR_TOKENS.map(t => ({ ...t, priceUSD: t.priceUSD })), chain: "stellar" };
     }
     if (chain && chain in SUPPORTED_TOKENS) {
-      return { tokens: SUPPORTED_TOKENS[chain], chain };
+      return { tokens: SUPPORTED_TOKENS[chain].map(t => ({ ...t, priceUSD: t.priceUSD })), chain };
     }
-    return { tokens: SUPPORTED_TOKENS, stellarTokens: STELLAR_TOKENS };
+    return { 
+      tokens: Object.fromEntries(
+        Object.entries(SUPPORTED_TOKENS).map(([key, tokens]) => 
+          [key, tokens.map(t => ({ ...t, priceUSD: t.priceUSD }))]
+        )
+      ), 
+      stellarTokens: STELLAR_TOKENS.map(t => ({ ...t, priceUSD: t.priceUSD })) 
+    };
   }
 
   getStellarTokens() {
-    return { tokens: STELLAR_TOKENS };
+    return { tokens: STELLAR_TOKENS.map(t => ({ ...t, priceUSD: t.priceUSD })) };
   }
 }

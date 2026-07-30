@@ -1,4 +1,36 @@
+import { ConfigService } from "@nestjs/config";
+import { Keypair } from "@stellar/stellar-sdk";
+import { AppConfig } from "../config/configuration";
+import { StellarTxService } from "../soroban/stellar-tx.service";
 import { IntentsService } from "./intents.service";
+import { InMemoryIntentsRepository } from "./in-memory-intents.repository";
+import { INTENTS_REPOSITORY } from "./intents.repository";
+
+const VALID_CONTRACT_ID = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
+
+function fakeConfig(overrides: { onchainIntentsEnabled?: boolean; settlementContractId?: string } = {}) {
+  const values: Record<string, unknown> = {
+    onchainIntentsEnabled: overrides.onchainIntentsEnabled ?? false,
+    "stellar.settlementContractId": overrides.settlementContractId ?? "",
+  };
+  return { get: (path: string) => values[path] } as ConfigService<AppConfig, true>;
+}
+
+function fakeStellarTxService() {
+  return { invokeContract: jest.fn() } as unknown as jest.Mocked<StellarTxService>;
+}
+
+function validCreateData() {
+  return {
+    user: Keypair.random().publicKey(),
+    srcChain: "ethereum" as const,
+    srcToken: { address: "0xabc", symbol: "USDC", name: "USD Coin", decimals: 6, chain: "ethereum" as const },
+    srcAmount: "1000000",
+    dstToken: { contract: VALID_CONTRACT_ID, symbol: "USDC", decimals: 7 },
+    minDstAmount: "990000",
+    deadline: Math.floor(Date.now() / 1000) + 1800,
+  };
+}
 
 const mockMetricsService = {
   incIntentStateTransition: jest.fn(),
@@ -8,7 +40,7 @@ describe("IntentsService", () => {
   let service: IntentsService;
 
   beforeEach(() => {
-    service = new IntentsService(mockMetricsService as any);
+    service = new IntentsService(fakeConfig(), fakeStellarTxService());
   });
 
   it("seeds 5 intents on construction", () => {
@@ -22,10 +54,10 @@ describe("IntentsService", () => {
     }
   });
 
-  it("create adds an open intent with a generated id", () => {
+  it("create adds an open intent with a generated id", async () => {
     const before = service.getAll().length;
     const deadline = Math.floor(Date.now() / 1000) + 1800;
-    const intent = service.create({
+    const intent = await service.create({
       user: "GTEST...0000",
       srcChain: "ethereum",
       srcToken: { address: "0xabc", symbol: "USDC", name: "USD Coin", decimals: 6, chain: "ethereum" },
@@ -39,6 +71,21 @@ describe("IntentsService", () => {
     expect(intent.intentId).toBeTruthy();
     expect(intent.deadline).toBe(deadline);
     expect(service.getAll()).toHaveLength(before + 1);
+  });
+
+  it("create defaults deadline to now + 1800 when omitted", () => {
+    const before = Math.floor(Date.now() / 1000);
+    const intent = service.create({
+      user: "GTEST...0000",
+      srcChain: "ethereum",
+      srcToken: { address: "0xabc", symbol: "USDC", name: "USD Coin", decimals: 6, chain: "ethereum" },
+      srcAmount: "1000000",
+      dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+      minDstAmount: "990000",
+      deadline: undefined as unknown as number,
+    });
+
+    expect(intent.deadline).toBeGreaterThanOrEqual(before + 1800);
   });
 
   it("get returns undefined for an unknown id", () => {
@@ -60,7 +107,6 @@ describe("IntentsService", () => {
 
   it("getByUser is case-insensitive", () => {
     const [existing] = service.getAll();
-    // seed data users are already uppercase, so lowercase actually exercises the transform
     const found = service.getByUser(existing.user.toLowerCase());
     expect(found.some((i) => i.intentId === existing.intentId)).toBe(true);
   });
@@ -69,5 +115,147 @@ describe("IntentsService", () => {
     for (const intent of service.getByState("filled")) {
       expect(intent.state).toBe("filled");
     }
+  });
+
+  describe("acceptIfOpen", () => {
+    it("transitions an open intent to accepted and returns it", () => {
+      const [open] = service.getByState("open");
+      const result = service.acceptIfOpen(open.intentId, "SOLVER_X");
+
+      expect(result).not.toBeNull();
+      expect(result!.state).toBe("accepted");
+      expect(result!.solver).toBe("SOLVER_X");
+      expect(service.get(open.intentId)!.state).toBe("accepted");
+    });
+
+    it("returns null for a non-existent intent", () => {
+      expect(service.acceptIfOpen("does-not-exist", "SOLVER_X")).toBeNull();
+    });
+
+    it("returns null when the intent is already accepted", () => {
+      const [accepted] = service.getByState("accepted");
+      expect(service.acceptIfOpen(accepted.intentId, "SOLVER_X")).toBeNull();
+    });
+
+    it("only the first caller wins under simulated concurrency", () => {
+      const [open] = service.getByState("open");
+      const results = Array.from({ length: 10 }, (_, i) =>
+        service.acceptIfOpen(open.intentId, `SOLVER_${i}`),
+      );
+
+      const successes = results.filter((r) => r !== null);
+      expect(successes).toHaveLength(1);
+      expect(successes[0]!.state).toBe("accepted");
+    });
+  });
+
+  describe("fillIfAccepted", () => {
+    it("transitions an accepted intent to filled when solver matches", () => {
+      const [accepted] = service.getByState("accepted");
+      const result = service.fillIfAccepted(accepted.intentId, accepted.solver!, {
+        fillAmount: "100",
+        txHash: "test-hash",
+        filledAt: Math.floor(Date.now() / 1000),
+      });
+
+      expect(result).not.toBeNull();
+      expect(result!.state).toBe("filled");
+      expect(result!.fillAmount).toBe("100");
+    });
+
+    it("returns null when solver does not match", () => {
+      const [accepted] = service.getByState("accepted");
+      const result = service.fillIfAccepted(accepted.intentId, "WRONG_SOLVER", {
+        fillAmount: "100",
+      });
+      expect(result).toBeNull();
+    });
+
+    it("returns null for a non-existent intent", () => {
+      expect(service.fillIfAccepted("nope", "SOLVER_X", {})).toBeNull();
+    });
+
+    it("only the first caller wins under simulated concurrency", () => {
+      const [accepted] = service.getByState("accepted");
+      const results = Array.from({ length: 10 }, () =>
+        service.fillIfAccepted(accepted.intentId, accepted.solver!, {
+          fillAmount: "100",
+          txHash: "race-hash",
+          filledAt: Math.floor(Date.now() / 1000),
+        }),
+      );
+
+      const successes = results.filter((r) => r !== null);
+      expect(successes).toHaveLength(1);
+      expect(successes[0]!.state).toBe("filled");
+  describe("on-chain registration (ONCHAIN_INTENTS_ENABLED)", () => {
+    it("stays fully in-memory when the flag is off, never touching StellarTxService", async () => {
+      const stellarTxService = fakeStellarTxService();
+      const service = new IntentsService(fakeConfig({ onchainIntentsEnabled: false }), stellarTxService);
+
+      const intent = await service.create(validCreateData());
+
+      expect(stellarTxService.invokeContract).not.toHaveBeenCalled();
+      expect(service.get(intent.intentId)).toEqual(intent);
+    });
+
+    it("invokes the settlement contract and preserves the Intent shape when the flag is on", async () => {
+      const stellarTxService = fakeStellarTxService();
+      stellarTxService.invokeContract.mockResolvedValue({ hash: "deadbeef", status: "SUCCESS" } as never);
+      const service = new IntentsService(
+        fakeConfig({ onchainIntentsEnabled: true, settlementContractId: VALID_CONTRACT_ID }),
+        stellarTxService,
+      );
+
+      const data = validCreateData();
+      const intent = await service.create(data);
+
+      expect(stellarTxService.invokeContract).toHaveBeenCalledTimes(1);
+      const call = stellarTxService.invokeContract.mock.calls[0][0];
+      expect(call.contractId).toBe(VALID_CONTRACT_ID);
+      expect(call.method).toBe("create_intent");
+
+      // response shape is unchanged: no fields added/removed relative to the in-memory path
+      expect(Object.keys(intent).sort()).toEqual(
+        Object.keys({
+          intentId: "",
+          user: "",
+          srcChain: "",
+          srcToken: "",
+          srcAmount: "",
+          dstToken: "",
+          minDstAmount: "",
+          state: "",
+          createdAt: 0,
+          deadline: 0,
+        }).sort(),
+      );
+      expect(service.get(intent.intentId)).toBeDefined();
+    });
+
+    it("rejects with a clear error and does not create the intent when SETTLEMENT_CONTRACT_ID is unset", async () => {
+      const stellarTxService = fakeStellarTxService();
+      const service = new IntentsService(fakeConfig({ onchainIntentsEnabled: true }), stellarTxService);
+      const before = service.getAll().length;
+
+      await expect(service.create(validCreateData())).rejects.toMatchObject({
+        message: expect.stringContaining("SETTLEMENT_CONTRACT_ID"),
+      });
+      expect(stellarTxService.invokeContract).not.toHaveBeenCalled();
+      expect(service.getAll()).toHaveLength(before);
+    });
+
+    it("rejects and does not create the intent when the on-chain call fails", async () => {
+      const stellarTxService = fakeStellarTxService();
+      stellarTxService.invokeContract.mockRejectedValue(new Error("submission failed after 5 attempts"));
+      const service = new IntentsService(
+        fakeConfig({ onchainIntentsEnabled: true, settlementContractId: VALID_CONTRACT_ID }),
+        stellarTxService,
+      );
+      const before = service.getAll().length;
+
+      await expect(service.create(validCreateData())).rejects.toThrow(/settlement contract/i);
+      expect(service.getAll()).toHaveLength(before);
+    });
   });
 });
