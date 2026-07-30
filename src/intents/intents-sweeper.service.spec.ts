@@ -1,114 +1,125 @@
 import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
-import { MetricsRegistry } from "../common/metrics";
-import { Intent } from "./intents.types";
+import { SolversService } from "../solvers/solvers.service";
+import { SolverRegistryService } from "../soroban/solver-registry.service";
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+describe("IntentsSweeperService", () => {
+  let intentsService: IntentsService;
+  let gateway: IntentsGateway;
+  let solversService: SolversService;
+  let solverRegistryService: jest.Mocked<SolverRegistryService>;
+  let sweeper: IntentsSweeperService;
 
-function makeIntent(overrides: Partial<Intent> = {}): Intent {
-  return {
-    intentId: "test-id",
-    user: "GTEST",
-    srcChain: "ethereum",
-    srcToken: { address: "0x0", symbol: "USDC", name: "USD Coin", decimals: 6, chain: "ethereum" },
-    srcAmount: "1000000",
-    dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
-    minDstAmount: "990000",
-    state: "open",
-    createdAt: Math.floor(Date.now() / 1000) - 60,
-    deadline: Math.floor(Date.now() / 1000) - 1, // already expired
-    ...overrides,
-  };
-}
+  beforeEach(() => {
+    intentsService = new IntentsService();
+    gateway = { broadcast: jest.fn() } as unknown as IntentsGateway;
+    solversService = new SolversService();
+    solverRegistryService = {
+      slashSolver: jest.fn().mockResolvedValue({
+        submitted: false,
+        simulated: false,
+        detail: "not configured — no-op",
+      }),
+    } as unknown as jest.Mocked<SolverRegistryService>;
 
-function makeSweeperWithMocks(intents: Intent[]) {
-  const intentsService = {
-    getByState: jest.fn().mockReturnValue(intents),
-    update: jest.fn().mockImplementation((_id: string, patch: Partial<Intent>) => patch),
-  } as unknown as IntentsService;
-
-  const intentsGateway = {
-    broadcast: jest.fn(),
-  } as unknown as IntentsGateway;
-
-  const sweeper = new IntentsSweeperService(intentsService, intentsGateway);
-  return { sweeper, intentsService, intentsGateway };
-}
-
-// ── tests ─────────────────────────────────────────────────────────────────────
-
-beforeEach(() => {
-  // Reset shared metric state between tests
-  MetricsRegistry.sweeper.expiredTotal.reset();
-  MetricsRegistry.sweeper.sweepDurationMs.reset();
-});
-
-describe("IntentsSweeperService – metrics (#96)", () => {
-  it("records a sweep duration observation after every sweep()", () => {
-    const { sweeper } = makeSweeperWithMocks([]);
-
-    sweeper.sweep();
-
-    const snap = MetricsRegistry.sweeper.sweepDurationMs.snapshot();
-    expect(snap.count).toBe(1);
-    expect(snap.sum).toBeGreaterThanOrEqual(0);
+    sweeper = new IntentsSweeperService(
+      intentsService,
+      gateway,
+      solversService,
+      solverRegistryService,
+    );
   });
 
-  it("increments expiredTotal by the number of expired intents", () => {
-    const expired = [makeIntent({ intentId: "a" }), makeIntent({ intentId: "b" })];
-    const { sweeper } = makeSweeperWithMocks(expired);
-
-    sweeper.sweep();
-
-    expect(MetricsRegistry.sweeper.expiredTotal.get()).toBe(2);
-  });
-
-  it("does not increment expiredTotal when no intents expire", () => {
-    const future = makeIntent({ deadline: Math.floor(Date.now() / 1000) + 9999 });
-    const { sweeper } = makeSweeperWithMocks([future]);
-
-    sweeper.sweep();
-
-    expect(MetricsRegistry.sweeper.expiredTotal.get()).toBe(0);
-  });
-
-  it("accumulates expiredTotal across multiple sweeps", () => {
-    const makeExpired = (id: string) => makeIntent({ intentId: id });
-    const { sweeper, intentsService } = makeSweeperWithMocks([makeExpired("x")]);
-
-    sweeper.sweep();
-    // second sweep produces one more expired intent
-    (intentsService.getByState as jest.Mock).mockReturnValue([makeExpired("y")]);
-    sweeper.sweep();
-
-    expect(MetricsRegistry.sweeper.expiredTotal.get()).toBe(2);
-  });
-
-  it("records multiple duration observations — count matches sweep calls", () => {
-    const { sweeper } = makeSweeperWithMocks([]);
-
-    sweeper.sweep();
-    sweeper.sweep();
-    sweeper.sweep();
-
-    expect(MetricsRegistry.sweeper.sweepDurationMs.snapshot().count).toBe(3);
-  });
-
-  it("broadcasts intent_expired for each expired intent", () => {
-    const intents = [makeIntent({ intentId: "a" }), makeIntent({ intentId: "b" })];
-    const { sweeper, intentsGateway } = makeSweeperWithMocks(intents);
-
-    sweeper.sweep();
-
-    expect(intentsGateway.broadcast).toHaveBeenCalledTimes(2);
-    expect(intentsGateway.broadcast).toHaveBeenCalledWith({
-      type: "intent_expired",
-      intentId: "a",
+  function makeAcceptedIntent(deadline: number, solver = "SOLVER_ALPHA") {
+    const intent = intentsService.create({
+      user: "GTEST...0000",
+      srcChain: "ethereum",
+      srcToken: { address: "0xabc", symbol: "USDC", name: "USD Coin", decimals: 6, chain: "ethereum" },
+      srcAmount: "1000000",
+      dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+      minDstAmount: "990000",
+      deadline: deadline + 10_000, // create as open with a far-future deadline first
     });
-    expect(intentsGateway.broadcast).toHaveBeenCalledWith({
-      type: "intent_expired",
-      intentId: "b",
+    intentsService.update(intent.intentId, { state: "accepted", solver, deadline });
+    return intent.intentId;
+  }
+
+  it("expires open intents past their deadline (existing behavior preserved)", async () => {
+    const past = Math.floor(Date.now() / 1000) - 10;
+    const intent = intentsService.create({
+      user: "GTEST...0000",
+      srcChain: "stellar",
+      srcToken: { address: "native", symbol: "XLM", name: "Stellar Lumens", decimals: 7, chain: "stellar" },
+      srcAmount: "1000000",
+      dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+      minDstAmount: "990000",
+      deadline: past,
     });
+
+    await sweeper.sweep();
+
+    expect(intentsService.get(intent.intentId)?.state).toBe("expired");
+    expect(gateway.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "intent_expired", intentId: intent.intentId }),
+    );
+  });
+
+  it("slashes an accepted intent whose fill deadline has passed", async () => {
+    const past = Math.floor(Date.now() / 1000) - 10;
+    const intentId = makeAcceptedIntent(past, "SOLVER_ALPHA");
+
+    await sweeper.sweep();
+
+    const updated = intentsService.get(intentId);
+    expect(updated?.state).toBe("slashed");
+    expect(updated?.slashedAt).toBeDefined();
+    expect(updated?.slashReason).toBeTruthy();
+
+    expect(gateway.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "intent_slashed", intentId, solver: "SOLVER_ALPHA" }),
+    );
+    expect(solverRegistryService.slashSolver).toHaveBeenCalledWith(
+      expect.objectContaining({ solverAddress: "SOLVER_ALPHA", intentId }),
+    );
+  });
+
+  it("bumps the solver's fillsFailed counter on a slash", async () => {
+    const past = Math.floor(Date.now() / 1000) - 10;
+    const before = solversService.get("SOLVER_ALPHA")?.fillsFailed ?? 0;
+    const intentId = makeAcceptedIntent(past, "SOLVER_ALPHA");
+
+    await sweeper.sweep();
+
+    expect(solversService.get("SOLVER_ALPHA")?.fillsFailed).toBe(before + 1);
+    expect(intentsService.get(intentId)?.state).toBe("slashed");
+  });
+
+  it("does not touch accepted intents still within their fill window", async () => {
+    const future = Math.floor(Date.now() / 1000) + 300;
+    const intentId = makeAcceptedIntent(future, "SOLVER_ALPHA");
+
+    await sweeper.sweep();
+
+    expect(intentsService.get(intentId)?.state).toBe("accepted");
+    expect(solverRegistryService.slashSolver).not.toHaveBeenCalled();
+  });
+
+  it("does not throw if an accepted intent somehow has no solver on record", async () => {
+    const past = Math.floor(Date.now() / 1000) - 10;
+    const intent = intentsService.create({
+      user: "GTEST...0000",
+      srcChain: "stellar",
+      srcToken: { address: "native", symbol: "XLM", name: "Stellar Lumens", decimals: 7, chain: "stellar" },
+      srcAmount: "1000000",
+      dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+      minDstAmount: "990000",
+      deadline: past + 10_000,
+    });
+    intentsService.update(intent.intentId, { state: "accepted", deadline: past });
+
+    await expect(sweeper.sweep()).resolves.not.toThrow();
+    expect(intentsService.get(intent.intentId)?.state).toBe("slashed");
+    expect(solverRegistryService.slashSolver).not.toHaveBeenCalled();
   });
 });

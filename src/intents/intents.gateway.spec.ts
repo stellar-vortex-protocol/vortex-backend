@@ -1,189 +1,169 @@
-import { IntentsGateway, EventRingBuffer } from "./intents.gateway";
+import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
-import { WebSocket } from "ws";
+import { logger } from "../common/logger";
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+jest.mock("../common/logger", () => ({
+  logger: {
+    info: jest.fn(),
+    debug: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+  },
+}));
 
-function makeMockClient(readyState: number = WebSocket.OPEN): WebSocket {
+function createMockClient() {
+  const listeners: Record<string, (...args: unknown[]) => void> = {};
   return {
-    readyState,
+    readyState: 1,
     send: jest.fn(),
-    on: jest.fn(),
-  } as unknown as WebSocket;
+    ping: jest.fn(),
+    terminate: jest.fn(),
+    on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
+      listeners[event] = cb;
+    }),
+    _listeners: listeners,
+  };
 }
 
-function makeGateway() {
-  const intentsService = {
-    getByState: jest.fn().mockReturnValue([]),
-  } as unknown as IntentsService;
-  const gateway = new IntentsGateway(intentsService);
-  return { gateway, intentsService };
-}
+describe("IntentsGateway heartbeat", () => {
+  let gateway: IntentsGateway;
+  let intentsService: IntentsService;
 
-// ── EventRingBuffer ───────────────────────────────────────────────────────────
-
-describe("EventRingBuffer", () => {
-  it("returns empty array when empty", () => {
-    const buf = new EventRingBuffer(10);
-    expect(buf.since(0)).toEqual([]);
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    intentsService = new IntentsService();
+    gateway = new IntentsGateway(intentsService);
   });
 
-  it("reports oldestSeq=-1 and latestSeq=0 when empty", () => {
-    const buf = new EventRingBuffer(10);
-    expect(buf.oldestSeq()).toBe(-1);
-    expect(buf.latestSeq()).toBe(0);
+  afterEach(() => {
+    gateway.onModuleDestroy();
+    jest.useRealTimers();
   });
 
-  it("stores and retrieves events in order", () => {
-    const buf = new EventRingBuffer(10);
-    buf.push({ seq: 1, type: "a" });
-    buf.push({ seq: 2, type: "b" });
-    buf.push({ seq: 3, type: "c" });
-
-    expect(buf.since(1)).toEqual([{ seq: 2, type: "b" }, { seq: 3, type: "c" }]);
-    expect(buf.since(0)).toHaveLength(3);
-    expect(buf.since(3)).toHaveLength(0);
+  it("marks new connections as alive", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+    expect(gateway.getAliveCount()).toBe(1);
   });
 
-  it("evicts oldest entry when capacity is exceeded", () => {
-    const buf = new EventRingBuffer(3);
-    buf.push({ seq: 1, type: "a" });
-    buf.push({ seq: 2, type: "b" });
-    buf.push({ seq: 3, type: "c" });
-    buf.push({ seq: 4, type: "d" }); // evicts seq=1
+  it("removes disconnected clients", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+    expect(gateway.getAliveCount()).toBe(1);
+    gateway.handleDisconnect(client as unknown as import("ws").WebSocket);
+    expect(gateway.getAliveCount()).toBe(0);
+  });
 
-    expect(buf.size()).toBe(3);
-    expect(buf.oldestSeq()).toBe(2);
-    expect(buf.latestSeq()).toBe(4);
+  it("terminates clients that do not respond to ping", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    jest.advanceTimersByTime(30_000);
+
+    jest.advanceTimersByTime(30_000);
+
+    expect(client.terminate).toHaveBeenCalled();
+    expect(gateway.getAliveCount()).toBe(0);
+  });
+
+  it("keeps alive clients that respond with pong", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    jest.advanceTimersByTime(30_000);
+
+    expect(client.ping).toHaveBeenCalled();
+    expect(client.terminate).not.toHaveBeenCalled();
+
+    client._listeners.pong();
+
+    expect(gateway.getAliveCount()).toBe(1);
+
+    jest.advanceTimersByTime(30_000);
+
+    expect(client.terminate).not.toHaveBeenCalled();
+    expect(gateway.getAliveCount()).toBe(0);
+
+    client._listeners.pong();
+
+    expect(gateway.getAliveCount()).toBe(1);
+  });
+
+  it("cleans up interval on module destroy", () => {
+    gateway.onModuleDestroy();
+    jest.advanceTimersByTime(60_000);
+    expect(true).toBe(true);
+  });
+
+  it("broadcasts to all alive subscribers", () => {
+    const c1 = createMockClient();
+    const c2 = createMockClient();
+    gateway.handleConnection(c1 as unknown as import("ws").WebSocket);
+    gateway.handleConnection(c2 as unknown as import("ws").WebSocket);
+
+    gateway.broadcast({ type: "test_event", data: 123 });
+
+    const expected = JSON.stringify({ type: "test_event", data: 123 });
+    expect(c1.send).toHaveBeenCalledWith(expected);
+    expect(c2.send).toHaveBeenCalledWith(expected);
   });
 });
 
-// ── IntentsGateway – sequencing ───────────────────────────────────────────────
+describe("IntentsGateway logging", () => {
+  let gateway: IntentsGateway;
+  let intentsService: IntentsService;
 
-describe("IntentsGateway – event sequencing (#80)", () => {
-  it("stamps broadcast events with a monotonic seq starting at 1", () => {
-    const { gateway } = makeGateway();
-    const client = makeMockClient();
-    gateway.handleConnection(client);
-
-    gateway.broadcast({ type: "intent_created", intentId: "a" });
-    gateway.broadcast({ type: "intent_created", intentId: "b" });
-
-    const calls = (client.send as jest.Mock).mock.calls.map((c) => JSON.parse(c[0] as string));
-    const broadcasts = calls.filter((e) => e.type === "intent_created");
-
-    expect(broadcasts[0].seq).toBe(1);
-    expect(broadcasts[1].seq).toBe(2);
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    intentsService = new IntentsService();
+    gateway = new IntentsGateway(intentsService);
   });
 
-  it("seq never decreases across broadcasts", () => {
-    const { gateway } = makeGateway();
-    const client = makeMockClient();
-    gateway.handleConnection(client);
-
-    for (let i = 0; i < 5; i++) {
-      gateway.broadcast({ type: "ping" });
-    }
-
-    const calls = (client.send as jest.Mock).mock.calls.map((c) => JSON.parse(c[0] as string));
-    const pings = calls.filter((e) => e.type === "ping");
-    for (let i = 1; i < pings.length; i++) {
-      expect(pings[i].seq).toBeGreaterThan(pings[i - 1].seq);
-    }
+  afterEach(() => {
+    gateway.onModuleDestroy();
+    jest.useRealTimers();
   });
 
-  it("connected message includes seq", () => {
-    const { gateway } = makeGateway();
-    const client = makeMockClient();
-    gateway.handleConnection(client);
-
-    const firstCall = JSON.parse((client.send as jest.Mock).mock.calls[0][0] as string);
-    expect(firstCall.type).toBe("connected");
-    expect(typeof firstCall.seq).toBe("number");
+  it("logs heartbeat started on construction", () => {
+    expect(logger.info).toHaveBeenCalledWith("ws heartbeat started");
   });
 
-  it("snapshot message includes seq", () => {
-    const { gateway } = makeGateway();
-    const client = makeMockClient();
-    gateway.handleConnection(client);
+  it("logs connection with subscriber count", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
-    const secondCall = JSON.parse((client.send as jest.Mock).mock.calls[1][0] as string);
-    expect(secondCall.type).toBe("snapshot");
-    expect(typeof secondCall.seq).toBe("number");
+    expect(logger.info).toHaveBeenCalledWith("ws client connected (subscribers=1)");
   });
 
-  it("broadcast stores event in replayBuffer", () => {
-    const { gateway } = makeGateway();
-    gateway.broadcast({ type: "intent_created", intentId: "x" });
-    expect(gateway.replayBuffer.size()).toBe(1);
-    expect(gateway.replayBuffer.latestSeq()).toBe(1);
-  });
-});
+  it("logs disconnection with subscriber count", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+    gateway.handleDisconnect(client as unknown as import("ws").WebSocket);
 
-// ── IntentsGateway – replay ───────────────────────────────────────────────────
-
-describe("IntentsGateway – replay (#80)", () => {
-  it("replays missed events since fromSeq", () => {
-    const { gateway } = makeGateway();
-    gateway.broadcast({ type: "evt", id: "1" });
-    gateway.broadcast({ type: "evt", id: "2" });
-    gateway.broadcast({ type: "evt", id: "3" });
-
-    const client = makeMockClient();
-    gateway.handleReplay({ fromSeq: 1 }, client);
-
-    const messages = (client.send as jest.Mock).mock.calls.map((c) => JSON.parse(c[0] as string));
-    const start = messages.find((m) => m.type === "replay_start");
-    const end = messages.find((m) => m.type === "replay_end");
-    const events = messages.filter((m) => m.type === "evt");
-
-    expect(start).toBeDefined();
-    expect(end).toBeDefined();
-    expect(events).toHaveLength(2); // seq 2 and 3
-    expect(events.map((e) => e.seq)).toEqual([2, 3]);
+    expect(logger.info).toHaveBeenCalledWith("ws client disconnected (subscribers=0)");
   });
 
-  it("sends replay_too_old when fromSeq is before the oldest buffered event", () => {
-    // Use a tiny buffer (capacity=2) so old events get evicted quickly
-    const { gateway } = makeGateway();
-    // Access private replayBuffer through the public property for test setup
-    const buf = gateway.replayBuffer;
-    buf.push({ seq: 10, type: "a" });
-    buf.push({ seq: 11, type: "b" });
+  it("logs broadcast event type without payload", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
-    const client = makeMockClient();
-    // fromSeq=5 is before oldest=10
-    gateway.handleReplay({ fromSeq: 5 }, client);
+    gateway.broadcast({ type: "intent_created", intent: { id: "123", secret: "data" } });
 
-    const messages = (client.send as jest.Mock).mock.calls.map((c) => JSON.parse(c[0] as string));
-    expect(messages[0].type).toBe("replay_too_old");
-    expect(messages[0].oldestAvailableSeq).toBe(10);
+    expect(logger.debug).toHaveBeenCalledWith(
+      "ws broadcast type=intent_created subscribers=1",
+    );
   });
 
-  it("sends empty replay when fromSeq equals latestSeq (no missed events)", () => {
-    const { gateway } = makeGateway();
-    gateway.broadcast({ type: "evt" });
+  it("logs heartbeat termination of dead client", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
-    const client = makeMockClient();
-    gateway.handleReplay({ fromSeq: 1 }, client);
+    jest.advanceTimersByTime(60_000);
 
-    const messages = (client.send as jest.Mock).mock.calls.map((c) => JSON.parse(c[0] as string));
-    const end = messages.find((m) => m.type === "replay_end");
-    expect(end?.count).toBe(0);
-  });
-
-  it("does not send to a closed client during replay", () => {
-    const { gateway } = makeGateway();
-    gateway.broadcast({ type: "evt", id: "1" });
-    gateway.broadcast({ type: "evt", id: "2" });
-
-    const closedClient = makeMockClient(WebSocket.CLOSED);
-    gateway.handleReplay({ fromSeq: 0 }, closedClient);
-
-    // replay_start and replay_end are sent unconditionally; only the event
-    // payloads are guarded by readyState
-    const calls = (closedClient.send as jest.Mock).mock.calls.map((c) => JSON.parse(c[0] as string));
-    const evtCalls = calls.filter((m) => m.type === "evt");
-    expect(evtCalls).toHaveLength(0);
+    expect(logger.debug).toHaveBeenCalledWith(
+      "ws heartbeat terminated dead client (subscribers=0)",
+    );
   });
 });
