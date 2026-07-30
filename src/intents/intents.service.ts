@@ -148,6 +148,10 @@ export class IntentsService {
     return this.repository.findByUser(user) as Intent[];
   }
 
+  getAcceptedCountBySolver(solver: string): number {
+    return this.getAll().filter((i) => i.state === "accepted" && i.solver === solver).length;
+  }
+
   update(id: string, patch: Partial<Intent>): Intent | null {
     return this.repository.update(id, patch) as Intent | null;
   }
