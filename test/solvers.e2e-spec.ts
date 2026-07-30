@@ -43,4 +43,48 @@ describe("SolversController (e2e)", () => {
       .expect(404);
     expect(res.body).toEqual({ error: "Solver not found" });
   });
+
+  it("POST /api/v1/solvers registers a new solver", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/solvers")
+      .send({
+        address: "GNEWSOLVER123456789",
+        name: "New Solver Inc",
+        bondAmount: "500000000",
+        avgFillTime: 45,
+        supportedChains: ["ethereum", "stellar"],
+        supportedTokens: ["USDC", "USDT"],
+      })
+      .expect(201);
+
+    expect(res.body.address).toBe("GNEWSOLVER123456789");
+    expect(res.body.name).toBe("New Solver Inc");
+    expect(res.body.bondAmount).toBe("500000000");
+    expect(res.body.avgFillTime).toBe(45);
+    expect(res.body.isActive).toBe(true);
+    expect(res.body.fillsCompleted).toBe(0);
+    expect(res.body.fillsFailed).toBe(0);
+    expect(res.body.totalVolume).toBe("0");
+    expect(res.body.registeredAt).toBeTruthy();
+
+    // Verify the solver is now queryable
+    const fetchRes = await request(app.getHttpServer())
+      .get("/api/v1/solvers/GNEWSOLVER123456789")
+      .expect(200);
+    expect(fetchRes.body.name).toBe("New Solver Inc");
+  });
+
+  it("POST /api/v1/solvers rejects invalid registration data", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/solvers")
+      .send({
+        address: "short",
+        name: "Test",
+        // missing required fields
+      })
+      .expect(400);
+
+    expect(res.body.error).toBe("Validation failed");
+    expect(Array.isArray(res.body.details)).toBe(true);
+  });
 });
