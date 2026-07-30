@@ -1,10 +1,29 @@
+import { Test, TestingModule } from "@nestjs/testing";
 import { SolversService } from "./solvers.service";
+import { InMemorySolversRepository } from "./in-memory-solvers.repository";
+import { SOLVERS_REPOSITORY } from "./solvers.repository";
 
+/**
+ * SolversService unit tests.
+ *
+ * A real InMemorySolversRepository is provided under the SOLVERS_REPOSITORY
+ * token — identical to how SolversModule wires things in production.
+ */
 describe("SolversService", () => {
   let service: SolversService;
 
-  beforeEach(() => {
-    service = new SolversService();
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        {
+          provide: SOLVERS_REPOSITORY,
+          useClass: InMemorySolversRepository,
+        },
+        SolversService,
+      ],
+    }).compile();
+
+    service = module.get<SolversService>(SolversService);
   });
 
   it("seeds 3 solvers on construction", () => {
@@ -40,6 +59,20 @@ describe("SolversService", () => {
     expect(service.get("SOLVER_DELTA")?.name).toBe("Delta Test");
   });
 
+  it("register sets registeredAt to the current unix timestamp", () => {
+    const before = Math.floor(Date.now() / 1000);
+    const registered = service.register({
+      address: "SOLVER_TS",
+      name: "Timestamp Test",
+      bondAmount: "0",
+      avgFillTime: 0,
+      isActive: true,
+      supportedChains: [],
+      supportedTokens: [],
+    });
+    expect(registered.registeredAt).toBeGreaterThanOrEqual(before);
+  });
+
   it("register overwrites an existing solver with the same address", () => {
     const before = service.getAll().length;
     service.register({
@@ -54,5 +87,18 @@ describe("SolversService", () => {
 
     expect(service.getAll()).toHaveLength(before);
     expect(service.get("SOLVER_ALPHA")?.name).toBe("Replaced Alpha");
+  });
+
+  it("marks a solver inactive when deregistered", () => {
+    const solver = service.deregister("SOLVER_ALPHA");
+
+    expect(solver?.isActive).toBe(false);
+    expect(service.get("SOLVER_ALPHA")?.isActive).toBe(false);
+  });
+
+  it("marks a solver active when it comes online", () => {
+    service.markLive("SOLVER_ALPHA");
+
+    expect(service.get("SOLVER_ALPHA")?.isActive).toBe(true);
   });
 });

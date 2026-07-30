@@ -13,26 +13,30 @@ describe("HealthController (e2e)", () => {
     await app.close();
   });
 
-  it("GET /health returns service status (degraded if Soroban unreachable)", async () => {
-    const res = await request(app.getHttpServer()).get("/health");
+  it("GET /health returns service status with db field", async () => {
+    const res = await request(app.getHttpServer()).get("/health").expect(200);
 
-    if (res.status === 200) {
-      expect(res.body).toMatchObject({
-        status: "ok",
-        service: "vortex-backend",
-        network: "stellar-testnet",
-      });
-      expect(res.body.soroban).toBeDefined();
-      expect(typeof res.body.uptime).toBe("number");
+    // Top-level fields are always present.
+    expect(res.body).toMatchObject({
+      status: "ok",
+      service: "vortex-backend",
+      network: "stellar-testnet",
+    });
+    expect(typeof res.body.uptime).toBe("number");
+
+    // db field is always present regardless of connectivity.
+    expect(res.body.db).toBeDefined();
+    expect(["ok", "unreachable"]).toContain(res.body.db.status);
+
+    if (res.body.db.status === "ok") {
+      // When the database is reachable latencyMs must be a non-negative number.
+      expect(typeof res.body.db.latencyMs).toBe("number");
+      expect(res.body.db.latencyMs).toBeGreaterThanOrEqual(0);
+      expect(res.body.db.error).toBeUndefined();
     } else {
-      expect(res.status).toBe(503);
-      expect(res.body).toMatchObject({
-        status: "degraded",
-        service: "vortex-backend",
-        network: "stellar-testnet",
-      });
-      expect(res.body.soroban).toEqual({ status: "unreachable" });
-      expect(typeof res.body.uptime).toBe("number");
+      // When the database is unreachable an error message must be present.
+      expect(typeof res.body.db.error).toBe("string");
+      expect(res.body.db.latencyMs).toBeUndefined();
     }
   });
 });

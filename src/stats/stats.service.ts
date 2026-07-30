@@ -1,12 +1,14 @@
 import { Injectable } from "@nestjs/common";
 import { IntentsService } from "../intents/intents.service";
 import { SolversService } from "../solvers/solvers.service";
+import { IntentsGateway } from "../intents/intents.gateway";
 
 @Injectable()
 export class StatsService {
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
+    private readonly intentsGateway: IntentsGateway,
   ) {}
 
   getProtocolStats() {
@@ -32,6 +34,12 @@ export class StatsService {
       activeSolvers: solvers.filter((s) => s.isActive).length,
       avgFillTime: Math.round(avgFillTime),
       fillRate: intents.length ? filled.length / intents.length : 0,
+    };
+  }
+
+  getWsStats() {
+    return {
+      subscriberCount: this.intentsGateway.getSubscriberCount(),
     };
   }
 }

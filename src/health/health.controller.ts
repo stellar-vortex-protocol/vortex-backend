@@ -2,25 +2,27 @@ import { Controller, Get, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { ApiTags } from "@nestjs/swagger";
 import { AppConfig } from "../config/configuration";
-import { SorobanService } from "../soroban/soroban.service";
-
-const SOROBAN_TIMEOUT_MS = 5000;
+import { DatabaseHealthService } from "./database-health.service";
 
 @ApiTags("health")
 @Controller("health")
 export class HealthController {
   constructor(
     private readonly configService: ConfigService<AppConfig, true>,
-    private readonly sorobanService: SorobanService,
+    private readonly dbHealth: DatabaseHealthService,
   ) {}
 
   @Get()
   async check() {
-    const base = {
+    const db = await this.dbHealth.check();
+
+    return {
+      status: "ok",
       service: "vortex-backend",
       version: "0.1.0",
       network: `stellar-${this.configService.get("stellar.network", { infer: true })}`,
       uptime: process.uptime(),
+      db,
     };
 
     let sorobanStatus: string;
