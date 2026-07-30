@@ -32,6 +32,10 @@ function validCreateData() {
   };
 }
 
+const mockMetricsService = {
+  incIntentStateTransition: jest.fn(),
+};
+
 describe("IntentsService", () => {
   let service: IntentsService;
 
