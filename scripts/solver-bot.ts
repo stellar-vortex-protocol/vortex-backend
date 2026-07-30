@@ -9,6 +9,12 @@ const SOLVER_ADDRESS = process.env.SOLVER_ADDRESS ?? "SOLVER_ALPHA";
 const MIN_MARGIN_BPS = Number(process.env.MIN_MARGIN_BPS ?? "0");
 const SOLVER_CHAINS = (process.env.SOLVER_CHAINS ?? "stellar,ethereum,base,polygon,arbitrum,optimism,avalanche").split(",");
 
+const BACKOFF_INITIAL_MS = 1_000;
+const BACKOFF_MAX_MS = 30_000;
+const BACKOFF_FACTOR = 2;
+
+let shouldReconnect = true;
+
 interface Intent {
   intentId: string;
   state: string;
@@ -98,6 +104,11 @@ async function tryFillOpenIntent(intent: Intent): Promise<void> {
   await fillIntent(intent.intentId, intent.minDstAmount);
 }
 
+function connectWithBackoff(delayMs: number): void {
+  if (!shouldReconnect) return;
+
+  console.log(`[solver-bot] connecting as ${SOLVER_ADDRESS} to ${WS_URL}` +
+    (delayMs > 0 ? ` (reconnect in ${delayMs}ms)` : ""));
 function main() {
   console.log(`[solver-bot] connecting as ${SOLVER_ADDRESS} to ${WS_URL}`);
   console.log(`[solver-bot] subscribed chains: ${SOLVER_CHAINS.join(", ")}`);
@@ -175,6 +186,29 @@ function main() {
   });
 
   ws.on("close", () => {
+    console.log(`[solver-bot] disconnected`);
+    const nextDelay = Math.min(delayMs * BACKOFF_FACTOR, BACKOFF_MAX_MS);
+    setTimeout(() => connectWithBackoff(nextDelay), delayMs);
+  });
+
+  ws.on("error", (err) => {
+    console.error(`[solver-bot] error`, err);
+    ws.close();
+  });
+}
+
+function main() {
+  process.on("SIGINT", () => {
+    shouldReconnect = false;
+    process.exit(0);
+  });
+
+  process.on("SIGTERM", () => {
+    shouldReconnect = false;
+    process.exit(0);
+  });
+
+  connectWithBackoff(BACKOFF_INITIAL_MS);
     console.log(`[solver-bot] disconnected (lastSeq=${lastSeq}). Reconnecting in ${RECONNECT_DELAY_MS}ms…`);
     setTimeout(connect, RECONNECT_DELAY_MS);
   });
