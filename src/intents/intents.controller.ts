@@ -11,7 +11,7 @@ import {
   Post,
   Query,
 } from "@nestjs/common";
-import { ApiTags } from "@nestjs/swagger";
+import { ApiTags, ApiOkResponse } from "@nestjs/swagger";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
@@ -20,6 +20,7 @@ import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
+import { QuoteResponseDto } from "./dto/quote-response.dto";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -182,7 +183,7 @@ export class IntentsController {
   cancel(@Param("id") id: string, @Body() dto: CancelIntentDto) {
     const intent = this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
-    if (intent.user !== dto.user) throw new ForbiddenException("Unauthorized");
+    if (intent.user.toLowerCase() !== dto.user.toLowerCase()) throw new ForbiddenException("Unauthorized");
     if (intent.state !== "open") {
       throw new ConflictException(`Cannot cancel intent in state: ${intent.state}`);
     }
@@ -193,7 +194,8 @@ export class IntentsController {
   }
 
   @Post("quote")
-  quote(@Body() dto: QuoteRequestDto) {
+  @ApiOkResponse({ type: QuoteResponseDto })
+  quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {
     const solvers = this.solversService.getAll().filter((s) => s.isActive);
     const srcAmountBigInt = BigInt(dto.srcAmount);
 

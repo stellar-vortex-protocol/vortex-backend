@@ -39,6 +39,18 @@ export class SolversService {
     return solver;
   }
 
+  deactivate(address: string): SolverRecord | null {
+    const solver = this.solvers.get(address);
+    if (!solver) return null;
+    const updated = { ...solver, isActive: false };
+    this.solvers.set(address, updated);
+    return updated;
+  }
+
+  reactivate(address: string): SolverRecord | null {
+    const solver = this.solvers.get(address);
+    if (!solver) return null;
+    const updated = { ...solver, isActive: true };
   /**
    * Records that a solver accepted an intent and then missed its fill
    * deadline. Bumps the local fillsFailed counter for read paths (e.g. the
