@@ -1,6 +1,7 @@
 import { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { createTestApp } from "./utils/create-test-app";
+import { IntentsService } from "../src/intents/intents.service";
 
 const validCreateBody = {
   user: "GE2ETESTUSER1234567",
@@ -138,6 +139,8 @@ describe("IntentsController (e2e)", () => {
     });
   });
 
+  it("fill with malformed minDstAmount returns 400 data integrity error", async () => {
+    const created = await createIntent({ user: "GMALFORMEDMIN12345" });
   it("POST /api/v1/intents/:id/fill with non-numeric fillAmount returns 400", async () => {
     const created = await createIntent({ user: "GFILLAMOUNT123456" });
     await request(app.getHttpServer())
@@ -145,6 +148,15 @@ describe("IntentsController (e2e)", () => {
       .send({ solver: "SOLVER_ALPHA" })
       .expect(201);
 
+    const intentsService = app.get(IntentsService);
+    intentsService.update(created.intentId, { minDstAmount: "not-a-number" });
+
+    const res = await request(app.getHttpServer())
+      .post(`/api/v1/intents/${created.intentId}/fill`)
+      .send({ solver: "SOLVER_ALPHA", fillAmount: "995000", txHash: "e2e-hash" })
+      .expect(400);
+    expect(res.body.error).toBe("Data integrity error: intent minDstAmount is not a valid integer");
+    expect(res.body.intentId).toBe(created.intentId);
     const res = await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/fill`)
       .send({ solver: "SOLVER_ALPHA", fillAmount: "abc", txHash: "e2e-hash" })
