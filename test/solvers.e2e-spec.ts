@@ -1,6 +1,13 @@
 import { INestApplication } from "@nestjs/common";
 import request from "supertest";
+import { Keypair } from "@stellar/stellar-sdk";
 import { createTestApp } from "./utils/create-test-app";
+import { SEED_SOLVER_KEYPAIRS } from "../src/solvers/solvers.seed";
+import { buildRegisterMessage } from "../src/common/stellar-signature";
+
+const ALPHA_ADDR = SEED_SOLVER_KEYPAIRS.ALPHA.publicKey();
+const BETA_ADDR  = SEED_SOLVER_KEYPAIRS.BETA.publicKey();
+const GAMMA_ADDR = SEED_SOLVER_KEYPAIRS.GAMMA.publicKey();
 
 describe("SolversController (e2e)", () => {
   let app: INestApplication;
@@ -28,6 +35,12 @@ describe("SolversController (e2e)", () => {
     const res = await request(app.getHttpServer())
       .get("/api/v1/solvers/SOLVER_BETA")
       .expect(200);
+    const counts = res.body.solvers.map((s: { fillsCompleted: number }) => s.fillsCompleted);
+    expect(counts).toEqual([...counts].sort((a: number, b: number) => b - a));
+  });
+
+  it("GET /api/v1/solvers/:address returns the solver record", async () => {
+    const res = await request(app.getHttpServer()).get(`/api/v1/solvers/${BETA_ADDR}`).expect(200);
     expect(res.body.name).toBe("Beta Liquidity Co");
   });
 
@@ -40,7 +53,7 @@ describe("SolversController (e2e)", () => {
 
   it("GET /api/v1/solvers/:address/stats returns the computed success rate", async () => {
     const res = await request(app.getHttpServer())
-      .get("/api/v1/solvers/SOLVER_GAMMA/stats")
+      .get(`/api/v1/solvers/${GAMMA_ADDR}/stats`)
       .expect(200);
     expect(res.body.successRate).toBeCloseTo(187 / (187 + 12), 4);
     expect(res.body.reputationScore).toBeGreaterThanOrEqual(0);
@@ -56,9 +69,51 @@ describe("SolversController (e2e)", () => {
   });
 
   it("GET /api/v1/solvers/:address/stats 404s for an unknown address", async () => {
-    const res = await request(app.getHttpServer())
-      .get("/api/v1/solvers/NOPE/stats")
-      .expect(404);
+    const res = await request(app.getHttpServer()).get("/api/v1/solvers/NOPE/stats").expect(404);
     expect(res.body).toEqual({ error: "Solver not found" });
+  });
+
+  it("POST /api/v1/solvers registers a new solver", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/solvers")
+      .send({
+        address: "GNEWSOLVER123456789",
+        name: "New Solver Inc",
+        bondAmount: "500000000",
+        avgFillTime: 45,
+        supportedChains: ["ethereum", "stellar"],
+        supportedTokens: ["USDC", "USDT"],
+      })
+      .expect(201);
+
+    expect(res.body.address).toBe("GNEWSOLVER123456789");
+    expect(res.body.name).toBe("New Solver Inc");
+    expect(res.body.bondAmount).toBe("500000000");
+    expect(res.body.avgFillTime).toBe(45);
+    expect(res.body.isActive).toBe(true);
+    expect(res.body.fillsCompleted).toBe(0);
+    expect(res.body.fillsFailed).toBe(0);
+    expect(res.body.totalVolume).toBe("0");
+    expect(res.body.registeredAt).toBeTruthy();
+
+    // Verify the solver is now queryable
+    const fetchRes = await request(app.getHttpServer())
+      .get("/api/v1/solvers/GNEWSOLVER123456789")
+      .expect(200);
+    expect(fetchRes.body.name).toBe("New Solver Inc");
+  });
+
+  it("POST /api/v1/solvers rejects invalid registration data", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/solvers")
+      .send({
+        address: "short",
+        name: "Test",
+        // missing required fields
+      })
+      .expect(400);
+
+    expect(res.body.error).toBe("Validation failed");
+    expect(Array.isArray(res.body.details)).toBe(true);
   });
 });
