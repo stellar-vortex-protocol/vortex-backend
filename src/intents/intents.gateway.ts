@@ -21,6 +21,7 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect,
 
   constructor(private readonly intentsService: IntentsService) {
     this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
+    logger.info("ws heartbeat started");
   }
 
   handleConnection(client: WebSocket) {
@@ -99,6 +100,8 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
       this.logger.debug(`WS client error/drop — active subscribers: ${this.subscribers.size}`);
     });
 
+    logger.info(`ws client connected (subscribers=${this.subscribers.size})`);
+
     client.send(JSON.stringify({ type: "connected", message: "Vortex intent stream" }));
 
     const open = this.intentsService.getByState("open").slice(0, 20);
@@ -133,6 +136,7 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
   }
 
   broadcast(event: { type: string; [key: string]: unknown }) {
+    logger.debug(`ws broadcast type=${event.type} subscribers=${this.subscribers.size}`);
     const payload = JSON.stringify(event);
     for (const [client, filter] of this.subscribers) {
       if (client.readyState !== WebSocket.OPEN) continue;
@@ -152,11 +156,16 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
     return count;
   }
 
+  getSubscriberCount(): number {
+    return this.subscribers.size;
+  }
+
   private heartbeat() {
     for (const client of this.subscribers) {
       if (this.alive.get(client) === false) {
         client.terminate();
         this.subscribers.delete(client);
+        logger.debug(`ws heartbeat terminated dead client (subscribers=${this.subscribers.size})`);
         continue;
       }
 

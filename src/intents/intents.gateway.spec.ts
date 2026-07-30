@@ -1,5 +1,15 @@
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
+import { logger } from "../common/logger";
+
+jest.mock("../common/logger", () => ({
+  logger: {
+    info: jest.fn(),
+    debug: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+  },
+}));
 
 function createMockClient() {
   const listeners: Record<string, (...args: unknown[]) => void> = {};
@@ -21,6 +31,7 @@ describe("IntentsGateway heartbeat", () => {
 
   beforeEach(() => {
     jest.useFakeTimers();
+    jest.clearAllMocks();
     intentsService = new IntentsService();
     gateway = new IntentsGateway(intentsService);
   });
@@ -96,5 +107,63 @@ describe("IntentsGateway heartbeat", () => {
     const expected = JSON.stringify({ type: "test_event", data: 123 });
     expect(c1.send).toHaveBeenCalledWith(expected);
     expect(c2.send).toHaveBeenCalledWith(expected);
+  });
+});
+
+describe("IntentsGateway logging", () => {
+  let gateway: IntentsGateway;
+  let intentsService: IntentsService;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    intentsService = new IntentsService();
+    gateway = new IntentsGateway(intentsService);
+  });
+
+  afterEach(() => {
+    gateway.onModuleDestroy();
+    jest.useRealTimers();
+  });
+
+  it("logs heartbeat started on construction", () => {
+    expect(logger.info).toHaveBeenCalledWith("ws heartbeat started");
+  });
+
+  it("logs connection with subscriber count", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    expect(logger.info).toHaveBeenCalledWith("ws client connected (subscribers=1)");
+  });
+
+  it("logs disconnection with subscriber count", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+    gateway.handleDisconnect(client as unknown as import("ws").WebSocket);
+
+    expect(logger.info).toHaveBeenCalledWith("ws client disconnected (subscribers=0)");
+  });
+
+  it("logs broadcast event type without payload", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    gateway.broadcast({ type: "intent_created", intent: { id: "123", secret: "data" } });
+
+    expect(logger.debug).toHaveBeenCalledWith(
+      "ws broadcast type=intent_created subscribers=1",
+    );
+  });
+
+  it("logs heartbeat termination of dead client", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    jest.advanceTimersByTime(60_000);
+
+    expect(logger.debug).toHaveBeenCalledWith(
+      "ws heartbeat terminated dead client (subscribers=0)",
+    );
   });
 });
