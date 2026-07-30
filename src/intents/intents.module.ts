@@ -9,8 +9,14 @@ import { TokensModule } from "../tokens/tokens.module";
 
 @Module({
   imports: [SolversModule, RoutingModule, TokensModule],
+import { SorobanModule } from "../soroban/soroban.module";
+import { EventIngestionService } from "../soroban/event-ingestion.service";
+
+@Module({
+  imports: [SolversModule, SorobanModule],
   controllers: [IntentsController],
-  providers: [IntentsService, IntentsGateway, IntentsSweeperService],
+  providers: [IntentsService, IntentsGateway, IntentsSweeperService, EventIngestionService],
   exports: [IntentsService],
 })
 export class IntentsModule {}
+
