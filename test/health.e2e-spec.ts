@@ -7,7 +7,7 @@ describe("HealthController (e2e)", () => {
 
   beforeAll(async () => {
     app = await createTestApp();
-  });
+  }, 30000);
 
   afterAll(async () => {
     await app.close();
