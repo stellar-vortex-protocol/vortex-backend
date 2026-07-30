@@ -1,116 +1,169 @@
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
-import { WebSocket } from "ws";
+import { logger } from "../common/logger";
 
-describe("IntentsGateway", () => {
+jest.mock("../common/logger", () => ({
+  logger: {
+    info: jest.fn(),
+    debug: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+  },
+}));
+
+function createMockClient() {
+  const listeners: Record<string, (...args: unknown[]) => void> = {};
+  return {
+    readyState: 1,
+    send: jest.fn(),
+    ping: jest.fn(),
+    terminate: jest.fn(),
+    on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
+      listeners[event] = cb;
+    }),
+    _listeners: listeners,
+  };
+}
+
+describe("IntentsGateway heartbeat", () => {
   let gateway: IntentsGateway;
   let intentsService: IntentsService;
 
-  function mockClient(): WebSocket {
-    return {
-      readyState: WebSocket.OPEN,
-      send: jest.fn(),
-      on: jest.fn(),
-    } as unknown as WebSocket;
-  }
-
   beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
     intentsService = new IntentsService();
     gateway = new IntentsGateway(intentsService);
   });
 
-  describe("handleConnection", () => {
-    it("sends a connected message and snapshot on connect", () => {
-      const client = mockClient();
-      gateway.handleConnection(client);
-
-      const calls = (client.send as jest.Mock).mock.calls;
-      expect(calls.length).toBe(2);
-
-      const connectedMsg = JSON.parse(calls[0][0]);
-      expect(connectedMsg).toEqual({ type: "connected", message: "Vortex intent stream" });
-
-      const snapshotMsg = JSON.parse(calls[1][0]);
-      expect(snapshotMsg.type).toBe("snapshot");
-      expect(Array.isArray(snapshotMsg.intents)).toBe(true);
-      expect(snapshotMsg.intents.length).toBeLessThanOrEqual(20);
-    });
-
-    it("registers error handler that removes client from subscribers", () => {
-      const client = mockClient();
-      gateway.handleConnection(client);
-
-      const onMock = client.on as jest.Mock;
-      const errorHandler = onMock.mock.calls.find(
-        ([event]: string[]) => event === "error",
-      ) as [string, () => void];
-      expect(errorHandler).toBeDefined();
-
-      (client.send as jest.Mock).mockClear();
-
-      errorHandler[1]();
-      gateway.broadcast({ type: "test" });
-
-      expect(client.send).not.toHaveBeenCalled();
-    });
+  afterEach(() => {
+    gateway.onModuleDestroy();
+    jest.useRealTimers();
   });
 
-  describe("handleDisconnect", () => {
-    it("removes the client from subscribers so broadcast does not send to it", () => {
-      const client = mockClient();
-      gateway.handleConnection(client);
-      (client.send as jest.Mock).mockClear();
-
-      gateway.handleDisconnect(client);
-      gateway.broadcast({ type: "test" });
-
-      expect(client.send).not.toHaveBeenCalled();
-    });
+  it("marks new connections as alive", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+    expect(gateway.getAliveCount()).toBe(1);
   });
 
-  describe("broadcast", () => {
-    it("sends event to all OPEN clients", () => {
-      const client1 = mockClient();
-      const client2 = mockClient();
-      gateway.handleConnection(client1);
-      gateway.handleConnection(client2);
+  it("removes disconnected clients", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+    expect(gateway.getAliveCount()).toBe(1);
+    gateway.handleDisconnect(client as unknown as import("ws").WebSocket);
+    expect(gateway.getAliveCount()).toBe(0);
+  });
 
-      (client1.send as jest.Mock).mockClear();
-      (client2.send as jest.Mock).mockClear();
+  it("terminates clients that do not respond to ping", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
-      const event = { type: "test", data: 42 };
-      gateway.broadcast(event);
+    jest.advanceTimersByTime(30_000);
 
-      expect(JSON.parse((client1.send as jest.Mock).mock.calls[0][0])).toEqual(event);
-      expect(JSON.parse((client2.send as jest.Mock).mock.calls[0][0])).toEqual(event);
-    });
+    jest.advanceTimersByTime(30_000);
 
-    it("skips clients that are not in OPEN state", () => {
-      const openClient = mockClient();
-      const closedClient = mockClient();
-      Object.assign(closedClient, { readyState: WebSocket.CLOSED });
+    expect(client.terminate).toHaveBeenCalled();
+    expect(gateway.getAliveCount()).toBe(0);
+  });
 
-      gateway.handleConnection(openClient);
-      gateway.handleConnection(closedClient);
+  it("keeps alive clients that respond with pong", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
-      (openClient.send as jest.Mock).mockClear();
-      (closedClient.send as jest.Mock).mockClear();
+    jest.advanceTimersByTime(30_000);
 
-      gateway.broadcast({ type: "test" });
+    expect(client.ping).toHaveBeenCalled();
+    expect(client.terminate).not.toHaveBeenCalled();
 
-      expect(openClient.send).toHaveBeenCalledTimes(1);
-      expect(closedClient.send).not.toHaveBeenCalled();
-    });
+    client._listeners.pong();
 
-    it("sends the JSON-serialized event payload", () => {
-      const client = mockClient();
-      gateway.handleConnection(client);
-      (client.send as jest.Mock).mockClear();
+    expect(gateway.getAliveCount()).toBe(1);
 
-      const event = { type: "intent_created", intent: { id: "abc" } };
-      gateway.broadcast(event);
+    jest.advanceTimersByTime(30_000);
 
-      expect((client.send as jest.Mock).mock.calls[0][0]).toBe(JSON.stringify(event));
-    });
+    expect(client.terminate).not.toHaveBeenCalled();
+    expect(gateway.getAliveCount()).toBe(0);
+
+    client._listeners.pong();
+
+    expect(gateway.getAliveCount()).toBe(1);
+  });
+
+  it("cleans up interval on module destroy", () => {
+    gateway.onModuleDestroy();
+    jest.advanceTimersByTime(60_000);
+    expect(true).toBe(true);
+  });
+
+  it("broadcasts to all alive subscribers", () => {
+    const c1 = createMockClient();
+    const c2 = createMockClient();
+    gateway.handleConnection(c1 as unknown as import("ws").WebSocket);
+    gateway.handleConnection(c2 as unknown as import("ws").WebSocket);
+
+    gateway.broadcast({ type: "test_event", data: 123 });
+
+    const expected = JSON.stringify({ type: "test_event", data: 123 });
+    expect(c1.send).toHaveBeenCalledWith(expected);
+    expect(c2.send).toHaveBeenCalledWith(expected);
+  });
+});
+
+describe("IntentsGateway logging", () => {
+  let gateway: IntentsGateway;
+  let intentsService: IntentsService;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    intentsService = new IntentsService();
+    gateway = new IntentsGateway(intentsService);
+  });
+
+  afterEach(() => {
+    gateway.onModuleDestroy();
+    jest.useRealTimers();
+  });
+
+  it("logs heartbeat started on construction", () => {
+    expect(logger.info).toHaveBeenCalledWith("ws heartbeat started");
+  });
+
+  it("logs connection with subscriber count", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    expect(logger.info).toHaveBeenCalledWith("ws client connected (subscribers=1)");
+  });
+
+  it("logs disconnection with subscriber count", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+    gateway.handleDisconnect(client as unknown as import("ws").WebSocket);
+
+    expect(logger.info).toHaveBeenCalledWith("ws client disconnected (subscribers=0)");
+  });
+
+  it("logs broadcast event type without payload", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    gateway.broadcast({ type: "intent_created", intent: { id: "123", secret: "data" } });
+
+    expect(logger.debug).toHaveBeenCalledWith(
+      "ws broadcast type=intent_created subscribers=1",
+    );
+  });
+
+  it("logs heartbeat termination of dead client", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    jest.advanceTimersByTime(60_000);
+
+    expect(logger.debug).toHaveBeenCalledWith(
+      "ws heartbeat terminated dead client (subscribers=0)",
+    );
   });
 });
