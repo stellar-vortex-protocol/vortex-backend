@@ -1,0 +1,970 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "HealthController_check",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/v1/chain/health": {
+      "get": {
+        "operationId": "SorobanController_getHealth",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "chain"
+        ]
+      }
+    },
+    "/api/v1/chain/ledger": {
+      "get": {
+        "operationId": "SorobanController_getLatestLedger",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "chain"
+        ]
+      }
+    },
+    "/api/v1/chain/network": {
+      "get": {
+        "operationId": "SorobanController_getNetwork",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "chain"
+        ]
+      }
+    },
+    "/api/v1/chain/account/{publicKey}": {
+      "get": {
+        "operationId": "SorobanController_getAccount",
+        "parameters": [
+          {
+            "name": "publicKey",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "chain"
+        ]
+      }
+    },
+    "/api/v1/tokens": {
+      "get": {
+        "operationId": "TokensController_getTokens",
+        "parameters": [
+          {
+            "name": "chain",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/v1/tokens/stellar": {
+      "get": {
+        "operationId": "TokensController_getStellarTokens",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/v1/intents": {
+      "get": {
+        "operationId": "IntentsController_list",
+        "parameters": [
+          {
+            "name": "state",
+            "required": false,
+            "in": "query",
+            "description": "Filter by intent state",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
+            "required": false,
+            "in": "query",
+            "description": "Filter by user address",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chain",
+            "required": false,
+            "in": "query",
+            "description": "Filter by source chain",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "required": true,
+            "in": "query",
+            "description": "Number of results per page",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "name": "offset",
+            "required": true,
+            "in": "query",
+            "description": "Number of results to skip",
+            "schema": {
+              "minimum": 0,
+              "default": 0,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid limit or offset"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      },
+      "post": {
+        "operationId": "IntentsController_create",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateIntentDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "Invalid request body"
+          },
+          "429": {
+            "description": "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/api/v1/intents/open": {
+      "get": {
+        "operationId": "IntentsController_listOpen",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/api/v1/intents/user/{address}": {
+      "get": {
+        "operationId": "IntentsController_listByUser",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/api/v1/intents/{id}": {
+      "get": {
+        "operationId": "IntentsController_getOne",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "description": "Intent not found"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/api/v1/intents/{id}/accept": {
+      "post": {
+        "operationId": "IntentsController_accept",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptIntentDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "403": {
+            "description": "Solver not registered or inactive"
+          },
+          "404": {
+            "description": "Intent not found"
+          },
+          "409": {
+            "description": "Intent is not in open state"
+          },
+          "410": {
+            "description": "Intent has expired"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/api/v1/intents/{id}/fill": {
+      "post": {
+        "operationId": "IntentsController_fill",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FillIntentDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "Fill amount below minimum"
+          },
+          "403": {
+            "description": "Wrong solver for this intent"
+          },
+          "404": {
+            "description": "Intent not found"
+          },
+          "409": {
+            "description": "Intent is not in accepted state"
+          },
+          "410": {
+            "description": "Fill window has expired"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/api/v1/intents/{id}/cancel": {
+      "post": {
+        "operationId": "IntentsController_cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelIntentDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "403": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Intent not found"
+          },
+          "409": {
+            "description": "Intent is not in open state"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/api/v1/intents/quote": {
+      "post": {
+        "operationId": "IntentsController_quote",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuoteRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuoteResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded — max 100 req/min per IP globally"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/api/v1/solvers": {
+      "post": {
+        "operationId": "SolversController_register",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterSolverDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      },
+      "get": {
+        "operationId": "SolversController_getLeaderboard",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/api/v1/solvers/{address}": {
+      "get": {
+        "operationId": "SolversController_getSolver",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/api/v1/solvers/{address}/stats": {
+      "get": {
+        "operationId": "SolversController_getSolverStats",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/api/v1/solvers/{address}/deregister": {
+      "post": {
+        "operationId": "SolversController_deregisterSolver",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/api/v1/solvers/{address}/deactivate": {
+      "post": {
+        "operationId": "SolversController_deactivate",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/api/v1/solvers/{address}/reactivate": {
+      "post": {
+        "operationId": "SolversController_reactivate",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/api/v1/stats": {
+      "get": {
+        "operationId": "StatsController_getStats",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "stats"
+        ]
+      }
+    },
+    "/api/v1/stats/ws": {
+      "get": {
+        "operationId": "StatsController_getWsStats",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "stats"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Vortex Backend",
+    "description": "Intent relay API + WebSocket feed for Vortex Protocol",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [
+    {
+      "name": "intents",
+      "description": ""
+    },
+    {
+      "name": "solvers",
+      "description": ""
+    },
+    {
+      "name": "tokens",
+      "description": ""
+    },
+    {
+      "name": "stats",
+      "description": ""
+    },
+    {
+      "name": "chain",
+      "description": ""
+    }
+  ],
+  "servers": [
+    {
+      "url": "http://localhost:4000",
+      "description": "Local development"
+    },
+    {
+      "url": "https://api.vortex.trade",
+      "description": "Production"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "CreateIntentDto": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "type": "string",
+            "description": "Stellar address of the user creating the intent"
+          },
+          "srcChain": {
+            "type": "string",
+            "enum": [
+              "stellar",
+              "ethereum",
+              "base",
+              "polygon",
+              "arbitrum",
+              "optimism",
+              "avalanche"
+            ],
+            "description": "Source chain the funds are coming from"
+          },
+          "srcTokenAddress": {
+            "type": "string",
+            "description": "Source token contract/address on srcChain"
+          },
+          "srcTokenSymbol": {
+            "type": "string",
+            "description": "Source token symbol, e.g. USDC"
+          },
+          "srcTokenDecimals": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 18,
+            "description": "Source token decimals"
+          },
+          "srcAmount": {
+            "type": "string",
+            "description": "Source amount as a non-negative integer string (base units)"
+          },
+          "dstTokenContract": {
+            "type": "string",
+            "description": "Destination Stellar token contract"
+          },
+          "dstTokenSymbol": {
+            "type": "string",
+            "description": "Destination token symbol, e.g. USDC"
+          },
+          "dstTokenDecimals": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 18,
+            "description": "Destination token decimals"
+          },
+          "minDstAmount": {
+            "type": "string",
+            "description": "Minimum acceptable destination amount as an integer string"
+          },
+          "deadline": {
+            "type": "number",
+            "description": "Unix timestamp deadline; defaults to now + 1800s; must be between now+60s and now+24h"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "description": "Idempotency key for deduplicating duplicate requests"
+          }
+        },
+        "required": [
+          "user",
+          "srcChain",
+          "srcTokenAddress",
+          "srcTokenSymbol",
+          "srcTokenDecimals",
+          "srcAmount",
+          "dstTokenContract",
+          "dstTokenSymbol",
+          "dstTokenDecimals",
+          "minDstAmount"
+        ]
+      },
+      "AcceptIntentDto": {
+        "type": "object",
+        "properties": {
+          "solver": {
+            "type": "string",
+            "description": "Solver address accepting the intent"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Base64-encoded Ed25519 signature of the message \"accept:<intentId>:<solver>\" produced by the solver's private key"
+          }
+        },
+        "required": [
+          "solver",
+          "signature"
+        ]
+      },
+      "FillIntentDto": {
+        "type": "object",
+        "properties": {
+          "solver": {
+            "type": "string",
+            "description": "Solver address filling the intent (must match the accepting solver)"
+          },
+          "fillAmount": {
+            "type": "string",
+            "description": "Amount filled, as a non-negative integer string"
+          },
+          "txHash": {
+            "type": "string",
+            "description": "Stellar fill transaction hash"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Base64-encoded Ed25519 signature of the message \"fill:<intentId>:<solver>\" produced by the solver's private key"
+          }
+        },
+        "required": [
+          "solver",
+          "fillAmount",
+          "signature"
+        ]
+      },
+      "CancelIntentDto": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "type": "string",
+            "description": "Stellar address of the intent's original creator (must match)"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Base64-encoded Ed25519 signature of the message \"cancel:<intentId>\" produced by the private key of `user`"
+          }
+        },
+        "required": [
+          "user",
+          "signature"
+        ]
+      },
+      "QuoteRequestDto": {
+        "type": "object",
+        "properties": {
+          "srcChain": {
+            "type": "string",
+            "enum": [
+              "stellar",
+              "ethereum",
+              "base",
+              "polygon",
+              "arbitrum",
+              "optimism",
+              "avalanche"
+            ],
+            "description": "Source chain the funds are coming from"
+          },
+          "srcTokenSymbol": {
+            "type": "string",
+            "description": "Source token symbol, e.g. USDC"
+          },
+          "srcAmount": {
+            "type": "string",
+            "description": "Source amount as a non-negative integer string"
+          },
+          "dstTokenSymbol": {
+            "type": "string",
+            "description": "Destination token symbol, e.g. USDC"
+          },
+          "intentId": {
+            "type": "string",
+            "description": "Intent ID to persist the quote to"
+          }
+        },
+        "required": [
+          "srcChain",
+          "srcTokenSymbol",
+          "srcAmount",
+          "dstTokenSymbol"
+        ]
+      },
+      "QuoteDto": {
+        "type": "object",
+        "properties": {
+          "solver": {
+            "type": "string",
+            "description": "Solver address"
+          },
+          "solverName": {
+            "type": "string",
+            "description": "Solver name"
+          },
+          "dstAmount": {
+            "type": "string",
+            "description": "Destination amount as a string"
+          },
+          "fee": {
+            "type": "string",
+            "description": "Protocol fee as a string"
+          },
+          "fillTime": {
+            "type": "number",
+            "description": "Estimated fill time in seconds"
+          },
+          "expiresAt": {
+            "type": "number",
+            "description": "Unix timestamp when quote expires"
+          }
+        },
+        "required": [
+          "solver",
+          "solverName",
+          "dstAmount",
+          "fee",
+          "fillTime",
+          "expiresAt"
+        ]
+      },
+      "QuoteResponseDto": {
+        "type": "object",
+        "properties": {
+          "quotes": {
+            "description": "Array of quotes sorted by best dstAmount first",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuoteDto"
+            }
+          },
+          "bestQuote": {
+            "nullable": true,
+            "description": "Best quote or null if no solvers available",
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/QuoteDto"
+              }
+            ]
+          },
+          "srcChain": {
+            "type": "string",
+            "description": "Source chain"
+          },
+          "srcTokenSymbol": {
+            "type": "string",
+            "description": "Source token symbol"
+          },
+          "srcAmount": {
+            "type": "string",
+            "description": "Source amount as a string"
+          },
+          "dstTokenSymbol": {
+            "type": "string",
+            "description": "Destination token symbol"
+          },
+          "estimatedFillTime": {
+            "type": "number",
+            "description": "Estimated fill time in seconds for the best quote"
+          }
+        },
+        "required": [
+          "quotes",
+          "bestQuote",
+          "srcChain",
+          "srcTokenSymbol",
+          "srcAmount",
+          "dstTokenSymbol",
+          "estimatedFillTime"
+        ]
+      },
+      "RegisterSolverDto": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Solver's Stellar address"
+          },
+          "name": {
+            "type": "string",
+            "description": "Solver's display name"
+          },
+          "bondAmount": {
+            "type": "string",
+            "description": "Bond amount as a non-negative integer string (in USDC base units)"
+          },
+          "avgFillTime": {
+            "type": "number",
+            "description": "Average fill time in seconds"
+          },
+          "supportedChains": {
+            "type": "array",
+            "description": "Chains this solver supports",
+            "items": {
+              "type": "string",
+              "enum": [
+                "stellar",
+                "ethereum",
+                "base",
+                "polygon",
+                "arbitrum",
+                "optimism",
+                "avalanche"
+              ]
+            }
+          },
+          "supportedTokens": {
+            "description": "Token symbols this solver supports",
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          }
+        },
+        "required": [
+          "address",
+          "name",
+          "bondAmount",
+          "avgFillTime",
+          "supportedChains",
+          "supportedTokens"
+        ]
+      }
+    }
+  }
+}

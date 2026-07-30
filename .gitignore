@@ -10,6 +10,8 @@ build/
 .env
 .env.*
 !.env.example
+!.env.testnet.example
+!.env.mainnet.example
 
 # Logs
 *.log
