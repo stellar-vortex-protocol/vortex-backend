@@ -1,6 +1,8 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
+import { SolversService } from "../solvers/solvers.service";
+import { SolverRegistryService } from "../soroban/solver-registry.service";
 
 const SWEEP_INTERVAL_MS = 30_000;
 
@@ -11,23 +13,37 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly intentsService: IntentsService,
     private readonly intentsGateway: IntentsGateway,
+    private readonly solversService: SolversService,
+    private readonly solverRegistryService: SolverRegistryService,
   ) {}
 
   onModuleInit() {
-    this.interval = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
+    this.interval = setInterval(() => {
+      this.sweep().catch((err) => {
+        console.error(`[sweeper] sweep failed: ${err instanceof Error ? err.message : err}`);
+      });
+    }, SWEEP_INTERVAL_MS);
   }
 
   onModuleDestroy() {
     if (this.interval) clearInterval(this.interval);
   }
 
-  private sweep() {
+  async sweep() {
     const now = Math.floor(Date.now() / 1000);
     let expiredCount = 0;
 
     for (const intent of this.intentsService.getByState("open")) {
       if (intent.deadline <= now) {
         this.intentsService.update(intent.intentId, { state: "expired" });
+        // Audit trail (issue #62): system-driven expiration.
+        this.intentsService.appendAuditEntry(
+          intent.intentId,
+          "expired",
+          "system",
+          "deadline passed",
+          { deadline: intent.deadline, sweepedAt: now },
+        );
         expiredCount++;
         this.intentsGateway.broadcast({ type: "intent_expired", intentId: intent.intentId });
       }
@@ -36,5 +52,42 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     if (expiredCount > 0) {
       console.log(`[sweeper] Expired ${expiredCount} intent(s)`);
     }
+
+    const missedFills = this.intentsService
+      .getByState("accepted")
+      .filter((intent) => intent.deadline <= now);
+
+    for (const intent of missedFills) {
+      await this.slashMissedFill(intent.intentId, intent.solver, now);
+    }
+  }
+
+  private async slashMissedFill(intentId: string, solver: string | undefined, now: number) {
+    const reason = "accepted intent not filled before deadline";
+
+    this.intentsService.update(intentId, {
+      state: "slashed",
+      slashedAt: now,
+      slashReason: reason,
+    });
+    this.intentsGateway.broadcast({ type: "intent_slashed", intentId, solver, reason });
+
+    if (!solver) {
+      // Shouldn't happen in practice — an "accepted" intent always has a
+      // solver — but don't let a bad record throw the whole sweep cycle.
+      console.error(`[sweeper] intent ${intentId} was accepted with no solver on record`);
+      return;
+    }
+
+    this.solversService.recordFailedFill(solver);
+
+    const result = await this.solverRegistryService.slashSolver({
+      solverAddress: solver,
+      intentId,
+      reason,
+    });
+    console.log(
+      `[sweeper] slashed solver=${solver} for intent=${intentId}: ${result.detail}`,
+    );
   }
 }
