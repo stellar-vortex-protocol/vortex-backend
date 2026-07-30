@@ -12,17 +12,98 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  backend:
-    name: Backend (Nest)
+  secrets-scan:
+    name: Secrets Scanning (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  vulnerability-scan:
+    name: Dependency Vulnerability Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - run: npm audit --audit-level=high
+
+  backend:
+    name: Backend (Nest) – Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+
+    # Spin up a PostgreSQL service container so Prisma can connect during the
+    # migrate step (migrate deploy requires a live DB).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vortex
+          POSTGRES_PASSWORD: vortex
+          POSTGRES_DB: vortex
+        ports:
+          - 5432:5432
+        # Wait until postgres is healthy before the steps run.
+        options: >-
+          --health-cmd="pg_isready -U vortex"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql://vortex:vortex@localhost:5432/vortex?schema=public
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
       - run: npm install
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
       - run: npm test -- --coverage
       - run: npm run test:e2e
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      # ── Prisma ──────────────────────────────────────────────────────────────
+      - name: Validate Prisma schema
+        run: npm run db:validate
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      # Apply all pending migrations to the CI database so the schema stays in
+      # sync and any broken migration SQL is caught before merge.
+      - name: Run database migrations
+        run: npm run db:migrate:prod
+
+      # ── Build & test ────────────────────────────────────────────────────────
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+      - name: E2E tests
+        run: npm run test:e2e
