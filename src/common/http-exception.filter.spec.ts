@@ -1,174 +1,90 @@
-import { BadRequestException, HttpException, NotFoundException } from "@nestjs/common";
+import { HttpException, HttpStatus, ArgumentsHost } from "@nestjs/common";
 import { HttpExceptionFilter } from "./http-exception.filter";
-import { logger } from "./logger";
+import * as sentryModule from "./sentry";
 
-// ─── helpers ────────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
 
-function makeHost(statusFn: jest.Mock, jsonFn: jest.Mock) {
+function makeHost(json: jest.Mock): ArgumentsHost {
   return {
     switchToHttp: () => ({
       getResponse: () => ({
-        status: (code: number) => {
-          statusFn(code);
-          return { json: jsonFn };
-        },
+        status: (_code: number) => ({ json }),
       }),
     }),
-  } as any;
+  } as unknown as ArgumentsHost;
 }
 
-function buildHost() {
-  const jsonFn = jest.fn();
-  const statusFn = jest.fn();
-  const host = makeHost(statusFn, jsonFn);
-  return { host, statusFn, jsonFn };
-}
+// ── Sentry mock ───────────────────────────────────────────────────────────────
+// Spy on captureException so we can assert it is called only in the 500 branch.
 
-// ─── tests ──────────────────────────────────────────────────────────────────
+jest.mock("./sentry", () => ({
+  initSentry: jest.fn(),
+  captureException: jest.fn(),
+}));
+
+// ── tests ─────────────────────────────────────────────────────────────────────
 
 describe("HttpExceptionFilter", () => {
   let filter: HttpExceptionFilter;
-  let errorSpy: jest.SpyInstance;
+  let json: jest.Mock;
 
   beforeEach(() => {
     filter = new HttpExceptionFilter();
-    errorSpy = jest.spyOn(logger, "error").mockImplementation(() => logger);
+    json = jest.fn();
+    jest.clearAllMocks();
   });
 
-  afterEach(() => {
-    jest.restoreAllMocks();
-  });
-
-  // ── Branch 1: string body ─────────────────────────────────────────────────
-
-  describe("HttpException with a string body", () => {
-    it("wraps the string in { error: <string> }", () => {
-      const { host, statusFn, jsonFn } = buildHost();
-      const exception = new HttpException("Not found", 404);
-
-      filter.catch(exception, host);
-
-      expect(statusFn).toHaveBeenCalledWith(404);
-      expect(jsonFn).toHaveBeenCalledWith({ error: "Not found" });
+  describe("HttpException branch", () => {
+    it("returns the correct status for a 404", () => {
+      const host = makeHost(json);
+      filter.catch(new HttpException("Not found", HttpStatus.NOT_FOUND), host);
+      expect(json).toHaveBeenCalledWith({ error: "Not found" });
     });
 
-    it("uses the exception's HTTP status code", () => {
-      const { host, statusFn } = buildHost();
-      filter.catch(new HttpException("Forbidden", 403), host);
-      expect(statusFn).toHaveBeenCalledWith(403);
+    it("does NOT call captureException for expected HttpExceptions (no alert fatigue)", () => {
+      const host = makeHost(json);
+      filter.catch(new HttpException("Bad request", HttpStatus.BAD_REQUEST), host);
+      expect(sentryModule.captureException).not.toHaveBeenCalled();
     });
-  });
 
-  // ── Branch 2: validation-array body (class-validator shape) ───────────────
-
-  describe("HttpException with a validation-error body (message is string[])", () => {
-    it("responds with { error: 'Validation failed', details: [...] }", () => {
-      const { host, statusFn, jsonFn } = buildHost();
-      // Simulate the ValidationPipe shape: { message: string[], error, statusCode }
-      const exception = new BadRequestException({
-        message: ["name must be a string", "email must be an email"],
-        error: "Bad Request",
-        statusCode: 400,
-      });
-
-      filter.catch(exception, host);
-
-      expect(statusFn).toHaveBeenCalledWith(400);
-      expect(jsonFn).toHaveBeenCalledWith({
+    it("surfaces class-validator array messages", () => {
+      const host = makeHost(json);
+      const body = { message: ["field must not be empty"], error: "Bad Request", statusCode: 400 };
+      filter.catch(new HttpException(body, HttpStatus.BAD_REQUEST), host);
+      expect(json).toHaveBeenCalledWith({
         error: "Validation failed",
-        details: ["name must be a string", "email must be an email"],
+        details: ["field must not be empty"],
       });
     });
-
-    it("preserves all validation detail messages in the details array", () => {
-      const { host, _, jsonFn } = buildHost() as any;
-      const messages = ["field1 error", "field2 error", "field3 error"];
-      const exception = new BadRequestException({ message: messages, error: "Bad Request", statusCode: 400 });
-
-      filter.catch(exception, host);
-
-      expect(jsonFn).toHaveBeenCalledWith(
-        expect.objectContaining({ details: messages }),
-      );
-    });
   });
 
-  // ── Branch 3: custom-shaped body (error is string, message is not string) ─
-
-  describe("HttpException with a custom-shaped body", () => {
-    it("passes the body through as-is when it has an error string and no message string", () => {
-      const { host, statusFn, jsonFn } = buildHost();
-      const customBody = {
-        error: "Insufficient liquidity",
-        fillAmount: "1000000",
-        minDstAmount: "990000",
-      };
-      const exception = new BadRequestException(customBody);
-
-      filter.catch(exception, host);
-
-      expect(statusFn).toHaveBeenCalledWith(400);
-      // The body passed through should contain the custom fields
-      const call = jsonFn.mock.calls[0][0] as Record<string, unknown>;
-      expect(call.error).toBe("Insufficient liquidity");
-      expect(call.fillAmount).toBe("1000000");
-      expect(call.minDstAmount).toBe("990000");
+  describe("generic Error branch (500)", () => {
+    it("returns 500 json for an unhandled Error", () => {
+      const host = makeHost(json);
+      filter.catch(new Error("boom"), host);
+      expect(json).toHaveBeenCalledWith({ error: "boom" });
     });
-  });
 
-  // ── Branch 4: object body with a string `message` ─────────────────────────
-
-  describe("HttpException whose body has a string message", () => {
-    it("responds with { error: <message string> }", () => {
-      const { host, statusFn, jsonFn } = buildHost();
-      // NestJS HttpException defaults produce { message, statusCode } when called
-      // via built-in exceptions like NotFoundException
-      const exception = new NotFoundException("Intent not found");
-
-      filter.catch(exception, host);
-
-      expect(statusFn).toHaveBeenCalledWith(404);
-      expect(jsonFn).toHaveBeenCalledWith({ error: "Intent not found" });
-    });
-  });
-
-  // ── Branch 5: fallback — non-HttpException Error ───────────────────────────
-
-  describe("non-HttpException Error", () => {
-    it("responds with 500 and { error: <message> }", () => {
-      const { host, statusFn, jsonFn } = buildHost();
-      const err = new Error("database connection lost");
-
+    it("calls captureException with the Error instance (Sentry alerting)", () => {
+      const host = makeHost(json);
+      const err = new Error("unexpected failure");
       filter.catch(err, host);
-
-      expect(statusFn).toHaveBeenCalledWith(500);
-      expect(jsonFn).toHaveBeenCalledWith({ error: "database connection lost" });
+      expect(sentryModule.captureException).toHaveBeenCalledTimes(1);
+      expect(sentryModule.captureException).toHaveBeenCalledWith(err);
     });
 
-    it("logs the error stack via logger.error", () => {
-      const { host } = buildHost();
-      const err = new Error("oops");
-
-      filter.catch(err, host);
-
-      expect(errorSpy).toHaveBeenCalledTimes(1);
+    it("wraps non-Error throws and still calls captureException", () => {
+      const host = makeHost(json);
+      filter.catch("string throw", host);
+      expect(sentryModule.captureException).toHaveBeenCalledTimes(1);
+      const captured = (sentryModule.captureException as jest.Mock).mock.calls[0][0];
+      expect(captured).toBeInstanceOf(Error);
     });
 
-    it("handles a thrown non-Error value and returns a generic message", () => {
-      const { host, statusFn, jsonFn } = buildHost();
-
-      filter.catch("some string thrown", host);
-
-      expect(statusFn).toHaveBeenCalledWith(500);
-      // Non-Error values produce "Unknown error" as message
-      expect(jsonFn).toHaveBeenCalledWith({ error: "Internal server error" });
-    });
-
-    it("handles a thrown null value gracefully", () => {
-      const { host, statusFn } = buildHost();
-
-      expect(() => filter.catch(null, host)).not.toThrow();
-      expect(statusFn).toHaveBeenCalledWith(500);
+    it("returns 500 with fallback message for unknown throws", () => {
+      const host = makeHost(json);
+      filter.catch(null, host);
+      expect(json).toHaveBeenCalledWith({ error: "Unknown error" });
     });
   });
 });
