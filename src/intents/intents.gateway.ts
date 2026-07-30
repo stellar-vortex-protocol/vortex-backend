@@ -273,6 +273,8 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
         client.ping();
       }
     }
+    span.setAttribute("subscribers.sent", sent);
+    span.end();
   }
 
   getSubscriberCount(): number {
