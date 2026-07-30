@@ -164,4 +164,90 @@ describe("IntentsController (e2e)", () => {
     }
     expect(res.body.bestQuote.dstAmount).toBe(res.body.quotes[0].dstAmount);
   });
+
+  it("POST /api/v1/intents/quote preserves precision for large 18-decimal amounts", async () => {
+    // Simulate 1 million USDC with 18 decimals: 1e6 * 1e18 = 1e24
+    const largeAmount = "1000000000000000000000000";
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents/quote")
+      .send({
+        srcChain: "ethereum",
+        srcTokenSymbol: "USDT",
+        srcAmount: largeAmount,
+        dstTokenSymbol: "USDC",
+      })
+      .expect(201);
+
+    expect(res.body.quotes.length).toBe(3);
+    const srcBigInt = BigInt(largeAmount);
+    const bestQuote = BigInt(res.body.bestQuote.dstAmount);
+
+    // Best quote should be between 99.2% and 100% of source (0.8% max variance)
+    const minExpected = (srcBigInt * BigInt(992)) / BigInt(1000);
+    const maxExpected = srcBigInt;
+    expect(bestQuote >= minExpected).toBe(true);
+    expect(bestQuote <= maxExpected).toBe(true);
+
+    // Verify no silent truncation: all quotes should be in a reasonable range
+    for (const quote of res.body.quotes) {
+      const amount = BigInt(quote.dstAmount);
+      expect(amount >= minExpected).toBe(true);
+      expect(amount <= maxExpected).toBe(true);
+    }
+  });
+
+  it("POST /api/v1/intents/quote with intentId persists quotedDstAmount on the intent", async () => {
+    const created = await createIntent();
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents/quote")
+      .send({
+        srcChain: "ethereum",
+        srcTokenSymbol: "USDC",
+        srcAmount: "1000000",
+        dstTokenSymbol: "USDC",
+        intentId: created.intentId,
+      })
+      .expect(201);
+
+    expect(res.body.bestQuote).toBeTruthy();
+    const quotedAmount = res.body.bestQuote.dstAmount;
+
+    // Fetch the intent and verify quotedDstAmount was persisted
+    const fetchRes = await request(app.getHttpServer())
+      .get(`/api/v1/intents/${created.intentId}`)
+      .expect(200);
+
+    expect(fetchRes.body.quotedDstAmount).toBe(quotedAmount);
+  });
+
+  it("GET /api/v1/intents/:id/quote returns the persisted quote", async () => {
+    const created = await createIntent();
+    const quoteRes = await request(app.getHttpServer())
+      .post("/api/v1/intents/quote")
+      .send({
+        srcChain: "ethereum",
+        srcTokenSymbol: "USDC",
+        srcAmount: "1000000",
+        dstTokenSymbol: "USDC",
+        intentId: created.intentId,
+      })
+      .expect(201);
+
+    const quotedAmount = quoteRes.body.bestQuote.dstAmount;
+
+    // Fetch the quote via dedicated endpoint
+    const res = await request(app.getHttpServer())
+      .get(`/api/v1/intents/${created.intentId}/quote`)
+      .expect(200);
+
+    expect(res.body.intentId).toBe(created.intentId);
+    expect(res.body.quotedDstAmount).toBe(quotedAmount);
+  });
+
+  it("GET /api/v1/intents/:id/quote returns 404 if no quote exists", async () => {
+    const created = await createIntent();
+    await request(app.getHttpServer())
+      .get(`/api/v1/intents/${created.intentId}/quote`)
+      .expect(404);
+  });
 });
