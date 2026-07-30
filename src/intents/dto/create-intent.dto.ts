@@ -1,6 +1,7 @@
 import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min, MinLength } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { SupportedChain } from "../intents.types";
+import { IsValidDeadline } from "../../common/validators/deadline.validator";
 
 const SUPPORTED_CHAINS: SupportedChain[] = [
   "stellar",
@@ -62,9 +63,10 @@ export class CreateIntentDto {
   @Matches(/^\d+$/)
   minDstAmount!: string;
 
-  @ApiPropertyOptional({ description: "Unix timestamp deadline; defaults to now + 1800s" })
+  @ApiPropertyOptional({ description: "Unix timestamp deadline; defaults to now + 1800s; must be between now+60s and now+24h" })
   @IsOptional()
   @IsInt()
+  @IsValidDeadline()
   deadline?: number;
 
   @ApiPropertyOptional({ description: "Idempotency key for deduplicating duplicate requests" })

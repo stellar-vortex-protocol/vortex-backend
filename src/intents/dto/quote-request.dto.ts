@@ -1,5 +1,5 @@
-import { IsIn, IsNotEmpty, IsString, Matches } from "class-validator";
-import { ApiProperty } from "@nestjs/swagger";
+import { IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, Matches } from "class-validator";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { SupportedChain } from "../intents.types";
 
 const SUPPORTED_CHAINS: SupportedChain[] = [
@@ -31,4 +31,9 @@ export class QuoteRequestDto {
   @IsString()
   @IsNotEmpty()
   dstTokenSymbol!: string;
+
+  @ApiPropertyOptional({ description: "Intent ID to persist the quote to" })
+  @IsOptional()
+  @IsUUID()
+  intentId?: string;
 }

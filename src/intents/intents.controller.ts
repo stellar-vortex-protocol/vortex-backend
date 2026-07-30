@@ -19,6 +19,7 @@ import {
   ApiGoneResponse,
   ApiBadRequestResponse,
 } from "@nestjs/swagger";
+import { ApiTags, ApiOkResponse } from "@nestjs/swagger";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
@@ -27,6 +28,7 @@ import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
+import { QuoteResponseDto } from "./dto/quote-response.dto";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -82,11 +84,25 @@ export class IntentsController {
     return intent;
   }
 
+  @Get(":id/quote")
+  getQuote(@Param("id") id: string) {
+    const intent = this.intentsService.get(id);
+    if (!intent) throw new NotFoundException("Intent not found");
+    if (!intent.quotedDstAmount) {
+      throw new NotFoundException("No quote found for this intent");
+    }
+    return {
+      intentId: intent.intentId,
+      quotedDstAmount: intent.quotedDstAmount,
+    };
+  }
+
   @Post()
   @ApiBadRequestResponse({ description: "Invalid request body" })
   create(@Body() dto: CreateIntentDto) {
+  async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
-    const intent = this.intentsService.create({
+    const intent = await this.intentsService.create({
       user: dto.user,
       srcChain: dto.srcChain,
       srcToken: {
@@ -194,7 +210,7 @@ export class IntentsController {
   cancel(@Param("id") id: string, @Body() dto: CancelIntentDto) {
     const intent = this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
-    if (intent.user !== dto.user) throw new ForbiddenException("Unauthorized");
+    if (intent.user.toLowerCase() !== dto.user.toLowerCase()) throw new ForbiddenException("Unauthorized");
     if (intent.state !== "open") {
       throw new ConflictException(`Cannot cancel intent in state: ${intent.state}`);
     }
@@ -205,13 +221,17 @@ export class IntentsController {
   }
 
   @Post("quote")
-  quote(@Body() dto: QuoteRequestDto) {
+  @ApiOkResponse({ type: QuoteResponseDto })
+  quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {
     const solvers = this.solversService.getAll().filter((s) => s.isActive);
+    const srcAmountBigInt = BigInt(dto.srcAmount);
+
     const quotes = solvers
       .map((solver) => {
-        const variance = 1 - Math.random() * 0.008; // 0-0.8% variance
-        const dstAmount = Math.floor(Number(dto.srcAmount) * variance);
-        const fee = Math.floor(dstAmount * 0.0005); // 0.05%
+        // Variance: 0-0.8% downside; represented as 992-1000 in 1000ths
+        const varianceScaled = 992 + Math.floor(Math.random() * 9); // 992-1000
+        const dstAmount = (srcAmountBigInt * BigInt(varianceScaled)) / BigInt(1000);
+        const fee = (dstAmount * BigInt(5)) / BigInt(10000); // 0.05%
         return {
           solver: solver.address,
           solverName: solver.name,
@@ -222,6 +242,11 @@ export class IntentsController {
         };
       })
       .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
+
+    // Persist quoted amount if intentId is provided
+    if (dto.intentId && quotes.length > 0) {
+      this.intentsService.update(dto.intentId, { quotedDstAmount: quotes[0].dstAmount });
+    }
 
     return {
       quotes,
