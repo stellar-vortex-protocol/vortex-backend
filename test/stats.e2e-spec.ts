@@ -67,4 +67,12 @@ describe("StatsController (e2e)", () => {
     expect(after.body.totalIntents).toBe(before.body.totalIntents + 1);
     expect(BigInt(after.body.totalVolume) - BigInt(before.body.totalVolume)).toBe(995000n);
   });
+
+  it("GET /api/v1/stats/ws returns the current WebSocket subscriber count", async () => {
+    const res = await request(app.getHttpServer()).get("/api/v1/stats/ws").expect(200);
+
+    expect(res.body).toHaveProperty("subscriberCount");
+    expect(typeof res.body.subscriberCount).toBe("number");
+    expect(res.body.subscriberCount).toBeGreaterThanOrEqual(0);
+  });
 });

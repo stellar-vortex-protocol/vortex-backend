@@ -175,6 +175,10 @@ export class IntentsGateway implements OnGatewayConnection, OnGatewayDisconnect 
       }
     }
   }
+
+  getSubscriberCount(): number {
+    return this.subscribers.size;
+  }
 }
   private getEventChain(event: { type: string; [key: string]: unknown }): string | null {
     if (event.type === "intent_created" && event.intent) {
