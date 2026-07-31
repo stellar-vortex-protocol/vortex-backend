@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
-import { IIntentsRepository } from "./intents.repository";
+import { IntentsRepository } from "./intents.repository";
 import { Intent, IntentState } from "./intents.types";
 import { buildSeedIntents } from "./intents.seed";
 
@@ -13,7 +13,7 @@ import { buildSeedIntents } from "./intents.seed";
  * lands, without any changes to IntentsService.
  */
 @Injectable()
-export class InMemoryIntentsRepository implements IIntentsRepository {
+export class InMemoryIntentsRepository implements IntentsRepository {
   private readonly store = new Map<string, Intent>();
 
   constructor() {

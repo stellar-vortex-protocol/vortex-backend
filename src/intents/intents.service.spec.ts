@@ -3,8 +3,6 @@ import { Keypair } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { IntentsService } from "./intents.service";
-import { InMemoryIntentsRepository } from "./in-memory-intents.repository";
-import { INTENTS_REPOSITORY } from "./intents.repository";
 
 const VALID_CONTRACT_ID = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
 
@@ -73,9 +71,9 @@ describe("IntentsService", () => {
     expect(service.getAll()).toHaveLength(before + 1);
   });
 
-  it("create defaults deadline to now + 1800 when omitted", () => {
+  it("create defaults deadline to now + 1800 when omitted", async () => {
     const before = Math.floor(Date.now() / 1000);
-    const intent = service.create({
+    const intent = await service.create({
       user: "GTEST...0000",
       srcChain: "ethereum",
       srcToken: { address: "0xabc", symbol: "USDC", name: "USD Coin", decimals: 6, chain: "ethereum" },
@@ -188,6 +186,9 @@ describe("IntentsService", () => {
       const successes = results.filter((r) => r !== null);
       expect(successes).toHaveLength(1);
       expect(successes[0]!.state).toBe("filled");
+    });
+  });
+
   describe("on-chain registration (ONCHAIN_INTENTS_ENABLED)", () => {
     it("stays fully in-memory when the flag is off, never touching StellarTxService", async () => {
       const stellarTxService = fakeStellarTxService();

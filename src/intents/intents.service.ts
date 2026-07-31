@@ -1,24 +1,30 @@
-import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  ServiceUnavailableException,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { v4 as uuidv4 } from "uuid";
-import { Intent, IntentAuditEntry, IntentState } from "./intents.types";
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
-import { Intent, IntentState } from "./intents.types";
+import { Intent, IntentAuditEntry, IntentState } from "./intents.types";
 import { buildSeedIntents } from "./intents.seed";
 import { AppConfig } from "../config/configuration";
 import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 
+const STORE_SIZE_LOG_INTERVAL_MS = 60_000;
+
 /**
  * Orchestration layer for intents.
  *
  * Business logic (ID generation, default state, deadline defaulting) lives
- * here.  All persistence is delegated to the injected IIntentsRepository so
- * the storage adapter can be swapped (in-memory → Prisma → on-chain) without
- * touching this service.
+ * here. All persistence is delegated to the internal in-memory Map.
+ * Once issue #36 lands, this will delegate to an injected IIntentsRepository
+ * so the storage adapter can be swapped without touching this service.
  */
 @Injectable()
-export class IntentsService {
+export class IntentsService implements OnModuleDestroy {
   private readonly logger = new Logger(IntentsService.name);
   private readonly intents = new Map<string, Intent>();
   private readonly idempotencyCache = new Map<string, { intentId: string; expiresAt: number }>();
@@ -31,7 +37,8 @@ export class IntentsService {
    */
   private readonly auditLog = new Map<string, IntentAuditEntry[]>();
 
-  constructor() {
+  private readonly sizeLogTimer: ReturnType<typeof setInterval>;
+
   constructor(
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly stellarTxService: StellarTxService,
@@ -51,8 +58,10 @@ export class IntentsService {
     this.logger.log(`[store-monitor] intents map size: ${this.intents.size}`);
   }
 
-  create(data: Omit<Intent, "intentId" | "createdAt" | "state">, idempotencyKey?: string): Intent {
-  async create(data: Omit<Intent, "intentId" | "createdAt" | "state">): Promise<Intent> {
+  async create(
+    data: Omit<Intent, "intentId" | "createdAt" | "state">,
+    idempotencyKey?: string,
+  ): Promise<Intent> {
     const now = Math.floor(Date.now() / 1000);
 
     if (idempotencyKey) {
@@ -82,7 +91,10 @@ export class IntentsService {
 
     if (idempotencyKey) {
       const ttl = 86400; // 24 hours
-      this.idempotencyCache.set(idempotencyKey, { intentId: intent.intentId, expiresAt: now + ttl });
+      this.idempotencyCache.set(idempotencyKey, {
+        intentId: intent.intentId,
+        expiresAt: now + ttl,
+      });
     }
 
     return intent;
@@ -115,8 +127,12 @@ export class IntentsService {
       });
       this.logger.log(`Registered intent ${intent.intentId} on-chain (tx ${result.hash})`);
     } catch (err) {
-      this.logger.error(`Failed to register intent ${intent.intentId} on-chain: ${(err as Error).message}`);
-      throw new ServiceUnavailableException("Failed to register intent with the settlement contract");
+      this.logger.error(
+        `Failed to register intent ${intent.intentId} on-chain: ${(err as Error).message}`,
+      );
+      throw new ServiceUnavailableException(
+        "Failed to register intent with the settlement contract",
+      );
     }
   }
 
@@ -134,19 +150,19 @@ export class IntentsService {
   }
 
   get(id: string): Intent | undefined {
-    return this.repository.findById(id) as Intent | undefined;
+    return this.intents.get(id);
   }
 
   getAll(): Intent[] {
-    return this.repository.findAll() as Intent[];
+    return [...this.intents.values()].sort((a, b) => b.createdAt - a.createdAt);
   }
 
   getByState(state: IntentState): Intent[] {
-    return this.repository.findByState(state) as Intent[];
+    return this.getAll().filter((i) => i.state === state);
   }
 
   getByUser(user: string): Intent[] {
-    return this.repository.findByUser(user) as Intent[];
+    return this.getAll().filter((i) => i.user.toLowerCase() === user.toLowerCase());
   }
 
   getAcceptedCountBySolver(solver: string): number {
@@ -154,12 +170,17 @@ export class IntentsService {
   }
 
   update(id: string, patch: Partial<Intent>): Intent | null {
-    return this.repository.update(id, patch) as Intent | null;
+    const existing = this.intents.get(id);
+    if (!existing) return null;
+    const updated = { ...existing, ...patch };
+    this.intents.set(id, updated);
+    return updated;
   }
 
   /**
    * Atomically accept an intent only if it is currently "open".
-   * Mirrors the DB pattern: UPDATE intents SET state='accepted' WHERE id=$1 AND state='open' RETURNING *
+   * Mirrors the DB pattern:
+   *   UPDATE intents SET state='accepted' WHERE id=$1 AND state='open' RETURNING *
    * Returns null when the intent is not found or is not in the "open" state (already taken).
    */
   acceptIfOpen(id: string, solver: string): Intent | null {
@@ -183,7 +204,11 @@ export class IntentsService {
    *   UPDATE intents SET state='filled', ... WHERE id=$1 AND state='accepted' AND solver=$2 RETURNING *
    * Returns null when the intent is not found, not accepted, or assigned to a different solver.
    */
-  fillIfAccepted(id: string, solver: string, patch: Omit<Partial<Intent>, "state" | "solver">): Intent | null {
+  fillIfAccepted(
+    id: string,
+    solver: string,
+    patch: Omit<Partial<Intent>, "state" | "solver">,
+  ): Intent | null {
     const existing = this.intents.get(id);
     if (!existing || existing.state !== "accepted" || existing.solver !== solver) return null;
 
@@ -200,13 +225,6 @@ export class IntentsService {
    * Append a new audit entry for the given intent.
    * Call this whenever an intent transitions state so the full history is
    * preserved even after the `state` field is overwritten.
-   *
-   * @param intentId  - ID of the intent being transitioned.
-   * @param toState   - The state the intent is moving INTO.
-   * @param actor     - Address or identifier of who triggered the change
-   *                    ("system" for sweeper-driven expirations).
-   * @param reason    - Short human-readable description of why the transition occurred.
-   * @param metadata  - Optional bag of extra data (e.g. fill amount, tx hash).
    */
   appendAuditEntry(
     intentId: string,
@@ -246,8 +264,7 @@ export class IntentsService {
         intentId: uuidv4(),
         createdAt: now - Math.floor(Math.random() * 600),
       };
-      this.repository.save(intent);
+      this.intents.set(intent.intentId, intent);
     }
   }
 }
-

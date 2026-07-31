@@ -9,13 +9,17 @@ function makeConfigService(overrides: Partial<AppConfig["stellar"]> = {}) {
     settlementContractId: "",
     solverRegistryContractId: "",
     signingKey: "",
+    feePercentile: "p50",
     ...overrides,
   };
   const config: AppConfig = {
     nodeEnv: "test",
     port: 4000,
+    databaseUrl: "postgresql://vortex:vortex@localhost:5432/vortex?schema=public",
     stellar,
+    onchainIntentsEnabled: false,
     corsOrigin: "*",
+    wsMaxConnections: 1000,
   };
   return {
     get: (key: string) => {

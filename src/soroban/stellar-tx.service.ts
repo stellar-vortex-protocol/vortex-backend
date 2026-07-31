@@ -1,8 +1,17 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { BASE_FEE, FeeBumpTransaction, SorobanRpc, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
-import { AppConfig } from "../config/configuration";
+import {
+  BASE_FEE,
+  FeeBumpTransaction,
+  nativeToScVal,
+  SorobanRpc,
+  Transaction,
+  TransactionBuilder,
+  xdr,
+} from "@stellar/stellar-sdk";
+import { AppConfig, FeePercentile } from "../config/configuration";
 import { SorobanService } from "./soroban.service";
+import { SignerService } from "./signer.service";
 
 export interface FeeEstimate {
   /** Classic inclusion fee, in stroops. */
@@ -13,10 +22,21 @@ export interface FeeEstimate {
   totalFee: string;
 }
 
+export interface InvokeContractParams {
+  contractId: string;
+  method: string;
+  args: xdr.ScVal[];
+}
+
+export interface InvokeContractResult {
+  hash: string;
+  status: string;
+}
+
 @Injectable()
 export class StellarTxService {
   private readonly logger = new Logger(StellarTxService.name);
-  private readonly feePercentile: AppConfig["stellar"]["feePercentile"];
+  private readonly feePercentile: FeePercentile;
 
   constructor(
     private readonly sorobanService: SorobanService,
@@ -49,13 +69,18 @@ export class StellarTxService {
    */
   async estimateFee(transaction: Transaction): Promise<FeeEstimate> {
     const baseFee = await this.estimateBaseFee();
-    const simulation = await this.sorobanService.simulateTransaction(this.withFee(transaction, baseFee));
+    const simulation = await this.sorobanService.simulateTransaction(
+      this.withFee(transaction, baseFee),
+    );
 
     if (SorobanRpc.Api.isSimulationError(simulation)) {
-      throw new Error(`Fee estimation failed: transaction simulation error: ${simulation.error}`);
+      throw new Error(
+        `Fee estimation failed: transaction simulation error: ${simulation.error}`,
+      );
     }
 
-    const resourceFee = simulation.minResourceFee;
+    const resourceFee = (simulation as SorobanRpc.Api.SimulateTransactionSuccessResponse)
+      .minResourceFee;
     const totalFee = (BigInt(baseFee) + BigInt(resourceFee)).toString();
 
     return { baseFee, resourceFee, totalFee };
@@ -67,11 +92,34 @@ export class StellarTxService {
    */
   async prepareTransaction(transaction: Transaction): Promise<Transaction> {
     const baseFee = await this.estimateBaseFee();
-    const prepared = await this.sorobanService.prepareTransaction(this.withFee(transaction, baseFee));
+    const prepared = await this.sorobanService.prepareTransaction(
+      this.withFee(transaction, baseFee),
+    );
 
-    this.logger.log(`Prepared transaction with fee ${prepared.fee} stroops (base fee ${baseFee})`);
+    this.logger.log(
+      `Prepared transaction with fee ${prepared.fee} stroops (base fee ${baseFee})`,
+    );
 
     return prepared as Transaction;
+  }
+
+  /**
+   * Invokes a Soroban contract method.
+   * Used by IntentsService when ONCHAIN_INTENTS_ENABLED is true.
+   * This is a stub that will be expanded once the on-chain settlement
+   * contract interface is finalised (see docs/architecture/onchain-settlement.md).
+   */
+  async invokeContract(params: InvokeContractParams): Promise<InvokeContractResult> {
+    this.logger.log(
+      `invokeContract contractId=${params.contractId} method=${params.method}`,
+    );
+
+    // TODO: Build, simulate, sign, and submit the actual Soroban transaction
+    // once SignerService is wired here and the contract bindings are finalised.
+    // For now, throw a clear error so callers know this isn't implemented yet.
+    throw new Error(
+      `invokeContract not yet implemented for method=${params.method} on contract=${params.contractId}`,
+    );
   }
 
   private withFee(transaction: Transaction | FeeBumpTransaction, fee: string): Transaction {

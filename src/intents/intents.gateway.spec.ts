@@ -1,5 +1,8 @@
+import { ConfigService } from "@nestjs/config";
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
+import { StellarTxService } from "../soroban/stellar-tx.service";
+import { AppConfig } from "../config/configuration";
 import { logger } from "../common/logger";
 
 jest.mock("../common/logger", () => ({
@@ -10,6 +13,13 @@ jest.mock("../common/logger", () => ({
     error: jest.fn(),
   },
 }));
+
+function makeIntentsService(): IntentsService {
+  const configService = {
+    get: jest.fn().mockReturnValue(false),
+  } as unknown as ConfigService<AppConfig, true>;
+  return new IntentsService(configService, {} as StellarTxService);
+}
 
 function createMockClient() {
   const listeners: Record<string, (...args: unknown[]) => void> = {};
@@ -32,7 +42,7 @@ describe("IntentsGateway heartbeat", () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
-    intentsService = new IntentsService();
+    intentsService = makeIntentsService();
     gateway = new IntentsGateway(intentsService);
   });
 
@@ -117,7 +127,7 @@ describe("IntentsGateway logging", () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
-    intentsService = new IntentsService();
+    intentsService = makeIntentsService();
     gateway = new IntentsGateway(intentsService);
   });
 

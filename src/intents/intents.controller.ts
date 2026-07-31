@@ -12,17 +12,17 @@ import {
   Query,
   UseGuards,
 } from "@nestjs/common";
-import { ApiTags, ApiTooManyRequestsResponse } from "@nestjs/swagger";
-import { Throttle } from "@nestjs/throttler";
 import {
   ApiTags,
+  ApiOkResponse,
   ApiNotFoundResponse,
   ApiConflictResponse,
   ApiForbiddenResponse,
   ApiGoneResponse,
   ApiBadRequestResponse,
+  ApiTooManyRequestsResponse,
 } from "@nestjs/swagger";
-import { ApiTags, ApiOkResponse } from "@nestjs/swagger";
+import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
@@ -34,9 +34,14 @@ import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
-import { UserThrottlerGuard } from "./user-throttler.guard";
-import { ListIntentsDto } from "./dto/list-intents.dto";
 import { QuoteResponseDto } from "./dto/quote-response.dto";
+import { ListIntentsDto } from "./dto/list-intents.dto";
+import { UserThrottlerGuard } from "./user-throttler.guard";
+import {
+  verifyStellarSignature,
+  buildCancelMessage,
+  buildFillMessage,
+} from "../common/stellar-signature";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -50,30 +55,22 @@ export class IntentsController {
   ) {}
 
   @Get()
-  list(@Query() dto: ListIntentsDto) {
   @ApiBadRequestResponse({ description: "Invalid limit or offset" })
-  list(
-    @Query("state") state?: string,
-    @Query("user") user?: string,
-    @Query("chain") chain?: string,
-    @Query("limit") limitRaw = "20",
-    @Query("offset") offsetRaw = "0",
-  ) {
+  list(@Query() dto: ListIntentsDto) {
     let intents = this.intentsService.getAll();
 
     if (dto.state) intents = intents.filter((i) => i.state === dto.state);
-    if (dto.user) intents = intents.filter((i) => i.user.toLowerCase() === dto.user.toLowerCase());
+    if (dto.user) intents = intents.filter((i) => i.user.toLowerCase() === dto.user!.toLowerCase());
     if (dto.chain) intents = intents.filter((i) => i.srcChain === dto.chain);
 
-    const limit = Math.min(dto.limit, 100);
-    const offset = dto.offset;
-    const limit = parseInt(limitRaw, 10);
-    if (limit > 100) {
+    const limit = Math.min(dto.limit ?? 20, 100);
+    const offset = dto.offset ?? 0;
+
+    if ((dto.limit ?? 20) > 100) {
       throw new BadRequestException("Limit exceeds maximum allowed value of 100");
     }
-    const offset = parseInt(offsetRaw, 10);
-    const page = intents.slice(offset, offset + limit);
 
+    const page = intents.slice(offset, offset + limit);
     return { intents: page, total: intents.length, limit, offset };
   }
 
@@ -104,53 +101,51 @@ export class IntentsController {
   @Post()
   @UseGuards(UserThrottlerGuard)
   @ApiTooManyRequestsResponse({
-    description: "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)",
+    description:
+      "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)",
   })
-  @Get(":id/quote")
-  getQuote(@Param("id") id: string) {
-    const intent = this.intentsService.get(id);
-    if (!intent) throw new NotFoundException("Intent not found");
-    if (!intent.quotedDstAmount) {
-      throw new NotFoundException("No quote found for this intent");
-    }
-    return {
-      intentId: intent.intentId,
-      quotedDstAmount: intent.quotedDstAmount,
-    };
-  }
-
-  @Post()
   @ApiBadRequestResponse({ description: "Invalid request body" })
-  create(@Body() dto: CreateIntentDto) {
   async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
     const chainData = this.tokensService.getByChain(dto.srcChain);
     const stellarData = this.tokensService.getStellarTokens();
-    
-    const srcTokenList = dto.srcChain === "stellar" ? stellarData.tokens : chainData.tokens;
-    const srcToken = srcTokenList.find((t: any) => 
-      dto.srcChain === "stellar" ? t.contract === dto.srcTokenAddress : t.address === dto.srcTokenAddress
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const srcTokenList = dto.srcChain === "stellar" ? stellarData.tokens : (chainData as any).tokens;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const srcToken = srcTokenList.find((t: any) =>
+      dto.srcChain === "stellar"
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ? (t as any).contract === dto.srcTokenAddress
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        : (t as any).address === dto.srcTokenAddress,
     );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const dstToken = stellarData.tokens.find((t: any) => t.contract === dto.dstTokenContract);
-    
-    const intent = this.intentsService.create({
-    const intent = await this.intentsService.create({
-      user: dto.user,
-      srcChain: dto.srcChain,
-      srcToken: {
-        address: dto.srcTokenAddress,
-        symbol: dto.srcTokenSymbol,
-        name: dto.srcTokenSymbol,
-        decimals: dto.srcTokenDecimals,
-        chain: dto.srcChain,
-        priceUSD: srcToken?.priceUSD,
-      },
-      srcAmount: dto.srcAmount,
-      dstToken: {
-        contract: dto.dstTokenContract,
-        symbol: dto.dstTokenSymbol,
-        decimals: dto.dstTokenDecimals,
-        priceUSD: dstToken?.priceUSD,
+
+    const intent = await this.intentsService.create(
+      {
+        user: dto.user,
+        srcChain: dto.srcChain,
+        srcToken: {
+          address: dto.srcTokenAddress,
+          symbol: dto.srcTokenSymbol,
+          name: dto.srcTokenSymbol,
+          decimals: dto.srcTokenDecimals,
+          chain: dto.srcChain,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          priceUSD: (srcToken as any)?.priceUSD,
+        },
+        srcAmount: dto.srcAmount,
+        dstToken: {
+          contract: dto.dstTokenContract,
+          symbol: dto.dstTokenSymbol,
+          decimals: dto.dstTokenDecimals,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          priceUSD: (dstToken as any)?.priceUSD,
+        },
+        minDstAmount: dto.minDstAmount,
+        deadline: dto.deadline ?? now + 1800,
       },
       minDstAmount: dto.minDstAmount,
       deadline: dto.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[dto.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
@@ -188,7 +183,11 @@ export class IntentsController {
       throw new ConflictException(`Intent is ${current?.state ?? "unknown"}, cannot accept`);
     }
 
-    this.intentsGateway.broadcast({ type: "intent_accepted", intentId: id, solver: dto.solver });
+    this.intentsGateway.broadcast({
+      type: "intent_accepted",
+      intentId: id,
+      solver: dto.solver,
+    });
     return updated;
   }
 
@@ -258,7 +257,9 @@ export class IntentsController {
   cancel(@Param("id") id: string, @Body() dto: CancelIntentDto) {
     const intent = this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
-    if (intent.user.toLowerCase() !== dto.user.toLowerCase()) throw new ForbiddenException("Unauthorized");
+    if (intent.user.toLowerCase() !== dto.user.toLowerCase()) {
+      throw new ForbiddenException("Unauthorized");
+    }
     if (intent.state !== "open") {
       throw new ConflictException(`Cannot cancel intent in state: ${intent.state}`);
     }

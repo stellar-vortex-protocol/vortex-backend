@@ -45,6 +45,8 @@ export interface AppConfig {
     // format-checks it in production so it can never silently fall back to
     // a placeholder. Never log this value.
     signingKey: string;
+    /** Fee percentile to use when estimating Soroban inclusion fees. */
+    feePercentile: FeePercentile;
   };
   onchainIntentsEnabled: boolean;
   corsOrigin: string;
@@ -64,6 +66,7 @@ export default (): AppConfig => ({
     settlementContractId: process.env.SETTLEMENT_CONTRACT_ID ?? "",
     solverRegistryContractId: process.env.SOLVER_REGISTRY_CONTRACT_ID ?? "",
     signingKey: process.env.SOROBAN_SIGNING_KEY ?? "",
+    feePercentile: (process.env.SOROBAN_FEE_PERCENTILE ?? "p50") as FeePercentile,
   },
   onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
   corsOrigin: process.env.CORS_ORIGIN ?? "*",

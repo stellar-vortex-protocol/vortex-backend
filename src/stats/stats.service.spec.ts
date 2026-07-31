@@ -42,7 +42,8 @@ function baseSolver(overrides: Partial<SolverRecord> = {}): SolverRecord {
 function makeDeps(intents: Intent[], solvers: SolverRecord[]) {
   const intentsService = { getAll: jest.fn().mockReturnValue(intents) } as unknown as IntentsService;
   const solversService = { getAll: jest.fn().mockReturnValue(solvers) } as unknown as SolversService;
-  const service = new StatsService(intentsService, solversService);
+  const intentsGateway = { getSubscriberCount: jest.fn().mockReturnValue(0) } as unknown as import("../intents/intents.gateway").IntentsGateway;
+  const service = new StatsService(intentsService, solversService, intentsGateway);
   return { service, intentsService, solversService };
 }
 

@@ -1,8 +1,24 @@
+import { ConfigService } from "@nestjs/config";
 import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
+import { InMemorySolversRepository } from "../solvers/in-memory-solvers.repository";
+import { StellarTxService } from "../soroban/stellar-tx.service";
+import { AppConfig } from "../config/configuration";
+
+function fakeIntentsService(): IntentsService {
+  const configService = {
+    get: jest.fn().mockReturnValue(false),
+  } as unknown as ConfigService<AppConfig, true>;
+  const stellarTxService = {} as StellarTxService;
+  return new IntentsService(configService, stellarTxService);
+}
+
+function fakeSolversService(): SolversService {
+  return new SolversService(new InMemorySolversRepository());
+}
 
 describe("IntentsSweeperService", () => {
   let intentsService: IntentsService;
@@ -12,9 +28,9 @@ describe("IntentsSweeperService", () => {
   let sweeper: IntentsSweeperService;
 
   beforeEach(() => {
-    intentsService = new IntentsService();
+    intentsService = fakeIntentsService();
     gateway = { broadcast: jest.fn() } as unknown as IntentsGateway;
-    solversService = new SolversService();
+    solversService = fakeSolversService();
     solverRegistryService = {
       slashSolver: jest.fn().mockResolvedValue({
         submitted: false,
@@ -31,8 +47,8 @@ describe("IntentsSweeperService", () => {
     );
   });
 
-  function makeAcceptedIntent(deadline: number, solver = "SOLVER_ALPHA") {
-    const intent = intentsService.create({
+  async function makeAcceptedIntent(deadline: number, solver = "SOLVER_ALPHA") {
+    const intent = await intentsService.create({
       user: "GTEST...0000",
       srcChain: "ethereum",
       srcToken: { address: "0xabc", symbol: "USDC", name: "USD Coin", decimals: 6, chain: "ethereum" },
@@ -47,7 +63,7 @@ describe("IntentsSweeperService", () => {
 
   it("expires open intents past their deadline (existing behavior preserved)", async () => {
     const past = Math.floor(Date.now() / 1000) - 10;
-    const intent = intentsService.create({
+    const intent = await intentsService.create({
       user: "GTEST...0000",
       srcChain: "stellar",
       srcToken: { address: "native", symbol: "XLM", name: "Stellar Lumens", decimals: 7, chain: "stellar" },
@@ -67,7 +83,7 @@ describe("IntentsSweeperService", () => {
 
   it("slashes an accepted intent whose fill deadline has passed", async () => {
     const past = Math.floor(Date.now() / 1000) - 10;
-    const intentId = makeAcceptedIntent(past, "SOLVER_ALPHA");
+    const intentId = await makeAcceptedIntent(past, "SOLVER_ALPHA");
 
     await sweeper.sweep();
 
@@ -87,7 +103,7 @@ describe("IntentsSweeperService", () => {
   it("bumps the solver's fillsFailed counter on a slash", async () => {
     const past = Math.floor(Date.now() / 1000) - 10;
     const before = solversService.get("SOLVER_ALPHA")?.fillsFailed ?? 0;
-    const intentId = makeAcceptedIntent(past, "SOLVER_ALPHA");
+    const intentId = await makeAcceptedIntent(past, "SOLVER_ALPHA");
 
     await sweeper.sweep();
 
@@ -97,7 +113,7 @@ describe("IntentsSweeperService", () => {
 
   it("does not touch accepted intents still within their fill window", async () => {
     const future = Math.floor(Date.now() / 1000) + 300;
-    const intentId = makeAcceptedIntent(future, "SOLVER_ALPHA");
+    const intentId = await makeAcceptedIntent(future, "SOLVER_ALPHA");
 
     await sweeper.sweep();
 
@@ -107,7 +123,7 @@ describe("IntentsSweeperService", () => {
 
   it("does not throw if an accepted intent somehow has no solver on record", async () => {
     const past = Math.floor(Date.now() / 1000) - 10;
-    const intent = intentsService.create({
+    const intent = await intentsService.create({
       user: "GTEST...0000",
       srcChain: "stellar",
       srcToken: { address: "native", symbol: "XLM", name: "Stellar Lumens", decimals: 7, chain: "stellar" },
