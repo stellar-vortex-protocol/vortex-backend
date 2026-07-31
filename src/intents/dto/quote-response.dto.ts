@@ -18,6 +18,12 @@ export class QuoteDto {
 
   @ApiProperty({ description: "Unix timestamp when quote expires" })
   expiresAt!: number;
+
+  @ApiProperty({ description: "Total fees in USD (protocol fee converted at token price)" })
+  totalFeesUSD!: number;
+
+  @ApiProperty({ description: "Estimated price impact as a decimal fraction, e.g. 0.003 = 0.3%" })
+  priceImpact!: number;
 }
 
 export class QuoteResponseDto {
@@ -41,4 +47,10 @@ export class QuoteResponseDto {
 
   @ApiProperty({ description: "Estimated fill time in seconds for the best quote" })
   estimatedFillTime!: number;
+
+  @ApiProperty({ description: "Total fees in USD for the best quote (0 when no quote available)" })
+  totalFeesUSD!: number;
+
+  @ApiProperty({ description: "Price impact for the best quote as a decimal fraction (0 when no quote available)" })
+  priceImpact!: number;
 }

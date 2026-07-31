@@ -6,6 +6,7 @@ import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Intent, IntentState } from "./intents.types";
 import { buildSeedIntents } from "./intents.seed";
 import { AppConfig } from "../config/configuration";
+import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 
 /**
@@ -70,7 +71,7 @@ export class IntentsService {
       intentId: uuidv4(),
       state: "open",
       createdAt: now,
-      deadline: data.deadline ?? now + 1800,
+      deadline: data.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[data.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
     };
 
     if (this.configService.get("onchainIntentsEnabled", { infer: true })) {

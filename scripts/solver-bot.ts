@@ -13,6 +13,15 @@ const BACKOFF_INITIAL_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 const BACKOFF_FACTOR = 2;
 
+/**
+ * Issue #121: WS authentication for solver connections.
+ * Load the solver keypair from SOLVER_SECRET env var so the bot can prove
+ * its identity to the server via a signed auth message.
+ */
+const SOLVER_SECRET = process.env.SOLVER_SECRET ?? "";
+const keypair: Keypair | null = SOLVER_SECRET ? Keypair.fromSecret(SOLVER_SECRET) : null;
+
+let lastSeq = 0;
 let shouldReconnect = true;
 
 interface Intent {
@@ -23,15 +32,34 @@ interface Intent {
   srcChain: string;
 }
 
-/** Sign a UTF-8 message with the solver keypair; return base64 signature. */
-function sign(message: string): string {
-  return keypair.sign(Buffer.from(message, "utf8")).toString("base64");
-}
-
 interface SequencedMessage {
   type: string;
   seq?: number;
   [key: string]: unknown;
+}
+
+/** Sign a UTF-8 message with the solver keypair; return base64 signature. */
+function sign(message: string): string {
+  if (!keypair) throw new Error("SOLVER_SECRET is not set — cannot sign messages");
+  return keypair.sign(Buffer.from(message, "utf8")).toString("base64");
+}
+
+/**
+ * Issue #121: Send a signed auth message to identify this bot as a solver.
+ * The message format mirrors REST endpoint signatures: `solver-auth:<address>:<timestamp>`.
+ * The timestamp prevents replay attacks; the server validates the signature
+ * against the registered solver's public key.
+ */
+function sendAuth(ws: WebSocket): void {
+  if (!keypair) {
+    console.warn("[solver-bot] SOLVER_SECRET not set — connecting as anonymous read-only client");
+    return;
+  }
+  const timestamp = Math.floor(Date.now() / 1000);
+  const message = `solver-auth:${SOLVER_ADDRESS}:${timestamp}`;
+  const signature = sign(message);
+  ws.send(JSON.stringify({ type: "auth", solver: SOLVER_ADDRESS, timestamp, signature }));
+  console.log(`[solver-bot] sent auth for ${SOLVER_ADDRESS}`);
 }
 
 async function acceptIntent(intentId: string): Promise<boolean> {
@@ -44,19 +72,13 @@ async function acceptIntent(intentId: string): Promise<boolean> {
     body: JSON.stringify({ solver: SOLVER_ADDRESS, signature }),
   });
   if (!res.ok) {
-    console.log(
-      `[solver-bot] accept ${intentId} failed: ${res.status} ${await res.text()}`,
-    );
+    console.log(`[solver-bot] accept ${intentId} failed: ${res.status} ${await res.text()}`);
     return false;
   }
   console.log(`[solver-bot] accepted ${intentId}`);
   return true;
 }
 
-async function fillIntent(
-  intentId: string,
-  minDstAmount: string,
-): Promise<void> {
 async function fillIntent(intentId: string, minDstAmount: string): Promise<void> {
   const message = buildFillMessage(intentId, SOLVER_ADDRESS);
   const signature = sign(message);
@@ -72,9 +94,7 @@ async function fillIntent(intentId: string, minDstAmount: string): Promise<void>
     }),
   });
   if (!res.ok) {
-    console.log(
-      `[solver-bot] fill ${intentId} failed: ${res.status} ${await res.text()}`,
-    );
+    console.log(`[solver-bot] fill ${intentId} failed: ${res.status} ${await res.text()}`);
     return;
   }
   console.log(`[solver-bot] filled ${intentId}`);
@@ -88,62 +108,64 @@ async function tryFillOpenIntent(intent: Intent): Promise<void> {
     return;
   }
 
-  if (
-    MIN_MARGIN_BPS > 0 &&
-    Number(intent.minDstAmount) < 1_000_000 * (MIN_MARGIN_BPS / 10000)
-  ) {
-    console.log(
-      `[solver-bot] skipped ${intent.intentId} below min margin ${MIN_MARGIN_BPS} bps`,
-    );
+  if (MIN_MARGIN_BPS > 0 && Number(intent.minDstAmount) < 1_000_000 * (MIN_MARGIN_BPS / 10000)) {
+    console.log(`[solver-bot] skipped ${intent.intentId} below min margin ${MIN_MARGIN_BPS} bps`);
     return;
   }
 
   const accepted = await acceptIntent(intent.intentId);
   if (!accepted) return;
-
   await fillIntent(intent.intentId, intent.minDstAmount);
 }
 
 function connectWithBackoff(delayMs: number): void {
   if (!shouldReconnect) return;
 
-  console.log(`[solver-bot] connecting as ${SOLVER_ADDRESS} to ${WS_URL}` +
-    (delayMs > 0 ? ` (reconnect in ${delayMs}ms)` : ""));
-function main() {
-  console.log(`[solver-bot] connecting as ${SOLVER_ADDRESS} to ${WS_URL}`);
-  console.log(`[solver-bot] subscribed chains: ${SOLVER_CHAINS.join(", ")}`);
+  console.log(
+    `[solver-bot] connecting as ${SOLVER_ADDRESS} to ${WS_URL}` +
+      (delayMs > BACKOFF_INITIAL_MS ? ` (reconnect delay ${delayMs}ms)` : ""),
+  );
+
   const ws = new WebSocket(WS_URL);
 
   ws.on("open", () => {
-    // If we have a previous seq, ask the server to replay missed events before
-    // falling through to the normal snapshot flow.
+    // Issue #121: authenticate the solver connection immediately on open.
+    sendAuth(ws);
+
+    // If we have a previous seq, request a replay of missed events.
     if (lastSeq > 0) {
       console.log(`[solver-bot] requesting replay from seq=${lastSeq}`);
-      ws.send(JSON.stringify({ event: "replay", data: { fromSeq: lastSeq } }));
+      ws.send(JSON.stringify({ type: "replay", fromSeq: lastSeq }));
     }
+
+    ws.send(JSON.stringify({ type: "subscribe", chains: SOLVER_CHAINS }));
   });
 
   ws.on("message", (raw) => {
     const event = JSON.parse(raw.toString()) as SequencedMessage;
 
-    // Track the highest sequence number we've seen
     if (typeof event.seq === "number" && event.seq > lastSeq) {
       lastSeq = event.seq;
     }
 
     switch (event.type) {
       case "connected":
-        console.log(`[solver-bot] ${event.message}`);
-        ws.send(JSON.stringify({ type: "subscribe", chains: SOLVER_CHAINS }));
+        console.log(`[solver-bot] ${event.message as string}`);
         break;
+
+      case "auth_ok":
+        console.log(`[solver-bot] authenticated as solver ${SOLVER_ADDRESS}`);
+        break;
+
+      case "auth_error":
+        console.error(`[solver-bot] auth rejected: ${event.reason as string}`);
+        break;
+
       case "subscribed":
         console.log(`[solver-bot] subscribed with filter: ${JSON.stringify(event.filter)}`);
         break;
 
       case "snapshot":
-        console.log(
-          `[solver-bot] snapshot: ${event.intents.length} open intent(s)`,
-        );
         console.log(`[solver-bot] snapshot: ${(event.intents as Intent[]).length} open intent(s) seq=${event.seq ?? 0}`);
         for (const intent of event.intents as Intent[]) {
           void tryFillOpenIntent(intent);
@@ -159,8 +181,6 @@ function main() {
         break;
 
       case "replay_too_old":
-        // Our cursor is stale; the server will send a fresh snapshot automatically
-        // on next connection — nothing extra needed.
         console.warn(
           `[solver-bot] replay gap too large (fromSeq=${event.fromSeq as number}, ` +
             `oldest available=${event.oldestAvailableSeq as number}). Falling back to snapshot.`,
@@ -169,7 +189,7 @@ function main() {
         break;
 
       case "intent_created":
-        console.log(`[solver-bot] new intent ${event.intent.intentId} on ${event.intent.srcChain}`);
+        console.log(`[solver-bot] new intent ${(event.intent as Intent).intentId} on ${(event.intent as Intent).srcChain}`);
         void tryFillOpenIntent(event.intent as Intent);
         break;
 
@@ -186,7 +206,7 @@ function main() {
   });
 
   ws.on("close", () => {
-    console.log(`[solver-bot] disconnected`);
+    console.log(`[solver-bot] disconnected (lastSeq=${lastSeq})`);
     const nextDelay = Math.min(delayMs * BACKOFF_FACTOR, BACKOFF_MAX_MS);
     setTimeout(() => connectWithBackoff(nextDelay), delayMs);
   });
@@ -198,6 +218,11 @@ function main() {
 }
 
 function main() {
+  console.log(`[solver-bot] subscribed chains: ${SOLVER_CHAINS.join(", ")}`);
+  if (!keypair) {
+    console.warn("[solver-bot] SOLVER_SECRET not set — running in anonymous read-only mode");
+  }
+
   process.on("SIGINT", () => {
     shouldReconnect = false;
     process.exit(0);
@@ -209,11 +234,6 @@ function main() {
   });
 
   connectWithBackoff(BACKOFF_INITIAL_MS);
-    console.log(`[solver-bot] disconnected (lastSeq=${lastSeq}). Reconnecting in ${RECONNECT_DELAY_MS}ms…`);
-    setTimeout(connect, RECONNECT_DELAY_MS);
-  });
-
-  ws.on("error", (err) => console.error("[solver-bot] error", err));
 }
 
-connect();
+main();
