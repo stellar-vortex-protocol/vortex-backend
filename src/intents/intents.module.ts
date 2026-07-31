@@ -6,17 +6,13 @@ import { IntentsSweeperService } from "./intents-sweeper.service";
 import { SolversModule } from "../solvers/solvers.module";
 import { RoutingModule } from "../routing/routing.module";
 import { TokensModule } from "../tokens/tokens.module";
-
-@Module({
-  imports: [SolversModule, RoutingModule, TokensModule],
 import { SorobanModule } from "../soroban/soroban.module";
 import { EventIngestionService } from "../soroban/event-ingestion.service";
 
 @Module({
-  imports: [SolversModule, SorobanModule],
+  imports: [SolversModule, RoutingModule, TokensModule, SorobanModule],
   controllers: [IntentsController],
   providers: [IntentsService, IntentsGateway, IntentsSweeperService, EventIngestionService],
-  exports: [IntentsService],
+  exports: [IntentsService, IntentsGateway],
 })
 export class IntentsModule {}
-

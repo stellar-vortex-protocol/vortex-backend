@@ -34,6 +34,34 @@ jobs:
           node-version: 20
       - run: npm audit --audit-level=high
 
+  commitlint:
+    name: Commit Message Lint
+    runs-on: ubuntu-latest
+    # Only meaningful on PRs — on direct pushes to main we skip this check
+    # since squash merges are handled by the branch protection rule.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch enough history to validate all commits in the PR.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      # Lint every commit in the PR from the merge base to HEAD.
+      - name: Lint commit messages
+        run: |
+          npx commitlint \
+            --from ${{ github.event.pull_request.base.sha }} \
+            --to   ${{ github.event.pull_request.head.sha }} \
+            --verbose
+
   backend:
     name: Backend (Nest) – Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest

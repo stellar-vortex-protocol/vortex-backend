@@ -55,9 +55,18 @@ GET  /api/v1/chain/account/:key   — Stellar account lookup
 
 ```bash
 npm install
-cp .env.example .env
+cp .env.testnet.example .env   # testnet development (most contributors)
+# cp .env.mainnet.example .env # production/mainnet — requires real keys
 npm run dev    # http://localhost:4000
 ```
+
+Three `.env.example` variants are provided for different deployment targets:
+
+| File | Use case |
+|------|----------|
+| `.env.example` | Generic template with all available variables |
+| `.env.testnet.example` | Testnet development — safe defaults, blank contract IDs |
+| `.env.mainnet.example` | Production mainnet — strict CORS, required signing key and contract IDs |
 
 ### Signing key
 
@@ -124,8 +133,8 @@ flags to override them.
 
 ## Contributing
 
-See the org-wide
-[CONTRIBUTING.md](https://github.com/vortex-protocol/.github/blob/main/CONTRIBUTING.md).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for backend-specific setup, conventions, and
+the PR checklist. It links to the org-wide guide for process and code of conduct.
 
 ## License
 
