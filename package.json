@@ -72,7 +72,7 @@
     "husky": "^9.1.7",
     "jest": "^30.4.2",
     "openapi-typescript": "^7.8.0",
-    "prisma": "5.22.0",
+    "prisma": "7.9.1",
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.11",
     "tsx": "^4.15.4",
