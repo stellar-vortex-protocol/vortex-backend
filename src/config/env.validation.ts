@@ -39,6 +39,14 @@ export const envValidationSchema = Joi.object({
 
   CORS_ORIGIN: Joi.string().default("*"),
 
+  // ── Persistence adapter selection ─────────────────────────────────────────
+  // Controls which repository adapter is used for intents and solvers.
+  // "memory" (default) keeps everything in-process — no database required.
+  // "prisma" writes to PostgreSQL via Prisma — requires DATABASE_URL to point
+  // to a live database.  Intended for production / staging.
+  INTENTS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
+  SOLVERS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
+
   // ── Observability ─────────────────────────────────────────────────────────
   // Sentry DSN for error alerting.  Omit (or leave blank) to disable Sentry.
   SENTRY_DSN: Joi.string().uri().allow("").default(""),

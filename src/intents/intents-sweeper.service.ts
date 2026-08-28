@@ -35,9 +35,9 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     const now = Math.floor(startMs / 1000);
     let expiredCount = 0;
 
-    for (const intent of this.intentsService.getByState("open")) {
+    for (const intent of await this.intentsService.getByState("open")) {
       if (intent.deadline <= now) {
-        this.intentsService.update(intent.intentId, { state: "expired" });
+        await this.intentsService.update(intent.intentId, { state: "expired" });
         // Audit trail (issue #62): system-driven expiration.
         this.intentsService.appendAuditEntry(
           intent.intentId,
@@ -59,9 +59,9 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`[sweeper] Expired ${expiredCount} intent(s) in ${durationMs}ms`);
     }
 
-    const missedFills = this.intentsService
-      .getByState("accepted")
-      .filter((intent) => intent.deadline <= now);
+    const missedFills = (await this.intentsService.getByState("accepted")).filter(
+      (intent) => intent.deadline <= now,
+    );
 
     for (const intent of missedFills) {
       await this.slashMissedFill(intent.intentId, intent.solver, now);
@@ -75,7 +75,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
   ) {
     const reason = "accepted intent not filled before deadline";
 
-    this.intentsService.update(intentId, {
+    await this.intentsService.update(intentId, {
       state: "slashed",
       slashedAt: now,
       slashReason: reason,
@@ -89,7 +89,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    this.solversService.recordFailedFill(solver);
+    await this.solversService.recordFailedFill(solver);
 
     const result = await this.solverRegistryService.slashSolver({
       solverAddress: solver,

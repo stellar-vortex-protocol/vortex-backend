@@ -121,6 +121,35 @@ No `.env` is required to boot — `ConfigModule`'s validation schema supplies
 defaults for every variable. Pass real values with `--env-file .env` or `-e`
 flags to override them.
 
+### Production deployment
+
+The table below separates variables that **must** be set for a real deployment
+from those that are safe to leave at their testnet/dev defaults.
+
+| Variable | Required for production | Safe default? | Notes |
+|---|---|---|---|
+| `NODE_ENV` | Yes — set to `production` | No | Enables signing-key validation and strict startup checks |
+| `DATABASE_URL` | Yes | No | Must point to a managed Postgres instance, not `localhost` |
+| `CORS_ORIGIN` | Yes | No | Must be an explicit origin (e.g. `https://app.vortex.trade`), never `*` |
+| `SOROBAN_SIGNING_KEY` | Yes (once on-chain writes land) | No | Required and format-validated in `production`; process refuses to start without a valid Stellar secret seed |
+| `SETTLEMENT_CONTRACT_ID` | Yes (on-chain path) | No | 56-char Stellar contract ID of the deployed settlement contract |
+| `SOLVER_REGISTRY_CONTRACT_ID` | Yes (on-chain path) | No | 56-char Stellar contract ID of the deployed solver-registry contract |
+| `STELLAR_NETWORK` | Yes | No | Set to `mainnet`; default is `testnet` |
+| `SOROBAN_RPC_URL` | Yes | No | A production-grade Soroban RPC endpoint; the default points at the public testnet |
+| `INTENTS_PERSISTENCE` | Recommended | `memory` | Set to `prisma` to persist intents to Postgres across restarts; `memory` loses all state on restart |
+| `SOLVERS_PERSISTENCE` | Recommended | `memory` | Set to `prisma` to persist solver registry to Postgres; `memory` loses solver state on restart |
+| `SOROBAN_FEE_PERCENTILE` | Recommended | `p50` | Raise to `p90` on mainnet for better confirmation speed under load |
+| `WS_MAX_CONNECTIONS` | Recommended | `1000` | Tune to expected solver + frontend connection count |
+| `SENTRY_DSN` | Recommended | — (Sentry disabled) | Set to your Sentry project DSN for error alerting |
+| `LOG_LEVEL` | Recommended | `debug` | Set to `info` in production — `debug` is too noisy |
+| `PORT` | Optional | `4000` | Change if the container port mapping differs |
+
+For a production `.env` template, copy `.env.mainnet.example` — every
+`<CHANGE_ME>` value corresponds to a "required for production" row above.
+Store secrets (`SOROBAN_SIGNING_KEY`, `DATABASE_URL`) in a secrets manager
+(AWS Secrets Manager, HashiCorp Vault, etc.) and inject them at runtime;
+never commit filled-in values to version control.
+
 ---
 
 ## Roadmap

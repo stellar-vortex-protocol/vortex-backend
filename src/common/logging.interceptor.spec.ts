@@ -136,6 +136,7 @@ describe("LoggingInterceptor", () => {
       }),
     } as any;
     const handler = makeHandler(
+      // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
       new (require("rxjs").Observable)((subscriber: any) => {
         response.statusCode = 202; // mutate before emission completes
         subscriber.next({});
