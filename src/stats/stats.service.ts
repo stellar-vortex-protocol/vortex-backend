@@ -5,6 +5,10 @@ import { IntentsGateway } from "../intents/intents.gateway";
 
 @Injectable()
 export class StatsService {
+  private cachedProtocolStats:
+    | { expiresAt: number; value: ReturnType<StatsService["buildProtocolStats"]> }
+    | null = null;
+
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
@@ -12,6 +16,16 @@ export class StatsService {
   ) {}
 
   getProtocolStats() {
+    const now = Date.now();
+    if (this.cachedProtocolStats && this.cachedProtocolStats.expiresAt > now) {
+      return this.cachedProtocolStats.value;
+    }
+    const value = this.buildProtocolStats();
+    this.cachedProtocolStats = { value, expiresAt: now + 5_000 };
+    return value;
+  }
+
+  private buildProtocolStats() {
     const intents = this.intentsService.getAll();
     const solvers = this.solversService.getAll();
 

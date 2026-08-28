@@ -285,7 +285,12 @@ export class IntentsController {
   })
   @ApiOkResponse({ type: QuoteResponseDto })
   quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {
-    const solvers = this.solversService.getAll().filter((s) => s.isActive);
+    const solvers = this.solversService
+      .getAll()
+      .filter((s) => s.isActive)
+      .filter((solver) => solver.supportedChains.includes(dto.srcChain))
+      .filter((solver) => solver.supportedTokens.includes(dto.srcTokenSymbol))
+      .filter((solver) => solver.supportedTokens.includes(dto.dstTokenSymbol));
     const chainData = this.tokensService.getByChain(dto.srcChain);
     const stellarData = this.tokensService.getStellarTokens();
 

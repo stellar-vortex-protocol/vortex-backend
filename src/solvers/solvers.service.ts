@@ -42,37 +42,29 @@ export class SolversService {
   }
 
   deregister(address: string): SolverRecord | undefined {
-    const solver = this.repo.findByAddress(address);
-    if (!solver) return undefined;
-    const updated = { ...solver, isActive: false };
-    return this.repo.save(updated);
+    return this.setActiveState(address, false) ?? undefined;
   }
 
   markLive(address: string): SolverRecord | undefined {
-    const solver = this.repo.findByAddress(address);
-    if (!solver) return undefined;
-    const updated = { ...solver, isActive: true };
-    return this.repo.save(updated);
+    return this.setActiveState(address, true) ?? undefined;
   }
 
   markOffline(address: string): SolverRecord | undefined {
-    const solver = this.repo.findByAddress(address);
-    if (!solver) return undefined;
-    const updated = { ...solver, isActive: false };
-    return this.repo.save(updated);
+    return this.setActiveState(address, false) ?? undefined;
   }
 
   deactivate(address: string): SolverRecord | null {
-    const solver = this.repo.findByAddress(address);
-    if (!solver) return null;
-    const updated = { ...solver, isActive: false };
-    return this.repo.save(updated);
+    return this.setActiveState(address, false);
   }
 
   reactivate(address: string): SolverRecord | null {
+    return this.setActiveState(address, true);
+  }
+
+  private setActiveState(address: string, isActive: boolean): SolverRecord | null {
     const solver = this.repo.findByAddress(address);
     if (!solver) return null;
-    const updated = { ...solver, isActive: true };
+    const updated = { ...solver, isActive };
     return this.repo.save(updated);
   }
 

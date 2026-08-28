@@ -73,7 +73,11 @@ export class SolversController {
   deregisterSolver(@Param("address") address: string) {
     const solver = this.solversService.deregister(address);
     if (!solver) throw new NotFoundException("Solver not found");
-    return { ...solver, withdrawalStatus: "pending" };
+    return {
+      ...solver,
+      withdrawalStatus: "pending",
+      withdrawalRequestedAt: Math.floor(Date.now() / 1000),
+    };
   }
 
   @Post(":address/deactivate")
