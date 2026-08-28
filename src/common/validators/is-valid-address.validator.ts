@@ -12,7 +12,7 @@ export function IsValidAddress(validationOptions?: ValidationOptions) {
           const srcChain = (args.object as any).srcChain;
           
           if (srcChain === "stellar") {
-            return typeof value === "string" && value.length === 56;
+            return typeof value === "string" && /^G[A-Z2-7]{55}$/.test(value);
           }
           
           return typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value);
