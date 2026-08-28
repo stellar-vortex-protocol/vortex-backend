@@ -32,6 +32,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
       - run: npm audit --audit-level=high
 
   commitlint:
@@ -52,7 +53,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       # Lint every commit in the PR from the merge base to HEAD.
       - name: Lint commit messages
@@ -93,20 +94,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ── Node / npm cache (#130) ──────────────────────────────────────────
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      - run: npm install
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run build
-      - run: npm test -- --coverage
-      - run: npm run test:e2e
-          node-version: 20
           cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       # ── Prisma ──────────────────────────────────────────────────────────────
       - name: Validate Prisma schema
@@ -135,3 +130,21 @@ jobs:
 
       - name: E2E tests
         run: npm run test:e2e
+
+  # ── Docker build verification (#131) ──────────────────────────────────────
+  # Ensures every push that changes application code doesn't silently break
+  # the Dockerfile. Image publishing to a registry can be wired up separately
+  # once registry credentials are in place.
+  docker:
+    name: Docker – build verification
+    runs-on: ubuntu-latest
+    needs: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: vortex-backend:ci
