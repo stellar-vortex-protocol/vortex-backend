@@ -280,8 +280,9 @@ export class IntentsController {
    * Issue #44 — document 429 on quote too, since it's under the global guard.
    */
   @Post("quote")
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @ApiTooManyRequestsResponse({
-    description: "Rate limit exceeded — max 100 req/min per IP globally",
+    description: "Rate limit exceeded — max 20 quote requests per 60 s per IP",
   })
   @ApiOkResponse({ type: QuoteResponseDto })
   quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {

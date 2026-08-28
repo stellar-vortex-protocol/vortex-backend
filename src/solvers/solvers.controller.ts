@@ -9,6 +9,8 @@ import {
 import { ApiTags } from "@nestjs/swagger";
 import { SolversService } from "./solvers.service";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
+import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
+import { verifyStellarSignature, buildSolverStatusMessage } from "../common/stellar-signature";
 
 @ApiTags("solvers")
 @Controller("api/v1/solvers")
@@ -70,21 +72,24 @@ export class SolversController {
   }
 
   @Post(":address/deregister")
-  deregisterSolver(@Param("address") address: string) {
+  deregisterSolver(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
+    verifyStellarSignature(address, buildSolverStatusMessage("deregister", address), dto.signature);
     const solver = this.solversService.deregister(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return { ...solver, withdrawalStatus: "pending" };
   }
 
   @Post(":address/deactivate")
-  deactivate(@Param("address") address: string) {
+  deactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
+    verifyStellarSignature(address, buildSolverStatusMessage("deactivate", address), dto.signature);
     const solver = this.solversService.deactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
   }
 
   @Post(":address/reactivate")
-  reactivate(@Param("address") address: string) {
+  reactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
+    verifyStellarSignature(address, buildSolverStatusMessage("reactivate", address), dto.signature);
     const solver = this.solversService.reactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
