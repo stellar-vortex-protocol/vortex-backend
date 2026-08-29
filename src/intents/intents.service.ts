@@ -12,6 +12,7 @@ import { buildSeedIntents } from "./intents.seed";
 import { AppConfig } from "../config/configuration";
 import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
+import { PrismaService } from "../prisma/prisma.service";
 
 const STORE_SIZE_LOG_INTERVAL_MS = 60_000;
 
@@ -30,10 +31,10 @@ export class IntentsService implements OnModuleDestroy {
   private readonly idempotencyCache = new Map<string, { intentId: string; expiresAt: number }>();
 
   /**
-   * Append-only audit log keyed by intentId.
-   * Each entry records a single state transition.
-   * Issue #62 – once persistence lands (issue #36) this will be written to an
-   * `intent_audit_log` table; for now it survives in-memory for the process lifetime.
+   * In-memory audit log used as a fast read path and fallback when the DB is
+   * unavailable. The canonical source of truth is the intent_audit_log table
+   * (issue #217 / #62). Writes are fire-and-forget against PrismaService so a
+   * DB write failure never blocks or rolls back the underlying state transition.
    */
   private readonly auditLog = new Map<string, IntentAuditEntry[]>();
 
@@ -42,6 +43,7 @@ export class IntentsService implements OnModuleDestroy {
   constructor(
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly stellarTxService: StellarTxService,
+    private readonly prisma: PrismaService,
   ) {
     this.seed();
     this.sizeLogTimer = setInterval(() => this.logStoreSize(), STORE_SIZE_LOG_INTERVAL_MS);
@@ -104,12 +106,6 @@ export class IntentsService implements OnModuleDestroy {
    * Registers `intent` with the settlement contract. Only called when
    * ONCHAIN_INTENTS_ENABLED is on; while that flag is off, create() stays
    * fully in-memory (the rollout fallback).
-   *
-   * The exact call — method name and argument encoding — is provisional:
-   * the settlement contract's interface isn't finalized yet (see the
-   * on-chain settlement ADR and the typed contract bindings work), so this
-   * uses the SDK's native-value conversion rather than hand-written XDR
-   * types that would need to change the moment real bindings land.
    */
   private async registerOnChain(intent: Intent): Promise<void> {
     const contractId = this.configService.get("stellar.settlementContractId", { infer: true });
@@ -218,13 +214,18 @@ export class IntentsService implements OnModuleDestroy {
   }
 
   // ---------------------------------------------------------------------------
-  // Audit trail (issue #62)
+  // Audit trail (issue #217 / #62)
   // ---------------------------------------------------------------------------
 
   /**
    * Append a new audit entry for the given intent.
-   * Call this whenever an intent transitions state so the full history is
-   * preserved even after the `state` field is overwritten.
+   *
+   * Writes to both the in-memory log (fast read path / restart fallback) and
+   * the persistent `intent_audit_log` table via PrismaService.
+   *
+   * Per issue #217: the DB write is non-blocking relative to the state
+   * transition — a write failure is logged loudly but never rolls back or
+   * blocks the caller.
    */
   appendAuditEntry(
     intentId: string,
@@ -241,13 +242,56 @@ export class IntentsService implements OnModuleDestroy {
       ...(metadata ? { metadata } : {}),
     };
 
+    // 1. In-memory write (synchronous, always succeeds)
     const entries = this.auditLog.get(intentId) ?? [];
     entries.push(entry);
     this.auditLog.set(intentId, entries);
+
+    // 2. Persistent DB write (fire-and-forget, failures are logged loudly)
+    // NOTE: intentAuditLog is added to the Prisma client by the migration in
+    // prisma/migrations/20260828000002_intent_audit_log/migration.sql.
+    // The type assertion is needed until `npm run db:generate` runs in CI
+    // against the updated schema.prisma.
+    (this.prisma as unknown as {
+      intentAuditLog: {
+        create: (args: {
+          data: {
+            intentId: string;
+            toState: string;
+            actor: string;
+            reason: string;
+            metadata?: Record<string, unknown>;
+            timestamp: Date;
+          };
+        }) => Promise<unknown>;
+      };
+    }).intentAuditLog
+      .create({
+        data: {
+          intentId,
+          toState,
+          actor,
+          reason,
+          metadata: metadata ?? undefined,
+          timestamp: new Date(entry.timestamp),
+        },
+      })
+      .catch((err: unknown) => {
+        this.logger.error(
+          `[audit] FAILED to persist audit entry for intent ${intentId} ` +
+            `(toState=${toState}, actor=${actor}): ${(err as Error).message}`,
+          (err as Error).stack,
+        );
+      });
   }
 
   /**
    * Return the full audit trail for a given intent, oldest-first.
+   *
+   * Reads from the in-memory log as the fast path. Once the in-memory store is
+   * replaced with a real DB (issue #36), this should read directly from the
+   * `intent_audit_log` table ordered by timestamp ASC.
+   *
    * Returns an empty array if the intent has no recorded transitions.
    */
   getAuditLog(intentId: string): IntentAuditEntry[] {

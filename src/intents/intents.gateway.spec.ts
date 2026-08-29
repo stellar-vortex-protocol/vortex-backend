@@ -2,6 +2,7 @@ import { ConfigService } from "@nestjs/config";
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
 import { StellarTxService } from "../soroban/stellar-tx.service";
+import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
 import { logger } from "../common/logger";
 
@@ -18,7 +19,13 @@ function makeIntentsService(): IntentsService {
   const configService = {
     get: jest.fn().mockReturnValue(false),
   } as unknown as ConfigService<AppConfig, true>;
-  return new IntentsService(configService, {} as StellarTxService);
+  const prismaService = {
+    intentAuditLog: {
+      create: jest.fn().mockResolvedValue({}),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+  } as unknown as PrismaService;
+  return new IntentsService(configService, {} as StellarTxService, prismaService);
 }
 
 function createMockClient() {

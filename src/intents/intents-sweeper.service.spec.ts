@@ -6,6 +6,7 @@ import { SolversService } from "../solvers/solvers.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { InMemorySolversRepository } from "../solvers/in-memory-solvers.repository";
 import { StellarTxService } from "../soroban/stellar-tx.service";
+import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
 
 function fakeIntentsService(): IntentsService {
@@ -13,7 +14,13 @@ function fakeIntentsService(): IntentsService {
     get: jest.fn().mockReturnValue(false),
   } as unknown as ConfigService<AppConfig, true>;
   const stellarTxService = {} as StellarTxService;
-  return new IntentsService(configService, stellarTxService);
+  const prismaService = {
+    intentAuditLog: {
+      create: jest.fn().mockResolvedValue({}),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+  } as unknown as PrismaService;
+  return new IntentsService(configService, stellarTxService, prismaService);
 }
 
 function fakeSolversService(): SolversService {
