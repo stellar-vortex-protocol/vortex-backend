@@ -72,7 +72,7 @@ export class SolversService {
   async reactivate(address: string): Promise<SolverRecord | null> {
     const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
-    const updated = { ...solver, isActive: true };
+    const updated = { ...solver, isActive };
     return this.repo.save(updated);
   }
 

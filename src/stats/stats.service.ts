@@ -5,6 +5,10 @@ import { IntentsGateway } from "../intents/intents.gateway";
 
 @Injectable()
 export class StatsService {
+  private cachedProtocolStats:
+    | { expiresAt: number; value: ReturnType<StatsService["buildProtocolStats"]> }
+    | null = null;
+
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
