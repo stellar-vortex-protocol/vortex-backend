@@ -66,3 +66,10 @@ export function buildFillMessage(intentId: string, solver: string): string {
 export function buildRegisterMessage(address: string): string {
   return `register:${address}`;
 }
+
+/**
+ * Build the canonical message that a solver must sign to change status.
+ */
+export function buildSolverStatusMessage(action: "deactivate" | "reactivate" | "deregister", address: string): string {
+  return `${action}:${address}`;
+}

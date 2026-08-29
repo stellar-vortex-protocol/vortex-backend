@@ -1,5 +1,6 @@
 import { InMemorySolversRepository } from "./in-memory-solvers.repository";
 import { SolverRecord } from "./solvers.types";
+import { SEED_SOLVER_KEYPAIRS } from "./solvers.seed";
 
 /** Minimal helper that builds a valid SolverRecord for test cases. */
 function makeSolver(overrides: Partial<SolverRecord> = {}): SolverRecord {
@@ -33,11 +34,11 @@ describe("InMemorySolversRepository", () => {
     expect(repo.findAll()).toHaveLength(3);
   });
 
-  it("seeded solvers include SOLVER_ALPHA, SOLVER_BETA, SOLVER_GAMMA", () => {
+  it("seeded solvers include ALPHA, BETA, GAMMA addresses", () => {
     const addresses = repo.findAll().map((s) => s.address);
-    expect(addresses).toContain("SOLVER_ALPHA");
-    expect(addresses).toContain("SOLVER_BETA");
-    expect(addresses).toContain("SOLVER_GAMMA");
+    expect(addresses).toContain(SEED_SOLVER_KEYPAIRS.ALPHA.publicKey());
+    expect(addresses).toContain(SEED_SOLVER_KEYPAIRS.BETA.publicKey());
+    expect(addresses).toContain(SEED_SOLVER_KEYPAIRS.GAMMA.publicKey());
   });
 
   // ── save ──────────────────────────────────────────────────────────────────

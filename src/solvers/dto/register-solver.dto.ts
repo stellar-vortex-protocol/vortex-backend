@@ -1,4 +1,4 @@
-import { IsIn, IsInt, IsNotEmpty, IsString, MinLength, Min, IsArray } from "class-validator";
+import { IsIn, IsInt, IsNotEmpty, IsString, MinLength, Min, IsArray, ArrayMaxSize } from "class-validator";
 import { ApiProperty } from "@nestjs/swagger";
 import { SupportedChain } from "../../intents/intents.types";
 
@@ -35,11 +35,18 @@ export class RegisterSolverDto {
 
   @ApiProperty({ enum: SUPPORTED_CHAINS, isArray: true, description: "Chains this solver supports" })
   @IsArray()
+  @ArrayMaxSize(8)
   @IsIn(SUPPORTED_CHAINS, { each: true })
   supportedChains!: SupportedChain[];
 
   @ApiProperty({ isArray: true, description: "Token symbols this solver supports" })
   @IsArray()
+  @ArrayMaxSize(32)
   @IsString({ each: true })
   supportedTokens!: string[];
+
+  @ApiProperty({ description: "Proof-of-control signature for the advertised solver address" })
+  @IsString()
+  @IsNotEmpty()
+  proofSignature!: string;
 }

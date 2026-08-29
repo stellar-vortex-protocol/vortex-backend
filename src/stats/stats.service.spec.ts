@@ -40,8 +40,8 @@ function baseSolver(overrides: Partial<SolverRecord> = {}): SolverRecord {
 }
 
 function makeDeps(intents: Intent[], solvers: SolverRecord[]) {
-  const intentsService = { getAll: jest.fn().mockReturnValue(intents) } as unknown as IntentsService;
-  const solversService = { getAll: jest.fn().mockReturnValue(solvers) } as unknown as SolversService;
+  const intentsService = { getAll: jest.fn().mockResolvedValue(intents) } as unknown as IntentsService;
+  const solversService = { getAll: jest.fn().mockResolvedValue(solvers) } as unknown as SolversService;
   const intentsGateway = { getSubscriberCount: jest.fn().mockReturnValue(0) } as unknown as import("../intents/intents.gateway").IntentsGateway;
   const service = new StatsService(intentsService, solversService, intentsGateway);
   return { service, intentsService, solversService };
@@ -51,9 +51,9 @@ function makeDeps(intents: Intent[], solvers: SolverRecord[]) {
 
 describe("StatsService", () => {
   describe("getProtocolStats() — empty store", () => {
-    it("returns all-zero / empty stats when there are no intents or solvers", () => {
+    it("returns all-zero / empty stats when there are no intents or solvers", async () => {
       const { service } = makeDeps([], []);
-      const stats = service.getProtocolStats();
+      const stats = await service.getProtocolStats();
 
       expect(stats.totalIntents).toBe(0);
       expect(stats.openIntents).toBe(0);
@@ -68,17 +68,17 @@ describe("StatsService", () => {
   // ── totalIntents & openIntents ─────────────────────────────────────────────
 
   describe("totalIntents and openIntents", () => {
-    it("counts all intents regardless of state", () => {
+    it("counts all intents regardless of state", async () => {
       const intents = [
         baseIntent({ intentId: "a", state: "open" }),
         baseIntent({ intentId: "b", state: "filled" }),
         baseIntent({ intentId: "c", state: "cancelled" }),
       ];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().totalIntents).toBe(3);
+      expect((await service.getProtocolStats()).totalIntents).toBe(3);
     });
 
-    it("counts only open intents for openIntents", () => {
+    it("counts only open intents for openIntents", async () => {
       const intents = [
         baseIntent({ intentId: "a", state: "open" }),
         baseIntent({ intentId: "b", state: "open" }),
@@ -86,183 +86,178 @@ describe("StatsService", () => {
         baseIntent({ intentId: "d", state: "cancelled" }),
       ];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().openIntents).toBe(2);
+      expect((await service.getProtocolStats()).openIntents).toBe(2);
     });
 
-    it("openIntents is 0 when no intents are open", () => {
+    it("openIntents is 0 when no intents are open", async () => {
       const intents = [
         baseIntent({ intentId: "a", state: "filled", fillAmount: "500" }),
         baseIntent({ intentId: "b", state: "cancelled" }),
       ];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().openIntents).toBe(0);
+      expect((await service.getProtocolStats()).openIntents).toBe(0);
     });
   });
 
   // ── totalVolume (BigInt reduce) ────────────────────────────────────────────
 
   describe("totalVolume", () => {
-    it("is '0' when there are no filled intents", () => {
+    it("is '0' when there are no filled intents", async () => {
       const intents = [baseIntent({ intentId: "a", state: "open" })];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().totalVolume).toBe("0");
+      expect((await service.getProtocolStats()).totalVolume).toBe("0");
     });
 
-    it("sums fillAmount of filled intents correctly", () => {
+    it("sums fillAmount of filled intents correctly", async () => {
       const intents = [
         baseIntent({ intentId: "a", state: "filled", fillAmount: "1000000" }),
         baseIntent({ intentId: "b", state: "filled", fillAmount: "2000000" }),
         baseIntent({ intentId: "c", state: "open" }),
       ];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().totalVolume).toBe("3000000");
+      expect((await service.getProtocolStats()).totalVolume).toBe("3000000");
     });
 
-    it("treats missing fillAmount as zero when state is filled", () => {
+    it("treats missing fillAmount as zero when state is filled", async () => {
       const intents = [
         baseIntent({ intentId: "a", state: "filled", fillAmount: undefined }),
         baseIntent({ intentId: "b", state: "filled", fillAmount: "500000" }),
       ];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().totalVolume).toBe("500000");
+      expect((await service.getProtocolStats()).totalVolume).toBe("500000");
     });
 
-    it("returns volume as a string (not a number)", () => {
+    it("returns volume as a string (not a number)", async () => {
       const intents = [baseIntent({ intentId: "a", state: "filled", fillAmount: "9999999999999999999" })];
       const { service } = makeDeps(intents, []);
-      const { totalVolume } = service.getProtocolStats();
+      const { totalVolume } = await service.getProtocolStats();
       expect(typeof totalVolume).toBe("string");
       expect(totalVolume).toBe("9999999999999999999");
     });
 
-    it("handles large values correctly via BigInt arithmetic", () => {
-      // Summing two large values that would lose precision in regular JS numbers
+    it("handles large values correctly via BigInt arithmetic", async () => {
       const intents = [
-        baseIntent({ intentId: "a", state: "filled", fillAmount: "9007199254740993" }), // Number.MAX_SAFE_INTEGER + 2
+        baseIntent({ intentId: "a", state: "filled", fillAmount: "9007199254740993" }),
         baseIntent({ intentId: "b", state: "filled", fillAmount: "9007199254740993" }),
       ];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().totalVolume).toBe("18014398509481986");
+      expect((await service.getProtocolStats()).totalVolume).toBe("18014398509481986");
     });
   });
 
   // ── uniqueUsers ────────────────────────────────────────────────────────────
 
   describe("uniqueUsers", () => {
-    it("counts distinct user addresses", () => {
+    it("counts distinct user addresses", async () => {
       const intents = [
         baseIntent({ intentId: "a", user: "GUSER1" }),
         baseIntent({ intentId: "b", user: "GUSER2" }),
-        baseIntent({ intentId: "c", user: "GUSER1" }), // duplicate
+        baseIntent({ intentId: "c", user: "GUSER1" }),
       ];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().uniqueUsers).toBe(2);
+      expect((await service.getProtocolStats()).uniqueUsers).toBe(2);
     });
 
-    it("is 0 when there are no intents", () => {
+    it("is 0 when there are no intents", async () => {
       const { service } = makeDeps([], []);
-      expect(service.getProtocolStats().uniqueUsers).toBe(0);
+      expect((await service.getProtocolStats()).uniqueUsers).toBe(0);
     });
   });
 
   // ── activeSolvers ──────────────────────────────────────────────────────────
 
   describe("activeSolvers", () => {
-    it("counts only solvers where isActive is true", () => {
+    it("counts only solvers where isActive is true", async () => {
       const solvers = [
         baseSolver({ address: "S1", isActive: true }),
         baseSolver({ address: "S2", isActive: false }),
         baseSolver({ address: "S3", isActive: true }),
       ];
       const { service } = makeDeps([], solvers);
-      expect(service.getProtocolStats().activeSolvers).toBe(2);
+      expect((await service.getProtocolStats()).activeSolvers).toBe(2);
     });
 
-    it("is 0 when there are no active solvers", () => {
+    it("is 0 when there are no active solvers", async () => {
       const solvers = [baseSolver({ address: "S1", isActive: false })];
       const { service } = makeDeps([], solvers);
-      expect(service.getProtocolStats().activeSolvers).toBe(0);
+      expect((await service.getProtocolStats()).activeSolvers).toBe(0);
     });
   });
 
   // ── avgFillTime ────────────────────────────────────────────────────────────
 
   describe("avgFillTime", () => {
-    it("is 0 when there are no filled intents", () => {
+    it("is 0 when there are no filled intents", async () => {
       const intents = [baseIntent({ intentId: "a", state: "open" })];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().avgFillTime).toBe(0);
+      expect((await service.getProtocolStats()).avgFillTime).toBe(0);
     });
 
-    it("is 0 when filled intents all have filledAt unset", () => {
+    it("is 0 when filled intents all have filledAt unset", async () => {
       const intents = [
         baseIntent({ intentId: "a", state: "filled", fillAmount: "100", filledAt: undefined }),
         baseIntent({ intentId: "b", state: "filled", fillAmount: "200", filledAt: undefined }),
       ];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().avgFillTime).toBe(0);
+      expect((await service.getProtocolStats()).avgFillTime).toBe(0);
     });
 
-    it("computes average as Math.round((filledAt - createdAt) across filled intents)", () => {
+    it("computes average as Math.round((filledAt - createdAt) across filled intents)", async () => {
       const intents = [
-        baseIntent({ intentId: "a", state: "filled", fillAmount: "100", createdAt: 1000, filledAt: 1030 }), // 30s
-        baseIntent({ intentId: "b", state: "filled", fillAmount: "200", createdAt: 1000, filledAt: 1050 }), // 50s
+        baseIntent({ intentId: "a", state: "filled", fillAmount: "100", createdAt: 1000, filledAt: 1030 }),
+        baseIntent({ intentId: "b", state: "filled", fillAmount: "200", createdAt: 1000, filledAt: 1050 }),
       ];
       const { service } = makeDeps(intents, []);
-      // avg = (30 + 50) / 2 = 40
-      expect(service.getProtocolStats().avgFillTime).toBe(40);
+      expect((await service.getProtocolStats()).avgFillTime).toBe(40);
     });
 
-    it("rounds fractional averages", () => {
+    it("rounds fractional averages", async () => {
       const intents = [
-        baseIntent({ intentId: "a", state: "filled", fillAmount: "100", createdAt: 1000, filledAt: 1010 }), // 10s
-        baseIntent({ intentId: "b", state: "filled", fillAmount: "100", createdAt: 1000, filledAt: 1011 }), // 11s
-        baseIntent({ intentId: "c", state: "filled", fillAmount: "100", createdAt: 1000, filledAt: 1012 }), // 12s
+        baseIntent({ intentId: "a", state: "filled", fillAmount: "100", createdAt: 1000, filledAt: 1010 }),
+        baseIntent({ intentId: "b", state: "filled", fillAmount: "100", createdAt: 1000, filledAt: 1011 }),
+        baseIntent({ intentId: "c", state: "filled", fillAmount: "100", createdAt: 1000, filledAt: 1012 }),
       ];
       const { service } = makeDeps(intents, []);
-      // avg = (10 + 11 + 12) / 3 = 11 exactly → round(11) = 11
-      expect(service.getProtocolStats().avgFillTime).toBe(11);
+      expect((await service.getProtocolStats()).avgFillTime).toBe(11);
     });
 
-    it("excludes filled intents without filledAt from the average calculation", () => {
+    it("excludes filled intents without filledAt from the average calculation", async () => {
       const intents = [
-        baseIntent({ intentId: "a", state: "filled", fillAmount: "100", createdAt: 1000, filledAt: 1060 }), // 60s
-        baseIntent({ intentId: "b", state: "filled", fillAmount: "100", filledAt: undefined }), // no filledAt — excluded
+        baseIntent({ intentId: "a", state: "filled", fillAmount: "100", createdAt: 1000, filledAt: 1060 }),
+        baseIntent({ intentId: "b", state: "filled", fillAmount: "100", filledAt: undefined }),
       ];
       const { service } = makeDeps(intents, []);
-      // Only intent a contributes: avg = 60
-      expect(service.getProtocolStats().avgFillTime).toBe(60);
+      expect((await service.getProtocolStats()).avgFillTime).toBe(60);
     });
   });
 
   // ── fillRate (divide-by-zero guard) ────────────────────────────────────────
 
   describe("fillRate", () => {
-    it("is 0 when there are no intents (divide-by-zero guard)", () => {
+    it("is 0 when there are no intents (divide-by-zero guard)", async () => {
       const { service } = makeDeps([], []);
-      // Guard: intents.length ? filled.length / intents.length : 0
-      expect(service.getProtocolStats().fillRate).toBe(0);
+      expect((await service.getProtocolStats()).fillRate).toBe(0);
     });
 
-    it("is 0 when there are intents but none are filled", () => {
+    it("is 0 when there are intents but none are filled", async () => {
       const intents = [
         baseIntent({ intentId: "a", state: "open" }),
         baseIntent({ intentId: "b", state: "cancelled" }),
       ];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().fillRate).toBe(0);
+      expect((await service.getProtocolStats()).fillRate).toBe(0);
     });
 
-    it("is 1 when all intents are filled", () => {
+    it("is 1 when all intents are filled", async () => {
       const intents = [
         baseIntent({ intentId: "a", state: "filled", fillAmount: "100" }),
         baseIntent({ intentId: "b", state: "filled", fillAmount: "200" }),
       ];
       const { service } = makeDeps(intents, []);
-      expect(service.getProtocolStats().fillRate).toBe(1);
+      expect((await service.getProtocolStats()).fillRate).toBe(1);
     });
 
-    it("calculates the correct fractional rate", () => {
+    it("calculates the correct fractional rate", async () => {
       const intents = [
         baseIntent({ intentId: "a", state: "filled", fillAmount: "100" }),
         baseIntent({ intentId: "b", state: "open" }),
@@ -270,18 +265,17 @@ describe("StatsService", () => {
         baseIntent({ intentId: "d", state: "open" }),
       ];
       const { service } = makeDeps(intents, []);
-      // 1 filled out of 4 = 0.25
-      expect(service.getProtocolStats().fillRate).toBeCloseTo(0.25);
+      expect((await service.getProtocolStats()).fillRate).toBeCloseTo(0.25);
     });
 
-    it("is a number between 0 and 1 inclusive", () => {
+    it("is a number between 0 and 1 inclusive", async () => {
       const intents = [
         baseIntent({ intentId: "a", state: "filled", fillAmount: "100" }),
         baseIntent({ intentId: "b", state: "filled", fillAmount: "200" }),
         baseIntent({ intentId: "c", state: "open" }),
       ];
       const { service } = makeDeps(intents, []);
-      const { fillRate } = service.getProtocolStats();
+      const { fillRate } = await service.getProtocolStats();
       expect(fillRate).toBeGreaterThanOrEqual(0);
       expect(fillRate).toBeLessThanOrEqual(1);
     });
@@ -290,9 +284,9 @@ describe("StatsService", () => {
   // ── shape / return type ────────────────────────────────────────────────────
 
   describe("return shape", () => {
-    it("returns an object with all expected keys", () => {
+    it("returns an object with all expected keys", async () => {
       const { service } = makeDeps([], []);
-      const stats = service.getProtocolStats();
+      const stats = await service.getProtocolStats();
 
       expect(stats).toHaveProperty("totalIntents");
       expect(stats).toHaveProperty("openIntents");
@@ -303,15 +297,15 @@ describe("StatsService", () => {
       expect(stats).toHaveProperty("fillRate");
     });
 
-    it("totalVolume is always a string", () => {
+    it("totalVolume is always a string", async () => {
       const { service } = makeDeps([], []);
-      expect(typeof service.getProtocolStats().totalVolume).toBe("string");
+      expect(typeof (await service.getProtocolStats()).totalVolume).toBe("string");
     });
 
-    it("delegates to intentsService.getAll() and solversService.getAll() each call", () => {
+    it("delegates to intentsService.getAll() and solversService.getAll() each call", async () => {
       const { service, intentsService, solversService } = makeDeps([], []);
-      service.getProtocolStats();
-      service.getProtocolStats();
+      await service.getProtocolStats();
+      await service.getProtocolStats();
       expect(intentsService.getAll).toHaveBeenCalledTimes(2);
       expect(solversService.getAll).toHaveBeenCalledTimes(2);
     });
