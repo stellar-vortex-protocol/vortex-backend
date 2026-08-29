@@ -333,8 +333,9 @@ export class IntentsController {
    * Issue #220 — routes are now computed via RoutingService and attached to each quote.
    */
   @Post("quote")
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @ApiTooManyRequestsResponse({
-    description: "Rate limit exceeded — max 100 req/min per IP globally",
+    description: "Rate limit exceeded — max 20 quote requests per 60 s per IP",
   })
   @ApiOkResponse({ type: QuoteResponseDto })
   quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {

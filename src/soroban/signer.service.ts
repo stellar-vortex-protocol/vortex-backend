@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Keypair, Networks, Transaction, FeeBumpTransaction } from "@stellar/stellar-sdk";
+import { readFileSync } from "node:fs";
 import { AppConfig } from "../config/configuration";
 import { SorobanService } from "./soroban.service";
 
@@ -44,7 +45,9 @@ export class SignerService {
     configService: ConfigService<AppConfig, true>,
     private readonly sorobanService: SorobanService,
   ) {
-    this.secretKey = configService.get("stellar.signingKey", { infer: true });
+    const configuredSecret = configService.get("stellar.signingKey", { infer: true });
+    const secretFile = process.env.SOROBAN_SIGNING_KEY_FILE?.trim();
+    this.secretKey = secretFile ? readFileSync(secretFile, "utf8").trim() : configuredSecret;
     this.networkPassphrase = NETWORK_PASSPHRASES[configService.get("stellar.network", { infer: true })];
   }
 

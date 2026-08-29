@@ -9,6 +9,8 @@ import {
 import { ApiTags } from "@nestjs/swagger";
 import { SolversService } from "./solvers.service";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
+import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
+import { verifyStellarSignature, buildSolverStatusMessage } from "../common/stellar-signature";
 
 @ApiTags("solvers")
 @Controller("api/v1/solvers")
