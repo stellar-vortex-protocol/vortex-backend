@@ -1,8 +1,11 @@
+import { Test } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
 import { StellarTxService } from "../soroban/stellar-tx.service";
+import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
+import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
 import { logger } from "../common/logger";
 
 jest.mock("../common/logger", () => ({
@@ -18,7 +21,13 @@ function makeIntentsService(): IntentsService {
   const configService = {
     get: jest.fn().mockReturnValue(false),
   } as unknown as ConfigService<AppConfig, true>;
-  return new IntentsService(configService, {} as StellarTxService);
+  const prismaService = {
+    intentAuditLog: {
+      create: jest.fn().mockResolvedValue({}),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+  } as unknown as PrismaService;
+  return new IntentsService(configService, {} as StellarTxService, prismaService);
 }
 
 function createMockClient() {
@@ -28,6 +37,7 @@ function createMockClient() {
     send: jest.fn(),
     ping: jest.fn(),
     terminate: jest.fn(),
+    close: jest.fn(),
     on: jest.fn((event: string, cb: (...args: unknown[]) => void) => {
       listeners[event] = cb;
     }),
@@ -39,10 +49,10 @@ describe("IntentsGateway heartbeat", () => {
   let gateway: IntentsGateway;
   let intentsService: IntentsService;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
-    intentsService = makeIntentsService();
+    intentsService = await makeIntentsService();
     gateway = new IntentsGateway(intentsService);
   });
 
@@ -124,10 +134,10 @@ describe("IntentsGateway logging", () => {
   let gateway: IntentsGateway;
   let intentsService: IntentsService;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
-    intentsService = makeIntentsService();
+    intentsService = await makeIntentsService();
     gateway = new IntentsGateway(intentsService);
   });
 

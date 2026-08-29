@@ -10,16 +10,20 @@ import { PrismaService } from "../../src/prisma/prisma.service";
 /**
  * Minimal PrismaService stand-in for e2e tests.
  *
- * The feature services (IntentsService, SolversService, etc.) still use
- * in-memory stores in the current codebase, so they never call PrismaService
- * directly.  We only need to prevent the real $connect() from being called so
- * the suite does not require a live PostgreSQL instance.
+ * IntentsService now calls this.prisma.intentAuditLog.create() as a
+ * fire-and-forget DB write (issue #217).  We stub that here so the suite
+ * does not require a live PostgreSQL instance.
  */
 class MockPrismaService {
   // eslint-disable-next-line @typescript-eslint/no-empty-function
   async onModuleInit(): Promise<void> {}
   // eslint-disable-next-line @typescript-eslint/no-empty-function
   async onModuleDestroy(): Promise<void> {}
+
+  intentAuditLog = {
+    create: jest.fn().mockResolvedValue({}),
+    findMany: jest.fn().mockResolvedValue([]),
+  };
 }
 
 export async function createTestApp(): Promise<INestApplication> {

@@ -17,22 +17,25 @@ export const SOLVERS_REPOSITORY = Symbol("SOLVERS_REPOSITORY");
  *
  * Mirrors the shape SolversService already exposes so that swapping the
  * underlying adapter is a one-line change in SolversModule.
+ *
+ * Methods return synchronous values for the in-memory adapter and Promises
+ * for the Prisma adapter — callers always `await` so both shapes work.
  */
 export interface ISolversRepository {
   /**
    * Persist a fully-formed solver record and return it.
-   * If a record with the same address already exists it is overwritten.
+   * If a record with the same address already exists it is overwritten (upsert).
    */
-  save(solver: SolverRecord): SolverRecord;
+  save(solver: SolverRecord): SolverRecord | Promise<SolverRecord>;
 
   /**
    * Find a solver by its unique address.
    * Returns `undefined` when no matching record exists.
    */
-  findByAddress(address: string): SolverRecord | undefined;
+  findByAddress(address: string): SolverRecord | undefined | Promise<SolverRecord | undefined>;
 
   /**
    * Return all solver records (order is unspecified — callers sort as needed).
    */
-  findAll(): SolverRecord[];
+  findAll(): SolverRecord[] | Promise<SolverRecord[]>;
 }

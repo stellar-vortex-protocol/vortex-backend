@@ -81,7 +81,7 @@ describe("Intent expiry via sweeper (e2e)", () => {
     expect(createRes.body.state).toBe("open");
 
     // Manually back-date the deadline by patching via IntentsService
-    intentsService.update(intentId, { deadline: pastDeadline });
+    await intentsService.update(intentId, { deadline: pastDeadline });
 
     // Confirm it's still open before sweep
     const beforeSweep = await request(app.getHttpServer())
@@ -91,7 +91,7 @@ describe("Intent expiry via sweeper (e2e)", () => {
     expect(beforeSweep.body.deadline).toBe(pastDeadline);
 
     // Invoke the sweeper directly (bypasses the 30-second timer)
-    (sweeper as unknown as { sweep(): void }).sweep();
+    await (sweeper as unknown as { sweep(): Promise<void> }).sweep();
 
     // Confirm the intent is now expired
     const afterSweep = await request(app.getHttpServer())
@@ -109,9 +109,9 @@ describe("Intent expiry via sweeper (e2e)", () => {
     const { intentId } = createRes.body;
 
     // Ensure deadline is in the future (it will be by default but be explicit)
-    intentsService.update(intentId, { deadline: futureDeadline });
+    await intentsService.update(intentId, { deadline: futureDeadline });
 
-    (sweeper as unknown as { sweep(): void }).sweep();
+    await (sweeper as unknown as { sweep(): Promise<void> }).sweep();
 
     const afterSweep = await request(app.getHttpServer())
       .get(`/api/v1/intents/${intentId}`)
@@ -135,9 +135,9 @@ describe("Intent expiry via sweeper (e2e)", () => {
       .expect(201);
 
     // Back-date the deadline
-    intentsService.update(intentId, { deadline: pastDeadline });
+    await intentsService.update(intentId, { deadline: pastDeadline });
 
-    (sweeper as unknown as { sweep(): void }).sweep();
+    await (sweeper as unknown as { sweep(): Promise<void> }).sweep();
 
     // Sweep only targets open intents — accepted should remain accepted
     const afterSweep = await request(app.getHttpServer())
@@ -155,7 +155,7 @@ describe("Intent expiry via sweeper (e2e)", () => {
       .expect(201);
     const { intentId } = createRes.body;
 
-    intentsService.update(intentId, { deadline: pastDeadline });
+    await intentsService.update(intentId, { deadline: pastDeadline });
 
     // Connect a WS client before triggering the sweep
     const port: number = app.getHttpServer().address().port;
@@ -166,7 +166,7 @@ describe("Intent expiry via sweeper (e2e)", () => {
 
     // Small delay to ensure WS handshake completes before sweep fires
     await new Promise((r) => setTimeout(r, 100));
-    (sweeper as unknown as { sweep(): void }).sweep();
+    await (sweeper as unknown as { sweep(): Promise<void> }).sweep();
 
     const messages = await messagesPromise;
 
@@ -176,15 +176,15 @@ describe("Intent expiry via sweeper (e2e)", () => {
     expect(expiredEvents.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("sweeper handles an empty open-intents list without errors", () => {
-    // Force all open intents to accepted so getByState('open') returns []
-    const open = intentsService.getByState("open");
+  it("sweeper handles an empty open-intents list without errors", async () => {
+    // Force all open intents to cancelled so getByState('open') returns []
+    const open = await intentsService.getByState("open");
     for (const intent of open) {
-      intentsService.update(intent.intentId, { state: "cancelled" });
+      await intentsService.update(intent.intentId, { state: "cancelled" });
     }
 
-    expect(() => {
-      (sweeper as unknown as { sweep(): void }).sweep();
-    }).not.toThrow();
+    await expect(
+      (sweeper as unknown as { sweep(): Promise<void> }).sweep(),
+    ).resolves.not.toThrow();
   });
 });

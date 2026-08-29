@@ -11,9 +11,9 @@ export class StatsService {
     private readonly intentsGateway: IntentsGateway,
   ) {}
 
-  getProtocolStats() {
-    const intents = this.intentsService.getAll();
-    const solvers = this.solversService.getAll();
+  async getProtocolStats() {
+    const intents = await this.intentsService.getAll();
+    const solvers = await this.solversService.getAll();
 
     const open = intents.filter((i) => i.state === "open").length;
     const filled = intents.filter((i) => i.state === "filled");
