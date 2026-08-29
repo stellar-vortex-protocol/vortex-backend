@@ -23,6 +23,11 @@ export class ListIntentsDto {
   @Max(100)
   limit!: number;
 
+  @ApiPropertyOptional({ description: "Cursor for the next page of intents" })
+  @IsOptional()
+  @IsString()
+  cursor?: string;
+
   @ApiProperty({ minimum: 0, default: 0, description: "Number of results to skip" })
   @IsInt()
   @Min(0)

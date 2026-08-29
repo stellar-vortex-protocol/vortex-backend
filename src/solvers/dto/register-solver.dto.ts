@@ -42,4 +42,9 @@ export class RegisterSolverDto {
   @IsArray()
   @IsString({ each: true })
   supportedTokens!: string[];
+
+  @ApiProperty({ description: "Proof-of-control signature for the advertised solver address" })
+  @IsString()
+  @IsNotEmpty()
+  proofSignature!: string;
 }
