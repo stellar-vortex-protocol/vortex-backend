@@ -1,7 +1,7 @@
 import { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { createTestApp } from "../utils/create-test-app";
-import { IntentsService } from "../../src/intents/intents.service";
+import { InMemoryIntentsRepository } from "../../src/intents/intents.repository";
 
 const SOLVERS = ["SOLVER_ALPHA", "SOLVER_BETA", "SOLVER_GAMMA"];
 
@@ -126,12 +126,12 @@ describe("Concurrent accept / fill race load test", () => {
     }
   });
 
-  it("unit-level: acceptIfOpen rejects concurrent calls on the same intent", () => {
-    const service = new IntentsService();
-    const [open] = service.getByState("open");
+  it("unit-level: acceptIfOpen rejects concurrent calls on the same intent", async () => {
+    const repo = new InMemoryIntentsRepository();
+    const [open] = repo.findByState("open");
 
     const results = Array.from({ length: 50 }, (_, i) =>
-      service.acceptIfOpen(open.intentId, `SOLVER_${i}`),
+      repo.acceptIfOpen(open.intentId, `SOLVER_${i}`, Math.floor(Date.now() / 1000) + 300),
     );
 
     const winners = results.filter((r) => r !== null);
@@ -140,13 +140,13 @@ describe("Concurrent accept / fill race load test", () => {
   });
 
   it("unit-level: fillIfAccepted rejects concurrent calls on the same intent", () => {
-    const service = new IntentsService();
-    const [open] = service.getByState("open");
+    const repo = new InMemoryIntentsRepository();
+    const [open] = repo.findByState("open");
 
-    service.acceptIfOpen(open.intentId, "SOLVER_X");
+    repo.acceptIfOpen(open.intentId, "SOLVER_X", Math.floor(Date.now() / 1000) + 300);
 
     const results = Array.from({ length: 50 }, () =>
-      service.fillIfAccepted(open.intentId, "SOLVER_X", {
+      repo.fillIfAccepted(open.intentId, "SOLVER_X", {
         fillAmount: "995000",
         txHash: "race-hash",
         filledAt: Math.floor(Date.now() / 1000),

@@ -1,11 +1,20 @@
-export type SupportedChain =
-  | "stellar"
-  | "ethereum"
-  | "base"
-  | "polygon"
-  | "arbitrum"
-  | "optimism"
-  | "avalanche";
+/**
+ * Single source of truth for every chain the protocol recognises.
+ * `SupportedChain` is derived from this tuple so all three consumers
+ * (intents.types.ts, create-intent.dto.ts, tokens.data.ts) stay in sync
+ * automatically — see issue #128.
+ */
+export const SUPPORTED_CHAINS = [
+  "stellar",
+  "ethereum",
+  "base",
+  "polygon",
+  "arbitrum",
+  "optimism",
+  "avalanche",
+] as const;
+
+export type SupportedChain = (typeof SUPPORTED_CHAINS)[number];
 
 /**
  * A single entry in the append-only audit log for an intent.

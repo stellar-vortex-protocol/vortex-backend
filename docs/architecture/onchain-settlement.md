@@ -165,3 +165,49 @@ transactions.
   the solver-registry contract call described in the state-mapping table
   above on a narrower surface (sweeper-triggered only, no user-facing HTTP
   write path).
+
+## Persistence layer
+
+Both `IntentsService` and `SolversService` delegate all storage to an
+injected repository following the same pattern:
+
+- **`IIntentsRepository`** (`src/intents/intents.repository.ts`) — interface
+  backed by a DI Symbol token `INTENTS_REPOSITORY`.
+- **`ISolversRepository`** (`src/solvers/solvers.repository.ts`) — interface
+  backed by a DI Symbol token `SOLVERS_REPOSITORY`.
+
+Two concrete adapters ship for each:
+
+| Adapter | Module constant | When to use |
+|---|---|---|
+| `InMemoryIntentsRepository` | `INTENTS_PERSISTENCE=memory` (default) | Development, tests — no database required |
+| `PrismaIntentsRepository` | `INTENTS_PERSISTENCE=prisma` | Production / staging — persists to the `intents` table |
+| `InMemorySolversRepository` | `SOLVERS_PERSISTENCE=memory` (default) | Development, tests |
+| `PrismaSolversRepository` | `SOLVERS_PERSISTENCE=prisma` | Production / staging — persists to the `solvers` table |
+
+### Atomic race-condition protection
+
+`acceptIfOpen` and `fillIfAccepted` are the two operations that must be
+race-safe.  Each adapter implements them differently but provides the same
+guarantee:
+
+- **In-memory adapter** — the Node.js event loop is single-threaded, so a
+  plain state-guard read-then-write is atomic within a single process.
+- **Prisma adapter** — uses a single `prisma.intent.updateMany({
+  where: { intentId, state: 'open' }, data: ... })` call; the database
+  enforces the condition atomically.  A `count === 0` result means another
+  writer won the race.  This guarantee holds across multiple horizontally
+  scaled API instances.
+
+The `fillIfAccepted` path additionally guards on `solver === <address>` in
+the WHERE clause so a different solver can never accidentally fill another
+solver's accepted intent.
+
+### Switching adapters
+
+Set `INTENTS_PERSISTENCE=prisma` and `SOLVERS_PERSISTENCE=prisma` in your
+environment (see the Docker production deployment section in `README.md`).
+`DATABASE_URL` must point to a running Postgres instance with migrations
+applied (`npm run db:migrate:prod`).  No code changes are required —
+`IntentsModule` and `SolversModule` read the env var in their `useFactory`
+provider and instantiate the appropriate adapter.

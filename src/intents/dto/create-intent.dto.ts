@@ -1,18 +1,8 @@
 import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min, MinLength } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { SupportedChain } from "../intents.types";
+import { SUPPORTED_CHAINS, SupportedChain } from "../intents.types";
 import { IsValidAddress } from "../../common/validators/is-valid-address.validator";
 import { IsValidDeadline } from "../../common/validators/deadline.validator";
-
-const SUPPORTED_CHAINS: SupportedChain[] = [
-  "stellar",
-  "ethereum",
-  "base",
-  "polygon",
-  "arbitrum",
-  "optimism",
-  "avalanche",
-];
 
 export class CreateIntentDto {
   @ApiProperty({ description: "Stellar address of the user creating the intent" })

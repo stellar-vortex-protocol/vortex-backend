@@ -15,19 +15,9 @@ export class StatsService {
     private readonly intentsGateway: IntentsGateway,
   ) {}
 
-  getProtocolStats() {
-    const now = Date.now();
-    if (this.cachedProtocolStats && this.cachedProtocolStats.expiresAt > now) {
-      return this.cachedProtocolStats.value;
-    }
-    const value = this.buildProtocolStats();
-    this.cachedProtocolStats = { value, expiresAt: now + 5_000 };
-    return value;
-  }
-
-  private buildProtocolStats() {
-    const intents = this.intentsService.getAll();
-    const solvers = this.solversService.getAll();
+  async getProtocolStats() {
+    const intents = await this.intentsService.getAll();
+    const solvers = await this.solversService.getAll();
 
     const open = intents.filter((i) => i.state === "open").length;
     const filled = intents.filter((i) => i.state === "filled");

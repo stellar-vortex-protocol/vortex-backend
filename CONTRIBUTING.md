@@ -200,8 +200,8 @@ src/
     <domain>.controller.ts      # HTTP routes + Swagger annotations
     <domain>.service.ts         # Business logic
     <domain>.service.spec.ts    # Unit tests for the service
-    <domain>.repository.ts      # Repository interface (if applicable)
-    in-memory-<domain>.repository.ts   # In-memory adapter (current default)
+    <domain>.repository.ts      # Repository interface + DI token + in-memory adapter
+    prisma-<domain>.repository.ts  # Prisma adapter (when persistence is needed)
     dto/                        # Request/response DTOs
   common/                       # Shared utilities (logger, filters, guards)
   config/                       # ConfigModule + Joi validation schema
@@ -210,6 +210,55 @@ src/
 scripts/                        # Developer scripts (run via tsx)
 test/                           # E2E tests and shared helpers
 ```
+
+### Repository pattern
+
+Every domain module that owns persistent state follows the same injectable-
+repository pattern modelled after `SolversModule`:
+
+1. **`<domain>.repository.ts`** exports:
+   - A `Symbol` DI token (`INTENTS_REPOSITORY`, `SOLVERS_REPOSITORY`, …).
+   - A TypeScript `interface` (`IIntentsRepository`, `ISolversRepository`, …).
+   - The **in-memory adapter** (`InMemoryIntentsRepository`, …) as the
+     default implementation.
+
+2. **`prisma-<domain>.repository.ts`** exports the Prisma-backed adapter
+   (`PrismaIntentsRepository`, `PrismaSolversRepository`, …).
+
+3. **`<domain>.module.ts`** binds the token to an adapter via a `useFactory`
+   provider that reads an env var (`INTENTS_PERSISTENCE`, `SOLVERS_PERSISTENCE`)
+   and returns the appropriate instance.  Nothing else in the codebase needs
+   to change when switching adapters.
+
+The services (`IntentsService`, `SolversService`) inject the token and always
+`await` repository method calls so both sync (in-memory) and async (Prisma)
+shapes work transparently:
+
+```typescript
+@Injectable()
+export class IntentsService {
+  constructor(
+    @Inject(INTENTS_REPOSITORY)
+    private readonly repo: IIntentsRepository,
+    // ...
+  ) {}
+
+  async get(id: string): Promise<Intent | undefined> {
+    return this.repo.findById(id);   // works for both adapters
+  }
+}
+```
+
+To add a **new domain** with repository-backed persistence:
+
+1. Create `<domain>.repository.ts` with the Symbol, interface, and in-memory adapter.
+2. Create `prisma-<domain>.repository.ts` with the Prisma adapter.
+3. Bind the token in `<domain>.module.ts` using the env-var-driven `useFactory` pattern.
+4. Inject the token into the service with `@Inject(YOUR_REPOSITORY_TOKEN)`.
+5. Add the new `*_PERSISTENCE` variable to `src/config/env.validation.ts`.
+
+**Never** import a concrete repository class directly into a service — always
+use the DI token so the adapter remains swappable.
 
 ---
 
