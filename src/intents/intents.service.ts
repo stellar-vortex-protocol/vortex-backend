@@ -1,4 +1,5 @@
 import {
+  Inject,
   Injectable,
   Logger,
   OnModuleDestroy,
@@ -8,7 +9,6 @@ import { ConfigService } from "@nestjs/config";
 import { v4 as uuidv4 } from "uuid";
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Intent, IntentAuditEntry, IntentState } from "./intents.types";
-import { buildSeedIntents } from "./intents.seed";
 import { AppConfig } from "../config/configuration";
 import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
@@ -19,15 +19,20 @@ const STORE_SIZE_LOG_INTERVAL_MS = 60_000;
 /**
  * Orchestration layer for intents.
  *
- * Business logic (ID generation, default state, deadline defaulting) lives
- * here. All persistence is delegated to the internal in-memory Map.
- * Once issue #36 lands, this will delegate to an injected IIntentsRepository
- * so the storage adapter can be swapped without touching this service.
+ * Business logic (ID generation, default state, deadline defaulting,
+ * idempotency cache, audit log) lives here. All persistence is delegated
+ * to the injected IIntentsRepository so the storage adapter can be swapped
+ * (in-memory ↔ Prisma) without touching this service or anything above it.
  */
 @Injectable()
 export class IntentsService implements OnModuleDestroy {
   private readonly logger = new Logger(IntentsService.name);
-  private readonly intents = new Map<string, Intent>();
+
+  /**
+   * Idempotency cache: maps caller-supplied keys → { intentId, expiresAt }.
+   * Kept in-service (not in the repository) because it is a short-lived
+   * request deduplication concern, not a durable persistence concern.
+   */
   private readonly idempotencyCache = new Map<string, { intentId: string; expiresAt: number }>();
 
   /**
@@ -41,11 +46,12 @@ export class IntentsService implements OnModuleDestroy {
   private readonly sizeLogTimer: ReturnType<typeof setInterval>;
 
   constructor(
+    @Inject(INTENTS_REPOSITORY)
+    private readonly repo: IIntentsRepository,
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly stellarTxService: StellarTxService,
     private readonly prisma: PrismaService,
   ) {
-    this.seed();
     this.sizeLogTimer = setInterval(() => this.logStoreSize(), STORE_SIZE_LOG_INTERVAL_MS);
     // Allow the process to exit even if the timer is still active.
     this.sizeLogTimer.unref?.();
@@ -55,9 +61,10 @@ export class IntentsService implements OnModuleDestroy {
     clearInterval(this.sizeLogTimer);
   }
 
-  /** Logs the current intent map size so unbounded growth is observable. */
-  logStoreSize(): void {
-    this.logger.log(`[store-monitor] intents map size: ${this.intents.size}`);
+  /** Logs the current intent store size so unbounded growth is observable. */
+  async logStoreSize(): Promise<void> {
+    const all = await this.repo.findAll();
+    this.logger.log(`[store-monitor] intents store size: ${all.length}`);
   }
 
   async create(
@@ -69,7 +76,7 @@ export class IntentsService implements OnModuleDestroy {
     if (idempotencyKey) {
       const cached = this.idempotencyCache.get(idempotencyKey);
       if (cached && cached.expiresAt > now) {
-        const cachedIntent = this.intents.get(cached.intentId);
+        const cachedIntent = await this.repo.findById(cached.intentId);
         if (cachedIntent) {
           return cachedIntent;
         }
@@ -89,7 +96,7 @@ export class IntentsService implements OnModuleDestroy {
       await this.registerOnChain(intent);
     }
 
-    this.intents.set(intent.intentId, intent);
+    await this.repo.save(intent);
 
     if (idempotencyKey) {
       const ttl = 86400; // 24 hours
@@ -145,72 +152,53 @@ export class IntentsService implements OnModuleDestroy {
     ];
   }
 
-  get(id: string): Intent | undefined {
-    return this.intents.get(id);
+  async get(id: string): Promise<Intent | undefined> {
+    return this.repo.findById(id);
   }
 
-  getAll(): Intent[] {
-    return [...this.intents.values()].sort((a, b) => b.createdAt - a.createdAt);
+  async getAll(): Promise<Intent[]> {
+    return this.repo.findAll();
   }
 
-  getByState(state: IntentState): Intent[] {
-    return this.getAll().filter((i) => i.state === state);
+  async getByState(state: IntentState): Promise<Intent[]> {
+    return this.repo.findByState(state);
   }
 
-  getByUser(user: string): Intent[] {
-    return this.getAll().filter((i) => i.user.toLowerCase() === user.toLowerCase());
+  async getByUser(user: string): Promise<Intent[]> {
+    return this.repo.findByUser(user);
   }
 
-  getAcceptedCountBySolver(solver: string): number {
-    return this.getAll().filter((i) => i.state === "accepted" && i.solver === solver).length;
+  async getAcceptedCountBySolver(solver: string): Promise<number> {
+    const all = await this.repo.findAll();
+    return all.filter((i) => i.state === "accepted" && i.solver === solver).length;
   }
 
-  update(id: string, patch: Partial<Intent>): Intent | null {
-    const existing = this.intents.get(id);
-    if (!existing) return null;
-    const updated = { ...existing, ...patch };
-    this.intents.set(id, updated);
-    return updated;
+  async update(id: string, patch: Partial<Intent>): Promise<Intent | null> {
+    return this.repo.update(id, patch);
   }
 
   /**
    * Atomically accept an intent only if it is currently "open".
-   * Mirrors the DB pattern:
-   *   UPDATE intents SET state='accepted' WHERE id=$1 AND state='open' RETURNING *
-   * Returns null when the intent is not found or is not in the "open" state (already taken).
+   * Delegates to the repository so both in-memory and Prisma adapters can
+   * apply the conditional write atomically.
+   * Returns null when the intent is not found or is not in the "open" state.
    */
-  acceptIfOpen(id: string, solver: string): Intent | null {
-    const existing = this.intents.get(id);
-    if (!existing || existing.state !== "open") return null;
-
+  async acceptIfOpen(id: string, solver: string): Promise<Intent | null> {
     const now = Math.floor(Date.now() / 1000);
-    const updated: Intent = {
-      ...existing,
-      state: "accepted",
-      solver,
-      deadline: now + 300,
-    };
-    this.intents.set(id, updated);
-    return updated;
+    return this.repo.acceptIfOpen(id, solver, now + 300);
   }
 
   /**
    * Atomically fill an intent only if it is currently "accepted" by the given solver.
-   * Mirrors the DB pattern:
-   *   UPDATE intents SET state='filled', ... WHERE id=$1 AND state='accepted' AND solver=$2 RETURNING *
-   * Returns null when the intent is not found, not accepted, or assigned to a different solver.
+   * Returns null when the intent is not found, not accepted, or assigned to a
+   * different solver.
    */
-  fillIfAccepted(
+  async fillIfAccepted(
     id: string,
     solver: string,
     patch: Omit<Partial<Intent>, "state" | "solver">,
-  ): Intent | null {
-    const existing = this.intents.get(id);
-    if (!existing || existing.state !== "accepted" || existing.solver !== solver) return null;
-
-    const updated: Intent = { ...existing, ...patch, state: "filled" };
-    this.intents.set(id, updated);
-    return updated;
+  ): Promise<Intent | null> {
+    return this.repo.fillIfAccepted(id, solver, patch);
   }
 
   // ---------------------------------------------------------------------------
@@ -296,19 +284,5 @@ export class IntentsService implements OnModuleDestroy {
    */
   getAuditLog(intentId: string): IntentAuditEntry[] {
     return this.auditLog.get(intentId) ?? [];
-  }
-
-  // ---------------------------------------------------------------------------
-
-  private seed() {
-    const now = Math.floor(Date.now() / 1000);
-    for (const data of buildSeedIntents(now)) {
-      const intent: Intent = {
-        ...data,
-        intentId: uuidv4(),
-        createdAt: now - Math.floor(Math.random() * 600),
-      };
-      this.intents.set(intent.intentId, intent);
-    }
   }
 }

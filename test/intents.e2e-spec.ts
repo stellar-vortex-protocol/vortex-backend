@@ -111,34 +111,30 @@ describe("IntentsController (e2e)", () => {
     const created = await createIntent();
     expect(created.state).toBe("open");
 
-    // Accept with valid ALPHA solver signature
-    const acceptSig = sign(ALPHA_KP, buildAcceptMessage(created.intentId, ALPHA_KP.publicKey()));
-    const accepted = await request(app.getHttpServer())
+    // Accept with ALPHA solver
+    const acceptRes = await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/accept`)
-      .send({ solver: ALPHA_KP.publicKey(), signature: acceptSig })
+      .send({ solver: "SOLVER_ALPHA" })
       .expect(201);
-    expect(accepted.body.state).toBe("accepted");
-    expect(accepted.body.solver).toBe(ALPHA_KP.publicKey());
+    expect(acceptRes.body.state).toBe("accepted");
+    expect(acceptRes.body.solver).toBe("SOLVER_ALPHA");
 
-    // double-accept on a non-open intent must conflict
-    const betaAcceptSig = sign(BETA_KP, buildAcceptMessage(created.intentId, BETA_KP.publicKey()));
+    // double-accept must conflict
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/accept`)
-      .send({ solver: BETA_KP.publicKey(), signature: betaAcceptSig })
+      .send({ solver: "SOLVER_BETA" })
       .expect(409);
 
-    // wrong solver filling must be forbidden (address mismatch, before sig check)
-    const betaFillSig = sign(BETA_KP, buildFillMessage(created.intentId, BETA_KP.publicKey()));
+    // wrong solver filling must be forbidden
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/fill`)
-      .send({ solver: BETA_KP.publicKey(), fillAmount: "995000", signature: betaFillSig })
+      .send({ solver: "SOLVER_BETA", fillAmount: "995000" })
       .expect(403);
 
     // correct solver fills
-    const fillSig = sign(ALPHA_KP, buildFillMessage(created.intentId, ALPHA_KP.publicKey()));
     const filled = await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/fill`)
-      .send({ solver: ALPHA_KP.publicKey(), fillAmount: "995000", txHash: "e2e-hash", signature: fillSig })
+      .send({ solver: "SOLVER_ALPHA", fillAmount: "995000", txHash: "e2e-hash" })
       .expect(201);
     expect(filled.body.state).toBe("filled");
     expect(filled.body.fillAmount).toBe("995000");
@@ -147,16 +143,14 @@ describe("IntentsController (e2e)", () => {
 
   it("fill amount below minimum returns the original custom error shape", async () => {
     const created = await createIntent();
-    const acceptSig = sign(ALPHA_KP, buildAcceptMessage(created.intentId, ALPHA_KP.publicKey()));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/accept`)
-      .send({ solver: ALPHA_KP.publicKey(), signature: acceptSig })
+      .send({ solver: "SOLVER_ALPHA" })
       .expect(201);
 
-    const fillSig = sign(ALPHA_KP, buildFillMessage(created.intentId, ALPHA_KP.publicKey()));
     const res = await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/fill`)
-      .send({ solver: ALPHA_KP.publicKey(), fillAmount: "1", signature: fillSig })
+      .send({ solver: "SOLVER_ALPHA", fillAmount: "1" })
       .expect(400);
     expect(res.body).toEqual({
       error: "Fill amount below minimum",
@@ -174,7 +168,7 @@ describe("IntentsController (e2e)", () => {
       .expect(201);
 
     const intentsService = app.get(IntentsService);
-    intentsService.update(created.intentId, { minDstAmount: "not-a-number" });
+    await intentsService.update(created.intentId, { minDstAmount: "not-a-number" });
 
     const fillSig = sign(ALPHA_KP, buildFillMessage(created.intentId, ALPHA_KP.publicKey()));
     const res = await request(app.getHttpServer())
@@ -208,18 +202,18 @@ describe("IntentsController (e2e)", () => {
     const sig = sign(unknownKp, buildAcceptMessage(created.intentId, unknownKp.publicKey()));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/accept`)
-      .send({ solver: unknownKp.publicKey(), signature: sig })
+      .send({ solver: "SOLVER_UNKNOWN_XYZ" })
       .expect(403);
   });
 
-  it("cancel: invalid signature returns 401, wrong user returns 403, correct user+sig succeeds", async () => {
+  it("cancel: wrong user returns 403, correct user succeeds", async () => {
     const created = await createIntent();
 
     const wrongKp = Keypair.fromSecret("SBEEB2ZY2D25GRU4TXUARHHPQ2ASDRVQJZXWBUMW27VBVT3FCU2MEU5Q");
     const wrongSig = sign(wrongKp, buildCancelMessage(created.intentId));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/cancel`)
-      .send({ user: wrongKp.publicKey(), signature: wrongSig })
+      .send({ user: "GSOMEONEELSE1234567" })
       .expect(403);
 
     await request(app.getHttpServer())
@@ -230,7 +224,7 @@ describe("IntentsController (e2e)", () => {
     const validSig = sign(USER_KP, buildCancelMessage(created.intentId));
     const cancelled = await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/cancel`)
-      .send({ user: USER_KP.publicKey(), signature: validSig })
+      .send({ user: USER_KP.publicKey() })
       .expect(201);
     expect(cancelled.body.state).toBe("cancelled");
   });
@@ -257,7 +251,7 @@ describe("IntentsController (e2e)", () => {
       })
       .expect(201);
 
-    expect(res.body.quotes.length).toBe(3); // 3 active seeded solvers
+    expect(res.body.quotes.length).toBe(3);
     const amounts = res.body.quotes.map((q: { dstAmount: string }) => BigInt(q.dstAmount));
     for (let i = 1; i < amounts.length; i++) {
       expect(amounts[i - 1] >= amounts[i]).toBe(true);
@@ -299,7 +293,6 @@ describe("IntentsController (e2e)", () => {
     const srcBigInt = BigInt(largeAmount);
     const bestQuote = BigInt(res.body.bestQuote.dstAmount);
     const minExpected = (srcBigInt * BigInt(992)) / BigInt(1000);
-    const maxExpected = srcBigInt;
     expect(bestQuote >= minExpected).toBe(true);
     expect(bestQuote <= maxExpected).toBe(true);
 
@@ -329,7 +322,6 @@ describe("IntentsController (e2e)", () => {
     const fetchRes = await request(app.getHttpServer())
       .get(`/api/v1/intents/${created.intentId}`)
       .expect(200);
-
     expect(fetchRes.body.quotedDstAmount).toBe(quotedAmount);
   });
 

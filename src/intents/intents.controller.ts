@@ -23,7 +23,6 @@ import {
   ApiTooManyRequestsResponse,
   ApiOperation,
 } from "@nestjs/swagger";
-import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
@@ -58,8 +57,8 @@ export class IntentsController {
 
   @Get()
   @ApiBadRequestResponse({ description: "Invalid limit or offset" })
-  list(@Query() dto: ListIntentsDto) {
-    let intents = this.intentsService.getAll();
+  async list(@Query() dto: ListIntentsDto) {
+    let intents = await this.intentsService.getAll();
 
     if (dto.state) intents = intents.filter((i) => i.state === dto.state);
     if (dto.user) intents = intents.filter((i) => i.user.toLowerCase() === dto.user!.toLowerCase());
@@ -77,21 +76,21 @@ export class IntentsController {
   }
 
   @Get("open")
-  listOpen() {
-    const open = this.intentsService.getByState("open");
+  async listOpen() {
+    const open = await this.intentsService.getByState("open");
     return { intents: open, count: open.length };
   }
 
   @Get("user/:address")
-  listByUser(@Param("address") address: string) {
-    const intents = this.intentsService.getByUser(address);
+  async listByUser(@Param("address") address: string) {
+    const intents = await this.intentsService.getByUser(address);
     return { intents, count: intents.length };
   }
 
   @Get(":id")
   @ApiNotFoundResponse({ description: "Intent not found" })
-  getOne(@Param("id") id: string) {
-    const intent = this.intentsService.get(id);
+  async getOne(@Param("id") id: string) {
+    const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
     return intent;
   }
@@ -212,17 +211,17 @@ export class IntentsController {
   @ApiConflictResponse({ description: "Intent is not in open state" })
   @ApiGoneResponse({ description: "Intent has expired" })
   @ApiForbiddenResponse({ description: "Solver not registered or inactive" })
-  accept(@Param("id") id: string, @Body() dto: AcceptIntentDto) {
-    const intent = this.intentsService.get(id);
+  async accept(@Param("id") id: string, @Body() dto: AcceptIntentDto) {
+    const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
 
     const now = Math.floor(Date.now() / 1000);
     if (intent.deadline <= now) {
-      this.intentsService.update(id, { state: "expired" });
+      await this.intentsService.update(id, { state: "expired" });
       throw new GoneException("Intent has expired");
     }
 
-    const solver = this.solversService.get(dto.solver);
+    const solver = await this.solversService.get(dto.solver);
     if (!solver?.isActive) {
       throw new ForbiddenException("Solver not registered or inactive");
     }
@@ -230,9 +229,9 @@ export class IntentsController {
       throw new ForbiddenException("Solver has insufficient bond");
     }
 
-    const updated = this.intentsService.acceptIfOpen(id, dto.solver);
+    const updated = await this.intentsService.acceptIfOpen(id, dto.solver);
     if (!updated) {
-      const current = this.intentsService.get(id);
+      const current = await this.intentsService.get(id);
       throw new ConflictException(`Intent is ${current?.state ?? "unknown"}, cannot accept`);
     }
 
@@ -250,8 +249,8 @@ export class IntentsController {
   @ApiForbiddenResponse({ description: "Wrong solver for this intent" })
   @ApiGoneResponse({ description: "Fill window has expired" })
   @ApiBadRequestResponse({ description: "Fill amount below minimum" })
-  fill(@Param("id") id: string, @Body() dto: FillIntentDto) {
-    const intent = this.intentsService.get(id);
+  async fill(@Param("id") id: string, @Body() dto: FillIntentDto) {
+    const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
 
     const now = Math.floor(Date.now() / 1000);
@@ -281,13 +280,13 @@ export class IntentsController {
       });
     }
 
-    const updated = this.intentsService.fillIfAccepted(id, dto.solver, {
+    const updated = await this.intentsService.fillIfAccepted(id, dto.solver, {
       filledAt: now,
       fillAmount: dto.fillAmount,
       txHash: dto.txHash,
     });
     if (!updated) {
-      const current = this.intentsService.get(id);
+      const current = await this.intentsService.get(id);
       if (current?.solver !== dto.solver) {
         throw new ForbiddenException("Wrong solver for this intent");
       }
@@ -307,8 +306,8 @@ export class IntentsController {
   @ApiNotFoundResponse({ description: "Intent not found" })
   @ApiForbiddenResponse({ description: "Unauthorized" })
   @ApiConflictResponse({ description: "Intent is not in open state" })
-  cancel(@Param("id") id: string, @Body() dto: CancelIntentDto) {
-    const intent = this.intentsService.get(id);
+  async cancel(@Param("id") id: string, @Body() dto: CancelIntentDto) {
+    const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
     if (intent.user.toLowerCase() !== dto.user.toLowerCase()) {
       throw new ForbiddenException("Unauthorized");
@@ -320,7 +319,7 @@ export class IntentsController {
     // Verify the user controls the claimed address
     verifyStellarSignature(dto.user, buildCancelMessage(id), dto.signature);
 
-    const updated = this.intentsService.update(id, { state: "cancelled" });
+    const updated = await this.intentsService.update(id, { state: "cancelled" });
 
     // Audit trail (issue #217 / #62): record who cancelled and when.
     this.intentsService.appendAuditEntry(id, "cancelled", dto.user, "user cancelled");
@@ -349,8 +348,10 @@ export class IntentsController {
     const dstToken = this.tokensService.resolveDstToken(dto.dstTokenContract ?? "");
 
     const srcAmountBigInt = BigInt(dto.srcAmount);
-    const dstPriceUSD: number = dstToken?.priceUSD ?? 1;
-    const srcPriceUSD: number = srcToken?.priceUSD ?? dstPriceUSD;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dstPriceUSD: number = (dstToken as any)?.priceUSD ?? 1;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const srcPriceUSD: number = (srcToken as any)?.priceUSD ?? dstPriceUSD;
 
     const quotes = solvers
       .map((solver) => {
@@ -365,7 +366,8 @@ export class IntentsController {
         const fee = (dstAmount * BigInt(5)) / BigInt(10000); // 0.05%
 
         // Issue #126: compute USD fee total and price impact.
-        const feeUnits = Number(fee) / Math.pow(10, dstToken?.decimals ?? 7);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const feeUnits = Number(fee) / Math.pow(10, (dstToken as any)?.decimals ?? 7);
         const totalFeesUSD = feeUnits * dstPriceUSD;
         const srcUnits = Number(srcAmountBigInt) / Math.pow(10, srcToken?.decimals ?? 7);
         const dstUnits = Number(dstAmount) / Math.pow(10, dstToken?.decimals ?? 7);
@@ -416,7 +418,7 @@ export class IntentsController {
       .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
 
     if (dto.intentId && quotes.length > 0) {
-      this.intentsService.update(dto.intentId, { quotedDstAmount: quotes[0].dstAmount });
+      await this.intentsService.update(dto.intentId, { quotedDstAmount: quotes[0].dstAmount });
     }
 
     const best = quotes[0] ?? null;

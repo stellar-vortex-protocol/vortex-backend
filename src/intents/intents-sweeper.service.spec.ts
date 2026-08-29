@@ -1,3 +1,4 @@
+import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsService } from "./intents.service";
@@ -5,6 +6,7 @@ import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { InMemorySolversRepository } from "../solvers/in-memory-solvers.repository";
+import { InMemoryIntentsRepository, INTENTS_REPOSITORY } from "./intents.repository";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
@@ -23,8 +25,14 @@ function fakeIntentsService(): IntentsService {
   return new IntentsService(configService, stellarTxService, prismaService);
 }
 
-function fakeSolversService(): SolversService {
-  return new SolversService(new InMemorySolversRepository());
+async function buildSolversService(): Promise<SolversService> {
+  const module: TestingModule = await Test.createTestingModule({
+    providers: [
+      { provide: SOLVERS_REPOSITORY, useClass: InMemorySolversRepository },
+      SolversService,
+    ],
+  }).compile();
+  return module.get<SolversService>(SolversService);
 }
 
 describe("IntentsSweeperService", () => {
@@ -34,10 +42,10 @@ describe("IntentsSweeperService", () => {
   let solverRegistryService: jest.Mocked<SolverRegistryService>;
   let sweeper: IntentsSweeperService;
 
-  beforeEach(() => {
-    intentsService = fakeIntentsService();
+  beforeEach(async () => {
+    intentsService = await buildIntentsService();
     gateway = { broadcast: jest.fn() } as unknown as IntentsGateway;
-    solversService = fakeSolversService();
+    solversService = await buildSolversService();
     solverRegistryService = {
       slashSolver: jest.fn().mockResolvedValue({
         submitted: false,
@@ -54,7 +62,7 @@ describe("IntentsSweeperService", () => {
     );
   });
 
-  async function makeAcceptedIntent(deadline: number, solver = "SOLVER_ALPHA") {
+  async function makeAcceptedIntent(deadline: number, solver = ALPHA_ADDR) {
     const intent = await intentsService.create({
       user: "GTEST...0000",
       srcChain: "ethereum",
@@ -64,7 +72,7 @@ describe("IntentsSweeperService", () => {
       minDstAmount: "990000",
       deadline: deadline + 10_000, // create as open with a far-future deadline first
     });
-    intentsService.update(intent.intentId, { state: "accepted", solver, deadline });
+    await intentsService.update(intent.intentId, { state: "accepted", solver, deadline });
     return intent.intentId;
   }
 
@@ -82,7 +90,7 @@ describe("IntentsSweeperService", () => {
 
     await sweeper.sweep();
 
-    expect(intentsService.get(intent.intentId)?.state).toBe("expired");
+    expect((await intentsService.get(intent.intentId))?.state).toBe("expired");
     expect(gateway.broadcast).toHaveBeenCalledWith(
       expect.objectContaining({ type: "intent_expired", intentId: intent.intentId }),
     );
@@ -90,41 +98,41 @@ describe("IntentsSweeperService", () => {
 
   it("slashes an accepted intent whose fill deadline has passed", async () => {
     const past = Math.floor(Date.now() / 1000) - 10;
-    const intentId = await makeAcceptedIntent(past, "SOLVER_ALPHA");
+    const intentId = await makeAcceptedIntent(past, ALPHA_ADDR);
 
     await sweeper.sweep();
 
-    const updated = intentsService.get(intentId);
+    const updated = await intentsService.get(intentId);
     expect(updated?.state).toBe("slashed");
     expect(updated?.slashedAt).toBeDefined();
     expect(updated?.slashReason).toBeTruthy();
 
     expect(gateway.broadcast).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "intent_slashed", intentId, solver: "SOLVER_ALPHA" }),
+      expect.objectContaining({ type: "intent_slashed", intentId, solver: ALPHA_ADDR }),
     );
     expect(solverRegistryService.slashSolver).toHaveBeenCalledWith(
-      expect.objectContaining({ solverAddress: "SOLVER_ALPHA", intentId }),
+      expect.objectContaining({ solverAddress: ALPHA_ADDR, intentId }),
     );
   });
 
   it("bumps the solver's fillsFailed counter on a slash", async () => {
     const past = Math.floor(Date.now() / 1000) - 10;
-    const before = solversService.get("SOLVER_ALPHA")?.fillsFailed ?? 0;
-    const intentId = await makeAcceptedIntent(past, "SOLVER_ALPHA");
+    const before = (await solversService.get(ALPHA_ADDR))?.fillsFailed ?? 0;
+    const intentId = await makeAcceptedIntent(past, ALPHA_ADDR);
 
     await sweeper.sweep();
 
-    expect(solversService.get("SOLVER_ALPHA")?.fillsFailed).toBe(before + 1);
-    expect(intentsService.get(intentId)?.state).toBe("slashed");
+    expect((await solversService.get(ALPHA_ADDR))?.fillsFailed).toBe(before + 1);
+    expect((await intentsService.get(intentId))?.state).toBe("slashed");
   });
 
   it("does not touch accepted intents still within their fill window", async () => {
     const future = Math.floor(Date.now() / 1000) + 300;
-    const intentId = await makeAcceptedIntent(future, "SOLVER_ALPHA");
+    const intentId = await makeAcceptedIntent(future, ALPHA_ADDR);
 
     await sweeper.sweep();
 
-    expect(intentsService.get(intentId)?.state).toBe("accepted");
+    expect((await intentsService.get(intentId))?.state).toBe("accepted");
     expect(solverRegistryService.slashSolver).not.toHaveBeenCalled();
   });
 
@@ -139,10 +147,10 @@ describe("IntentsSweeperService", () => {
       minDstAmount: "990000",
       deadline: past + 10_000,
     });
-    intentsService.update(intent.intentId, { state: "accepted", deadline: past });
+    await intentsService.update(intent.intentId, { state: "accepted", deadline: past });
 
     await expect(sweeper.sweep()).resolves.not.toThrow();
-    expect(intentsService.get(intent.intentId)?.state).toBe("slashed");
+    expect((await intentsService.get(intent.intentId))?.state).toBe("slashed");
     expect(solverRegistryService.slashSolver).not.toHaveBeenCalled();
   });
 });
