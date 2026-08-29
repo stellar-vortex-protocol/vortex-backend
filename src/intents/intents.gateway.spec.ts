@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
 import { StellarTxService } from "../soroban/stellar-tx.service";
+import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
 import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
 import { logger } from "../common/logger";
@@ -16,19 +17,17 @@ jest.mock("../common/logger", () => ({
   },
 }));
 
-async function makeIntentsService(): Promise<IntentsService> {
-  const module = await Test.createTestingModule({
-    providers: [
-      { provide: INTENTS_REPOSITORY, useClass: InMemoryIntentsRepository },
-      {
-        provide: ConfigService,
-        useValue: { get: jest.fn().mockReturnValue(false) } as unknown as ConfigService<AppConfig, true>,
-      },
-      { provide: StellarTxService, useValue: {} as StellarTxService },
-      IntentsService,
-    ],
-  }).compile();
-  return module.get<IntentsService>(IntentsService);
+function makeIntentsService(): IntentsService {
+  const configService = {
+    get: jest.fn().mockReturnValue(false),
+  } as unknown as ConfigService<AppConfig, true>;
+  const prismaService = {
+    intentAuditLog: {
+      create: jest.fn().mockResolvedValue({}),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+  } as unknown as PrismaService;
+  return new IntentsService(configService, {} as StellarTxService, prismaService);
 }
 
 function createMockClient() {

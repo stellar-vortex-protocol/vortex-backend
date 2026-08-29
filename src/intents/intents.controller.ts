@@ -21,6 +21,7 @@ import {
   ApiGoneResponse,
   ApiBadRequestResponse,
   ApiTooManyRequestsResponse,
+  ApiOperation,
 } from "@nestjs/swagger";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
@@ -41,6 +42,7 @@ import {
   buildCancelMessage,
   buildFillMessage,
 } from "../common/stellar-signature";
+import { SupportedChain } from "./intents.types";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -94,6 +96,68 @@ export class IntentsController {
   }
 
   /**
+   * GET /api/v1/intents/:id/audit
+   *
+   * Returns the full state-transition history for an intent, oldest-first.
+   * Issue #217 — backs the in-memory audit trail with a persistent DB table
+   * (intent_audit_log) so the log survives restarts and is independently
+   * queryable (see DATABASE_INDEXES.md section 3 and the runbooks that depend
+   * on this trail: docs/runbooks/onchain-cutover.md, RUNBOOK_BACKUP_RESTORE.md).
+   */
+  @Get(":id/audit")
+  @ApiOperation({
+    summary: "Get audit trail for an intent",
+    description:
+      "Returns the full state-transition history for an intent ordered oldest-first. " +
+      "Each entry records the state the intent moved into, who triggered it, and why.",
+  })
+  @ApiOkResponse({
+    description: "Audit trail for the intent",
+    schema: {
+      type: "object",
+      properties: {
+        intentId: { type: "string" },
+        entries: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              timestamp: { type: "string", format: "date-time" },
+              toState: { type: "string" },
+              actor: { type: "string" },
+              reason: { type: "string" },
+              metadata: { type: "object", nullable: true },
+            },
+          },
+        },
+      },
+    },
+  })
+  @ApiNotFoundResponse({ description: "Intent not found" })
+  getAudit(@Param("id") id: string) {
+    const intent = this.intentsService.get(id);
+    if (!intent) throw new NotFoundException("Intent not found");
+    const entries = this.intentsService.getAuditLog(id);
+    return { intentId: id, entries };
+  }
+
+  /**
+   * GET /api/v1/intents/:id/quote
+   *
+   * Returns the persisted best quote for an intent (the quotedDstAmount stored
+   * on the intent after a POST /quote call with intentId).
+   */
+  @Get(":id/quote")
+  @ApiOkResponse({ description: "Persisted quote for the intent" })
+  @ApiNotFoundResponse({ description: "Intent not found or no quote persisted" })
+  getPersistedQuote(@Param("id") id: string) {
+    const intent = this.intentsService.get(id);
+    if (!intent) throw new NotFoundException("Intent not found");
+    if (!intent.quotedDstAmount) throw new NotFoundException("No quote persisted for this intent");
+    return { intentId: id, quotedDstAmount: intent.quotedDstAmount };
+  }
+
+  /**
    * Issue #44 — global IP throttle already applied via AppModule guard.
    * Issue #45 — additionally throttle per dto.user: 10 creates / 60 s.
    */
@@ -106,21 +170,13 @@ export class IntentsController {
   @ApiBadRequestResponse({ description: "Invalid request body" })
   async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
-    const chainData = this.tokensService.getByChain(dto.srcChain);
-    const stellarData = this.tokensService.getStellarTokens();
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const srcTokenList = dto.srcChain === "stellar" ? stellarData.tokens : (chainData as any).tokens;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const srcToken = srcTokenList.find((t: any) =>
-      dto.srcChain === "stellar"
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ? (t as any).contract === dto.srcTokenAddress
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        : (t as any).address === dto.srcTokenAddress,
+    // #219: use typed resolveToken instead of ad-hoc duck-typed any casts
+    const srcToken = this.tokensService.resolveSrcToken(
+      dto.srcChain as SupportedChain,
+      dto.srcTokenAddress,
     );
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const dstToken = stellarData.tokens.find((t: any) => t.contract === dto.dstTokenContract);
+    const dstToken = this.tokensService.resolveDstToken(dto.dstTokenContract);
 
     const intent = await this.intentsService.create(
       {
@@ -132,16 +188,14 @@ export class IntentsController {
           name: dto.srcTokenSymbol,
           decimals: dto.srcTokenDecimals,
           chain: dto.srcChain,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          priceUSD: (srcToken as any)?.priceUSD,
+          priceUSD: srcToken?.priceUSD,
         },
         srcAmount: dto.srcAmount,
         dstToken: {
           contract: dto.dstTokenContract,
           symbol: dto.dstTokenSymbol,
           decimals: dto.dstTokenDecimals,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          priceUSD: (dstToken as any)?.priceUSD,
+          priceUSD: dstToken?.priceUSD,
         },
         minDstAmount: dto.minDstAmount,
         deadline: dto.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[dto.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
@@ -267,7 +321,7 @@ export class IntentsController {
 
     const updated = await this.intentsService.update(id, { state: "cancelled" });
 
-    // Audit trail (issue #62): record who cancelled and when.
+    // Audit trail (issue #217 / #62): record who cancelled and when.
     this.intentsService.appendAuditEntry(id, "cancelled", dto.user, "user cancelled");
 
     this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
@@ -276,22 +330,22 @@ export class IntentsController {
 
   /**
    * Issue #44 — document 429 on quote too, since it's under the global guard.
+   * Issue #220 — routes are now computed via RoutingService and attached to each quote.
    */
   @Post("quote")
   @ApiTooManyRequestsResponse({
     description: "Rate limit exceeded — max 100 req/min per IP globally",
   })
   @ApiOkResponse({ type: QuoteResponseDto })
-  async quote(@Body() dto: QuoteRequestDto): Promise<QuoteResponseDto> {
-    const solvers = (await this.solversService.getAll()).filter((s) => s.isActive);
-    const chainData = this.tokensService.getByChain(dto.srcChain);
-    const stellarData = this.tokensService.getStellarTokens();
+  quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {
+    const solvers = this.solversService.getAll().filter((s) => s.isActive);
 
-    const srcTokenList = dto.srcChain === "stellar" ? stellarData.tokens : chainData.tokens;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const srcToken = (srcTokenList as any[]).find((t: any) => t.symbol === dto.srcTokenSymbol);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const dstToken = stellarData.tokens.find((t: any) => (t as any).symbol === dto.dstTokenSymbol);
+    // #219: use typed resolveSrcToken / resolveDstToken — no more any casts
+    const srcToken = this.tokensService.resolveSrcToken(
+      dto.srcChain as SupportedChain,
+      dto.srcTokenAddress ?? "",
+    );
+    const dstToken = this.tokensService.resolveDstToken(dto.dstTokenContract ?? "");
 
     const srcAmountBigInt = BigInt(dto.srcAmount);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -315,14 +369,39 @@ export class IntentsController {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const feeUnits = Number(fee) / Math.pow(10, (dstToken as any)?.decimals ?? 7);
         const totalFeesUSD = feeUnits * dstPriceUSD;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const srcUnits = Number(srcAmountBigInt) / Math.pow(10, (srcToken as any)?.decimals ?? 7);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const dstUnits = Number(dstAmount) / Math.pow(10, (dstToken as any)?.decimals ?? 7);
+        const srcUnits = Number(srcAmountBigInt) / Math.pow(10, srcToken?.decimals ?? 7);
+        const dstUnits = Number(dstAmount) / Math.pow(10, dstToken?.decimals ?? 7);
         const priceImpact =
           srcPriceUSD > 0 && dstPriceUSD > 0
             ? Math.max(0, 1 - (dstUnits * dstPriceUSD) / (srcUnits * srcPriceUSD))
             : 0;
+
+        // #220: attach a computed route to each solver quote.
+        // Build minimal TokenInfo objects for routing (uses resolved data when available).
+        const srcTokenInfo = {
+          address: dto.srcTokenAddress ?? "",
+          symbol: dto.srcTokenSymbol,
+          name: srcToken?.name ?? dto.srcTokenSymbol,
+          decimals: srcToken?.decimals ?? 18,
+          chain: (dto.srcChain as SupportedChain) ?? "ethereum",
+          priceUSD: srcToken?.priceUSD,
+        };
+        const dstTokenInfo = {
+          address: dstToken?.contract ?? dto.dstTokenContract ?? "",
+          symbol: dto.dstTokenSymbol,
+          name: dstToken?.name ?? dto.dstTokenSymbol,
+          decimals: dstToken?.decimals ?? 7,
+          chain: "stellar" as SupportedChain,
+          priceUSD: dstToken?.priceUSD,
+        };
+
+        // Try a direct route; fall back to a two-hop via USDC intermediate when
+        // a direct solver path is not viable (different base tokens).
+        const route = this.routingService.buildRoute(srcTokenInfo, dstTokenInfo, solver.address, {
+          totalFeesUSD,
+          priceImpact,
+          estimatedFillTime: solver.avgFillTime + Math.floor(Math.random() * 30),
+        });
 
         return {
           solver: solver.address,
@@ -333,6 +412,7 @@ export class IntentsController {
           expiresAt: Math.floor(Date.now() / 1000) + 60,
           totalFeesUSD,
           priceImpact,
+          route,
         };
       })
       .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));

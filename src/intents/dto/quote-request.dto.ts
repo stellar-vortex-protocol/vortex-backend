@@ -36,4 +36,14 @@ export class QuoteRequestDto {
   @IsOptional()
   @IsUUID()
   intentId?: string;
+
+  @ApiPropertyOptional({ description: "Source token contract address / ID (used for precise token resolution)" })
+  @IsOptional()
+  @IsString()
+  srcTokenAddress?: string;
+
+  @ApiPropertyOptional({ description: "Destination Stellar token contract ID (used for precise token resolution)" })
+  @IsOptional()
+  @IsString()
+  dstTokenContract?: string;
 }

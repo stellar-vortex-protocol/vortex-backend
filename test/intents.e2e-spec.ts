@@ -3,26 +3,20 @@ import request from "supertest";
 import { Keypair } from "@stellar/stellar-sdk";
 import { createTestApp } from "./utils/create-test-app";
 import { IntentsService } from "../src/intents/intents.service";
+import { SEED_SOLVER_KEYPAIRS } from "../src/solvers/solvers.seed";
 import {
-  verifyStellarSignature as _verify,
+  buildAcceptMessage,
   buildCancelMessage,
   buildFillMessage,
 } from "../src/common/stellar-signature";
 
-// ── Test keypairs ──────────────────────────────────────────────────────────
-// These are deterministic testnet keys used only in tests — never funded with
-// real value.  ALPHA / BETA match the seeded solver addresses.
-const USER_KP = Keypair.fromSecret("SCZANGBA5RLPPI7MHANPWXKX5XJKHEQF6TGOS7SXLKTD2KO3NDTW5VN");
-const ALPHA_KP = Keypair.fromSecret("SBEEB2ZY2D25GRU4TXUARHHPQ2ASDRVQJZXWBUMW27VBVT3FCU2MEU5Q");
-const BETA_KP = Keypair.fromSecret("SDIVQO7JBFG3XWMQ3VJXZ4CHDWWSBYNZIYXS3GVJNKJZXQZXQZXQZXQ");
+// Known user keypair whose public key is a valid Stellar G… address
+const USER_KP = Keypair.fromSecret("SCZANGBA5YELHNOHPQLUIZ6MFJLCVX5BPXTBXCMD5SBKX60RCVHQQHK");
+const ALPHA_KP = SEED_SOLVER_KEYPAIRS.ALPHA;
+const BETA_KP = SEED_SOLVER_KEYPAIRS.BETA;
 
-function sign(kp: Keypair, message: string): string {
-  const msgBuf = Buffer.from(message, "utf-8");
-  return kp.sign(msgBuf).toString("base64");
-}
-
-function buildAcceptMessage(intentId: string, solver: string): string {
-  return `accept:${intentId}:${solver}`;
+function sign(kp: Keypair, msg: string): string {
+  return kp.sign(Buffer.from(msg, "utf8")).toString("base64");
 }
 
 const validCreateBody = {
@@ -166,33 +160,37 @@ describe("IntentsController (e2e)", () => {
   });
 
   it("fill with malformed minDstAmount returns 400 data integrity error", async () => {
-    const created = await createIntent({ user: "GMALFORMEDMIN12345" });
+    const created = await createIntent();
+    const acceptSig = sign(ALPHA_KP, buildAcceptMessage(created.intentId, ALPHA_KP.publicKey()));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/accept`)
-      .send({ solver: "SOLVER_ALPHA" })
+      .send({ solver: ALPHA_KP.publicKey(), signature: acceptSig })
       .expect(201);
 
     const intentsService = app.get(IntentsService);
     await intentsService.update(created.intentId, { minDstAmount: "not-a-number" });
 
+    const fillSig = sign(ALPHA_KP, buildFillMessage(created.intentId, ALPHA_KP.publicKey()));
     const res = await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/fill`)
-      .send({ solver: "SOLVER_ALPHA", fillAmount: "995000", txHash: "e2e-hash" })
+      .send({ solver: ALPHA_KP.publicKey(), fillAmount: "995000", txHash: "e2e-hash", signature: fillSig })
       .expect(400);
     expect(res.body.error).toBe("Data integrity error: intent minDstAmount is not a valid integer");
     expect(res.body.intentId).toBe(created.intentId);
   });
 
   it("POST /api/v1/intents/:id/fill with non-numeric fillAmount returns 400", async () => {
-    const created = await createIntent({ user: "GFILLAMOUNT123456" });
+    const created = await createIntent();
+    const acceptSig = sign(ALPHA_KP, buildAcceptMessage(created.intentId, ALPHA_KP.publicKey()));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/accept`)
-      .send({ solver: "SOLVER_ALPHA" })
+      .send({ solver: ALPHA_KP.publicKey(), signature: acceptSig })
       .expect(201);
 
+    const fillSig = sign(ALPHA_KP, buildFillMessage(created.intentId, ALPHA_KP.publicKey()));
     const res = await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/fill`)
-      .send({ solver: "SOLVER_ALPHA", fillAmount: "abc", txHash: "e2e-hash" })
+      .send({ solver: ALPHA_KP.publicKey(), fillAmount: "abc", txHash: "e2e-hash", signature: fillSig })
       .expect(400);
     expect(res.body.error).toBe("Validation failed");
     expect(Array.isArray(res.body.details)).toBe(true);
@@ -200,6 +198,8 @@ describe("IntentsController (e2e)", () => {
 
   it("accept with an unknown/inactive solver is forbidden", async () => {
     const created = await createIntent();
+    const unknownKp = Keypair.fromSecret("SBEEB2ZY2D25GRU4TXUARHHPQ2ASDRVQJZXWBUMW27VBVT3FCU2MEU5Q");
+    const sig = sign(unknownKp, buildAcceptMessage(created.intentId, unknownKp.publicKey()));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/accept`)
       .send({ solver: "SOLVER_UNKNOWN_XYZ" })
@@ -209,13 +209,19 @@ describe("IntentsController (e2e)", () => {
   it("cancel: wrong user returns 403, correct user succeeds", async () => {
     const created = await createIntent();
 
-    // Wrong user — forbidden
+    const wrongKp = Keypair.fromSecret("SBEEB2ZY2D25GRU4TXUARHHPQ2ASDRVQJZXWBUMW27VBVT3FCU2MEU5Q");
+    const wrongSig = sign(wrongKp, buildCancelMessage(created.intentId));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/cancel`)
       .send({ user: "GSOMEONEELSE1234567" })
       .expect(403);
 
-    // Correct user cancels
+    await request(app.getHttpServer())
+      .post(`/api/v1/intents/${created.intentId}/cancel`)
+      .send({ user: USER_KP.publicKey(), signature: "aW52YWxpZHNpZ25hdHVyZXBhZGRpbmc=" })
+      .expect(401);
+
+    const validSig = sign(USER_KP, buildCancelMessage(created.intentId));
     const cancelled = await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/cancel`)
       .send({ user: USER_KP.publicKey() })
@@ -288,7 +294,13 @@ describe("IntentsController (e2e)", () => {
     const bestQuote = BigInt(res.body.bestQuote.dstAmount);
     const minExpected = (srcBigInt * BigInt(992)) / BigInt(1000);
     expect(bestQuote >= minExpected).toBe(true);
-    expect(bestQuote <= srcBigInt).toBe(true);
+    expect(bestQuote <= maxExpected).toBe(true);
+
+    for (const quote of res.body.quotes) {
+      const amount = BigInt(quote.dstAmount);
+      expect(amount >= minExpected).toBe(true);
+      expect(amount <= maxExpected).toBe(true);
+    }
   });
 
   it("POST /api/v1/intents/quote with intentId persists quotedDstAmount on the intent", async () => {
@@ -311,5 +323,144 @@ describe("IntentsController (e2e)", () => {
       .get(`/api/v1/intents/${created.intentId}`)
       .expect(200);
     expect(fetchRes.body.quotedDstAmount).toBe(quotedAmount);
+  });
+
+  // ── #219: resolveToken used in create and quote ────────────────────────────
+
+  it("POST /api/v1/intents create resolves srcToken priceUSD from registry", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents")
+      .send({
+        ...validCreateBody,
+        srcTokenAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // known USDC
+      })
+      .expect(201);
+
+    // priceUSD should be 1.0 from the registry, not undefined
+    expect(res.body.srcToken.priceUSD).toBe(1.0);
+  });
+
+  it("POST /api/v1/intents create with unknown srcToken address still succeeds (priceUSD undefined)", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents")
+      .send({
+        ...validCreateBody,
+        srcTokenAddress: "0xunknowntoken000000000000000000000000000",
+      })
+      .expect(201);
+
+    // priceUSD should be undefined (not found in registry)
+    expect(res.body.srcToken.priceUSD).toBeUndefined();
+  });
+
+  it("POST /api/v1/intents/quote includes route.steps in each quote (#220)", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents/quote")
+      .send({
+        srcChain: "ethereum",
+        srcTokenSymbol: "USDC",
+        srcTokenAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+        srcAmount: "1000000",
+        dstTokenSymbol: "USDC",
+      })
+      .expect(201);
+
+    expect(res.body.quotes.length).toBeGreaterThan(0);
+    for (const quote of res.body.quotes) {
+      expect(quote.route).toBeDefined();
+      expect(Array.isArray(quote.route.steps)).toBe(true);
+      expect(quote.route.steps.length).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("POST /api/v1/intents/quote direct route (USDC→USDC) has 1 step of type 'transfer' (#220)", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents/quote")
+      .send({
+        srcChain: "ethereum",
+        srcTokenSymbol: "USDC",
+        srcTokenAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+        srcAmount: "1000000",
+        dstTokenSymbol: "USDC",
+      })
+      .expect(201);
+
+    const best = res.body.bestQuote;
+    expect(best.route.steps).toHaveLength(1);
+    expect(best.route.steps[0].type).toBe("transfer");
+    expect(best.route.steps[0].fromChain).toBe("ethereum");
+    expect(best.route.steps[0].toChain).toBe("stellar");
+  });
+
+  it("POST /api/v1/intents/quote two-hop route (WETH→XLM) has 2 steps (#220)", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents/quote")
+      .send({
+        srcChain: "ethereum",
+        srcTokenSymbol: "WETH",
+        srcTokenAddress: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        dstTokenContract: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        srcAmount: "1000000000000000000",
+        dstTokenSymbol: "XLM",
+      })
+      .expect(201);
+
+    const best = res.body.bestQuote;
+    expect(best.route.steps).toHaveLength(2);
+    expect(best.route.steps[0].type).toBe("swap");
+    expect(best.route.steps[1].type).toBe("bridge");
+  });
+
+  it("POST /api/v1/intents/quote route.steps have well-formed fromToken and toToken", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents/quote")
+      .send({
+        srcChain: "ethereum",
+        srcTokenSymbol: "USDC",
+        srcAmount: "1000000",
+        dstTokenSymbol: "USDC",
+      })
+      .expect(201);
+
+    for (const quote of res.body.quotes) {
+      for (const step of quote.route.steps) {
+        expect(typeof step.fromToken).toBe("object");
+        expect(typeof step.toToken).toBe("object");
+        expect(typeof step.estimatedTime).toBe("number");
+        expect(typeof step.estimatedGas).toBe("string");
+      }
+    }
+  });
+
+  it("GET /api/v1/intents/:id/quote returns the persisted quote", async () => {
+    const created = await createIntent();
+    const quoteRes = await request(app.getHttpServer())
+      .post("/api/v1/intents/quote")
+      .send({
+        srcChain: "ethereum",
+        srcTokenSymbol: "USDC",
+        srcAmount: "1000000",
+        dstTokenSymbol: "USDC",
+        intentId: created.intentId,
+      })
+      .expect(201);
+
+    const quotedAmount = quoteRes.body.bestQuote.dstAmount;
+
+    const res = await request(app.getHttpServer())
+      .get(`/api/v1/intents/${created.intentId}/quote`)
+      .expect(200);
+
+    expect(res.body.intentId).toBe(created.intentId);
+    expect(res.body.quotedDstAmount).toBe(quotedAmount);
+  });
+
+  it("GET /api/v1/intents/:id/quote returns 404 if no quote exists", async () => {
+    const created = await createIntent();
+    await request(app.getHttpServer())
+      .get(`/api/v1/intents/${created.intentId}/quote`)
+      .expect(404);
   });
 });

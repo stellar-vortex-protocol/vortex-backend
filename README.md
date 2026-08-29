@@ -152,6 +152,29 @@ never commit filled-in values to version control.
 
 ---
 
+## Supported chains
+
+`SupportedChain` in `src/intents/intents.types.ts` lists seven chains.
+The table below clarifies which are **live** (real integration exists today)
+versus **planned** (schema/token data in place, on-chain settlement pending).
+
+| Chain | Status | Notes |
+|-------|--------|-------|
+| **Stellar** | ✅ Live | Soroban RPC reads (`/api/v1/chain/*`), signing service, settlement design in progress |
+| Ethereum | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+| Base | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+| Polygon | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+| Arbitrum | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+| Optimism | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+| Avalanche | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+
+> **Contributor note:** EVM chains are accepted in the intent DTO and stored
+> in-memory, but no on-chain settlement or bridging logic is wired up yet.
+> See [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md)
+> for the target design.
+
+---
+
 ## Roadmap
 
 - [x] **Soroban RPC reads** — health/ledger/network/account lookups via `/api/v1/chain/*`

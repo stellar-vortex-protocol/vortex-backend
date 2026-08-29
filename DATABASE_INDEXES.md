@@ -1,11 +1,13 @@
 # Database Indexes
 
-> **Status: forward-looking design document.**
-> The current in-memory store (a plain `Map`) needs no indexes.
-> Once issue #36 replaces it with a real database these indexes must be
-> created before the service goes to production, or every call to
-> `IntentsService.getByUser()` and `IntentsService.getByState()` will be a
-> full table scan.
+> **Status:**
+> - Sections 1 & 2 (composite/partial indexes): ✅ implemented in
+>   `prisma/migrations/20260828000001_composite_partial_indexes/migration.sql`
+> - Section 3 (audit log table + index): ✅ implemented in
+>   `prisma/migrations/20260828000002_intent_audit_log/migration.sql`
+>   and `prisma/schema.prisma` (`IntentAuditLog` model).
+>   `IntentsService.appendAuditEntry()` now writes through to the DB;
+>   `GET /api/v1/intents/:id/audit` exposes the trail via the API.
 
 ---
 
@@ -74,7 +76,7 @@ CREATE INDEX IF NOT EXISTS intents_open_partial_idx
 
 ---
 
-### 3. `intent_audit_log` table (issue #62)
+### 3. `intent_audit_log` table (issue #62 / #217) — ✅ implemented
 
 Once the audit trail (issue #62) is persisted, the `intent_audit_log` table
 will be append-only and queried by `intent_id`:
