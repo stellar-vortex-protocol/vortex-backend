@@ -103,6 +103,29 @@ model Solver {
   @@map("solvers")
 }
 
+// ─── IntentAuditLog ──────────────────────────────────────────────────────────
+// Append-only record of every state transition for an intent (issue #217 / #62).
+// Queried by intentId to reconstruct the full history of a swap.
+
+model IntentAuditLog {
+  id        BigInt   @id @default(autoincrement()) @map("id")
+  /// FK to intents.intent_id (the user-visible UUID, not the surrogate PK).
+  intentId  String   @map("intent_id")
+  /// ISO-8601 / TIMESTAMPTZ of when the transition was recorded.
+  timestamp DateTime @default(now()) @map("timestamp") @db.Timestamptz
+  /// State the intent moved INTO (e.g. "cancelled", "expired", "slashed").
+  toState   String   @map("to_state")
+  /// Actor who triggered the transition: a user address, solver address, or "system".
+  actor     String   @map("actor")
+  /// Human-readable explanation.
+  reason    String   @map("reason")
+  /// Optional extra data (fill amount, tx hash, deadline, …).
+  metadata  Json?    @map("metadata")
+
+  @@index([intentId, timestamp(sort: Asc)], name: "audit_log_intent_idx")
+  @@map("intent_audit_log")
+}
+
 // ─── Token ───────────────────────────────────────────────────────────────────
 // Static registry of tokens the protocol supports.
 // Kept separate so it can be updated without migrations when the token list changes.

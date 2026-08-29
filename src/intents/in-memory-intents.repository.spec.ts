@@ -1,4 +1,4 @@
-import { InMemoryIntentsRepository } from "./in-memory-intents.repository";
+import { InMemoryIntentsRepository } from "./intents.repository";
 import { Intent } from "./intents.types";
 
 /** Minimal helper that builds a valid Intent for test cases. */

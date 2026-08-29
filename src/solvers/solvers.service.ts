@@ -17,20 +17,20 @@ export class SolversService {
     private readonly repo: ISolversRepository,
   ) {}
 
-  getAll(): SolverRecord[] {
+  async getAll(): Promise<SolverRecord[]> {
     return this.repo.findAll();
   }
 
-  get(address: string): SolverRecord | undefined {
+  async get(address: string): Promise<SolverRecord | undefined> {
     return this.repo.findByAddress(address);
   }
 
-  register(
+  async register(
     data: Omit<
       SolverRecord,
       "registeredAt" | "fillsCompleted" | "fillsFailed" | "totalVolume"
     >,
-  ): SolverRecord {
+  ): Promise<SolverRecord> {
     const solver: SolverRecord = {
       ...data,
       fillsCompleted: 0,
@@ -41,38 +41,38 @@ export class SolversService {
     return this.repo.save(solver);
   }
 
-  deregister(address: string): SolverRecord | undefined {
-    const solver = this.repo.findByAddress(address);
+  async deregister(address: string): Promise<SolverRecord | undefined> {
+    const solver = await this.repo.findByAddress(address);
     if (!solver) return undefined;
     const updated = { ...solver, isActive: false };
     return this.repo.save(updated);
   }
 
-  markLive(address: string): SolverRecord | undefined {
-    const solver = this.repo.findByAddress(address);
+  async markLive(address: string): Promise<SolverRecord | undefined> {
+    const solver = await this.repo.findByAddress(address);
     if (!solver) return undefined;
     const updated = { ...solver, isActive: true };
     return this.repo.save(updated);
   }
 
-  markOffline(address: string): SolverRecord | undefined {
-    const solver = this.repo.findByAddress(address);
+  async markOffline(address: string): Promise<SolverRecord | undefined> {
+    const solver = await this.repo.findByAddress(address);
     if (!solver) return undefined;
     const updated = { ...solver, isActive: false };
     return this.repo.save(updated);
   }
 
-  deactivate(address: string): SolverRecord | null {
-    const solver = this.repo.findByAddress(address);
+  async deactivate(address: string): Promise<SolverRecord | null> {
+    const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
     const updated = { ...solver, isActive: false };
     return this.repo.save(updated);
   }
 
-  reactivate(address: string): SolverRecord | null {
-    const solver = this.repo.findByAddress(address);
+  async reactivate(address: string): Promise<SolverRecord | null> {
+    const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
-    const updated = { ...solver, isActive: true };
+    const updated = { ...solver, isActive };
     return this.repo.save(updated);
   }
 
@@ -83,8 +83,8 @@ export class SolversService {
    * SolverRegistryService.slashSolver and should reconcile bondAmount here
    * once event ingestion exists (see docs/architecture/onchain-settlement.md).
    */
-  recordFailedFill(address: string): SolverRecord | null {
-    const solver = this.repo.findByAddress(address);
+  async recordFailedFill(address: string): Promise<SolverRecord | null> {
+    const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
     const updated = { ...solver, fillsFailed: solver.fillsFailed + 1 };
     return this.repo.save(updated);

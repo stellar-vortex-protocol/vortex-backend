@@ -18,8 +18,8 @@ export class SolversController {
   constructor(private readonly solversService: SolversService) {}
 
   @Post()
-  register(@Body() dto: RegisterSolverDto) {
-    const solver = this.solversService.register({
+  async register(@Body() dto: RegisterSolverDto) {
+    return this.solversService.register({
       address: dto.address,
       name: dto.name,
       bondAmount: dto.bondAmount,
@@ -28,27 +28,26 @@ export class SolversController {
       supportedChains: dto.supportedChains,
       supportedTokens: dto.supportedTokens,
     });
-    return solver;
   }
 
   @Get()
-  getLeaderboard() {
-    const solvers = [...this.solversService.getAll()].sort(
+  async getLeaderboard() {
+    const solvers = (await this.solversService.getAll()).sort(
       (a, b) => b.fillsCompleted - a.fillsCompleted,
     );
     return { solvers, count: solvers.length };
   }
 
   @Get(":address")
-  getSolver(@Param("address") address: string) {
-    const solver = this.solversService.get(address);
+  async getSolver(@Param("address") address: string) {
+    const solver = await this.solversService.get(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
   }
 
   @Get(":address/stats")
-  getSolverStats(@Param("address") address: string) {
-    const solver = this.solversService.get(address);
+  async getSolverStats(@Param("address") address: string) {
+    const solver = await this.solversService.get(address);
     if (!solver) throw new NotFoundException("Solver not found");
 
     const total = solver.fillsCompleted + solver.fillsFailed;
@@ -72,25 +71,26 @@ export class SolversController {
   }
 
   @Post(":address/deregister")
-  deregisterSolver(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-    verifyStellarSignature(address, buildSolverStatusMessage("deregister", address), dto.signature);
-    const solver = this.solversService.deregister(address);
+  async deregisterSolver(@Param("address") address: string) {
+    const solver = await this.solversService.deregister(address);
     if (!solver) throw new NotFoundException("Solver not found");
-    return { ...solver, withdrawalStatus: "pending" };
+    return {
+      ...solver,
+      withdrawalStatus: "pending",
+      withdrawalRequestedAt: Math.floor(Date.now() / 1000),
+    };
   }
 
   @Post(":address/deactivate")
-  deactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-    verifyStellarSignature(address, buildSolverStatusMessage("deactivate", address), dto.signature);
-    const solver = this.solversService.deactivate(address);
+  async deactivate(@Param("address") address: string) {
+    const solver = await this.solversService.deactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
   }
 
   @Post(":address/reactivate")
-  reactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-    verifyStellarSignature(address, buildSolverStatusMessage("reactivate", address), dto.signature);
-    const solver = this.solversService.reactivate(address);
+  async reactivate(@Param("address") address: string) {
+    const solver = await this.solversService.reactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
   }

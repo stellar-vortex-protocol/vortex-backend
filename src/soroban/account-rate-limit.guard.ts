@@ -9,7 +9,12 @@ export class AccountRateLimitGuard implements CanActivate {
 
   canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest<Request>();
-    const ip = (request.headers["x-forwarded-for"] as string) || request.ip || "unknown-ip";
+    const forwarded = request.headers["x-forwarded-for"];
+    const trustedForwardedIp =
+      request.ip === "127.0.0.1" && typeof forwarded === "string"
+        ? forwarded.split(",")[0]?.trim()
+        : undefined;
+    const ip = trustedForwardedIp || request.ip || "unknown-ip";
     const now = Date.now();
 
     const record = this.requestCounts.get(ip);
