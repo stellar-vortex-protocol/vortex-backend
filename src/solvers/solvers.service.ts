@@ -72,7 +72,29 @@ export class SolversService {
   async reactivate(address: string): Promise<SolverRecord | null> {
     const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
-    const updated = { ...solver, isActive };
+    const updated = { ...solver, isActive: true };
+    return this.repo.save(updated);
+  }
+
+  /**
+   * Apply a partial update to a solver's mutable profile fields
+   * (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`) — issue #273.
+   *
+   * `undefined` values in `patch` are ignored so an absent field never clears
+   * existing data. Returns `undefined` when no solver exists for `address`.
+   */
+  async update(
+    address: string,
+    patch: Partial<Pick<SolverRecord, "name" | "supportedChains" | "supportedTokens" | "avgFillTime">>,
+  ): Promise<SolverRecord | undefined> {
+    const solver = await this.repo.findByAddress(address);
+    if (!solver) return undefined;
+
+    const applied = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== undefined),
+    ) as Partial<SolverRecord>;
+
+    const updated: SolverRecord = { ...solver, ...applied };
     return this.repo.save(updated);
   }
 

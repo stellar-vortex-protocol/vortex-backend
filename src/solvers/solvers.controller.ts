@@ -4,13 +4,25 @@ import {
   Get,
   NotFoundException,
   Param,
+  Patch,
   Post,
 } from "@nestjs/common";
-import { ApiTags } from "@nestjs/swagger";
+import {
+  ApiTags,
+  ApiOkResponse,
+  ApiNotFoundResponse,
+  ApiBadRequestResponse,
+  ApiUnauthorizedResponse,
+} from "@nestjs/swagger";
 import { SolversService } from "./solvers.service";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
 import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
-import { verifyStellarSignature, buildSolverStatusMessage } from "../common/stellar-signature";
+import { UpdateSolverDto } from "./dto/update-solver.dto";
+import {
+  verifyStellarSignature,
+  buildSolverStatusMessage,
+  buildUpdateSolverMessage,
+} from "../common/stellar-signature";
 
 @ApiTags("solvers")
 @Controller("api/v1/solvers")
@@ -91,6 +103,29 @@ export class SolversController {
   @Post(":address/reactivate")
   async reactivate(@Param("address") address: string) {
     const solver = await this.solversService.reactivate(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+    return solver;
+  }
+
+  /**
+   * PATCH /api/v1/solvers/:address
+   *
+   * Issue #273 — lets a solver operator edit their mutable profile fields
+   * (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`) as they scale
+   * liquidity. Signature-verified per the repo's `verifyStellarSignature`
+   * convention (issue #19/#21): the operator proves control of `:address`
+   * before any write. Immutable fields are stripped by the DTO whitelist.
+   */
+  @Patch(":address")
+  @ApiOkResponse({ description: "Updated solver record" })
+  @ApiBadRequestResponse({ description: "Invalid update body" })
+  @ApiUnauthorizedResponse({ description: "Missing or invalid signature" })
+  @ApiNotFoundResponse({ description: "Solver not found" })
+  async updateSolver(@Param("address") address: string, @Body() dto: UpdateSolverDto) {
+    verifyStellarSignature(address, buildUpdateSolverMessage(address), dto.signature);
+
+    const { signature: _signature, ...patch } = dto;
+    const solver = await this.solversService.update(address, patch);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
   }
