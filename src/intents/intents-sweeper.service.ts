@@ -142,7 +142,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    await this.solversService.recordFailedFill(solver);
+    await this.solversService.recordFailedFill(solver, intentId);
     const slashRecord = await this.solversService.recordSlash(solver, intentId, reason, now);
 
     const result = await this.solverRegistryService.slashSolver({

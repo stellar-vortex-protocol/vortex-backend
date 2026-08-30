@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
 import { SupportedChain } from "../intents/intents.types";
 import { SOLVERS_REPOSITORY, ISolversRepository } from "./solvers.repository";
 import { SolverRecord, SolverPendingPenalty } from "./solvers.types";
@@ -31,7 +31,9 @@ export interface SlashRecord {
  */
 @Injectable()
 export class SolversService {
+  private readonly logger = new Logger(SolversService.name);
   private readonly slashHistory = new Map<string, SlashRecord[]>();
+  private readonly pendingPenalties = new Map<string, SolverPendingPenalty>();
   private slashSequence = 0;
 
   constructor(

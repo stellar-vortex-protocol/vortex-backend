@@ -4,6 +4,7 @@ import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
+import { MetricsService } from "../metrics/metrics.service";
 
 /**
  * Issue #269 — the manual sweep trigger (operator break-glass).
@@ -24,8 +25,9 @@ describe("IntentsSweeperService — manual sweep trigger (#269)", () => {
     const solverRegistry = {
       slashSolver: jest.fn().mockResolvedValue({ detail: "no-op" }),
     } as unknown as SolverRegistryService;
+    const metricsService = { recordSweep: jest.fn() } as unknown as MetricsService;
 
-    return new IntentsSweeperService(intentsService, gateway, solversService, solverRegistry);
+    return new IntentsSweeperService(intentsService, gateway, solversService, solverRegistry, metricsService);
   }
 
   afterEach(() => jest.restoreAllMocks());

@@ -19,7 +19,6 @@ import {
 } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
-import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
 
 const STORE_SIZE_LOG_INTERVAL_MS = 60_000;
 const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slashed"];

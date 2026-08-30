@@ -93,7 +93,21 @@ export interface AppConfig {
     feePercentile: FeePercentile;
   };
   onchainIntentsEnabled: boolean;
-  onchainWritesDryRun: boolean;
+  intentRetentionDays: number;
+  intentRetentionSweepMs: number;
+  /**
+   * Dry-run flag for on-chain write paths (issue #260).
+   *
+   * When true every write path (invokeContract, slashSolver) simulates and
+   * logs but never broadcasts a transaction.  Defaults to true outside
+   * production; must be explicitly set in production (validated by
+   * envValidationSchema — see src/config/env.validation.ts).
+   *
+   * Note: this flag takes effect on the next process restart; there is no
+   * hot-reload mechanism for this iteration.  See
+   * docs/runbooks/onchain-cutover.md for the staged rollout procedure.
+   */
+  onchainDryRun: boolean;
   corsOrigin: string;
   /** Maximum concurrent WebSocket connections (0 = unlimited). */
   wsMaxConnections: number;
@@ -119,6 +133,11 @@ export default (): AppConfig => ({
   onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
   intentRetentionDays: parseInt(process.env.INTENT_RETENTION_DAYS ?? "30", 10),
   intentRetentionSweepMs: parseInt(process.env.INTENT_RETENTION_SWEEP_MS ?? "60000", 10),
+  // Default to dry-run (true) outside production; in production the value must
+  // be explicitly set (validated by envValidationSchema).
+  onchainDryRun: process.env.ONCHAIN_DRY_RUN !== undefined
+    ? process.env.ONCHAIN_DRY_RUN === "true"
+    : process.env.NODE_ENV !== "production",
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
   wsMaxConnections: parseInt(process.env.WS_MAX_CONNECTIONS ?? "1000", 10),
   wsBackplane: (process.env.WS_BACKPLANE ?? "memory") as "memory" | "redis",

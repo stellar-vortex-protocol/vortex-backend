@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Address,
@@ -11,7 +11,6 @@ import {
   nativeToScVal,
 } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
-import { logger } from "../common/logger";
 import { SignerService } from "./signer.service";
 
 const NETWORK_PASSPHRASE: Record<AppConfig["stellar"]["network"], string> = {
@@ -33,19 +32,33 @@ export interface SlashResult {
   simulated: boolean;
   txHash?: string;
   detail: string;
+  /**
+   * true when the result is from a dry-run (ONCHAIN_DRY_RUN=true).
+   * A dry-run always has submitted=false; it may or may not have simulated=true
+   * depending on whether the contract is configured.
+   */
+  dryRun: boolean;
 }
 
 /**
  * Client for the on-chain solver-registry contract's penalty path.
  *
- * The service builds the contract call, simulates it, and when the dry-run flag
- * is disabled it signs and submits the transaction using the configured Soroban
- * signer. This preserves the "do not let a bad record explode the sweep cycle"
- * guarantee by returning structured SlashResult values on any failure instead of
- * throwing.
+ * There is no deployed solver-registry contract or confirmed function
+ * signature yet (tracked separately — issue #23 wires solver acceptance to
+ * this same contract). Until that lands, this service simulates the call
+ * it *would* make and never submits — safe by construction, since
+ * SorobanRpc's simulateTransaction never mutates ledger state. It also
+ * fails closed to a pure no-op whenever the registry contract ID or the
+ * backend's signing key isn't configured, which is the default in every
+ * environment today (see src/config/env.validation.ts).
+ *
+ * Wiring an actual submit path is deliberately left for once issue #23
+ * confirms the real contract interface and the dry-run flag (issue #260 / #35)
+ * exists to stage the rollout — see docs/runbooks/onchain-cutover.md.
  */
 @Injectable()
 export class SolverRegistryService {
+  private readonly logger = new Logger(SolverRegistryService.name);
   private readonly contractId: string;
   private readonly signingKey: string;
   private readonly networkPassphrase: string;
@@ -62,7 +75,7 @@ export class SolverRegistryService {
     this.networkPassphrase = NETWORK_PASSPHRASE[network];
     const rpcUrl = configService.get("stellar.sorobanRpcUrl", { infer: true });
     this.server = new SorobanRpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith("http://") });
-    this.dryRun = Boolean(configService.get("onchainWritesDryRun", { infer: true }));
+    this.dryRun = configService.get("onchainDryRun", { infer: true });
   }
 
   get isConfigured(): boolean {
@@ -70,13 +83,31 @@ export class SolverRegistryService {
   }
 
   async slashSolver(params: SlashParams): Promise<SlashResult> {
+    // ── Dry-run short-circuit (ONCHAIN_DRY_RUN=true) ────────────────────────
+    // When dry-run is on, log what *would* be submitted and return immediately
+    // without touching the network. This is the reference implementation for
+    // "dry-run output" that all other write paths should mirror.
+    if (this.dryRun) {
+      this.logger.log(
+        `[dry-run] would slash solver=${params.solverAddress} intent=${params.intentId} ` +
+        `reason="${params.reason}" — ONCHAIN_DRY_RUN=true, no transaction submitted`,
+      );
+      return {
+        submitted: false,
+        simulated: false,
+        dryRun: true,
+        detail: "ONCHAIN_DRY_RUN=true — simulated log only, no transaction submitted",
+      };
+    }
+
+    // ── Live path (ONCHAIN_DRY_RUN=false) ───────────────────────────────────
     if (!this.isConfigured) {
       const detail =
         "SOLVER_REGISTRY_CONTRACT_ID or SOROBAN_SIGNING_KEY not configured — no-op";
-      logger.info(
+      this.logger.log(
         `[solver-registry] would slash solver=${params.solverAddress} intent=${params.intentId} reason="${params.reason}" (${detail})`,
       );
-      return { submitted: false, simulated: false, detail };
+      return { submitted: false, simulated: false, dryRun: false, detail };
     }
 
     try {
@@ -103,45 +134,32 @@ export class SolverRegistryService {
       const simulation = await this.server.simulateTransaction(tx);
       if (SorobanRpc.Api.isSimulationError(simulation)) {
         const detail = `simulation failed: ${simulation.error}`;
-        logger.error(
+        this.logger.error(
           `[solver-registry] slash simulation errored for solver=${params.solverAddress} intent=${params.intentId}: ${detail}`,
         );
-        return { submitted: false, simulated: true, detail };
+        return { submitted: false, simulated: true, dryRun: false, detail };
       }
 
-      if (this.dryRun) {
-        const detail = "dry-run enabled — simulated only, transaction not submitted";
-        logger.info(
-          `[solver-registry] simulated slash tx for solver=${params.solverAddress} intent=${params.intentId} (${detail})`,
-        );
-        return { submitted: false, simulated: true, detail };
-      }
-
-      const signedTx = this.signerService ? this.signerService.sign(tx) : tx.sign(sourceKeypair);
-      const response = await this.server.sendTransaction(signedTx);
-
-      if (response.status === "PENDING" || response.status === "SUCCESS") {
-        const txHash = response.hash || "unknown";
-        const detail = `submitted via ${response.status}`;
-        logger.info(
-          `[solver-registry] submitted slash tx for solver=${params.solverAddress} intent=${params.intentId} txHash=${txHash} (${detail})`,
-        );
-        return { submitted: true, simulated: true, txHash, detail };
-      }
-
-      const detail = `submission failed: status=${response.status}`;
-      logger.error(
-        `[solver-registry] slash broadcast failed for solver=${params.solverAddress} intent=${params.intentId}: ${detail}`,
+      // TODO: Once issue #23 confirms the real contract interface, replace
+      // the simulate-only path below with an actual signed submission:
+      //   const prepared = SorobanRpc.assembleTransaction(tx, simulation);
+      //   sourceKeypair.sign(prepared);
+      //   const result = await this.server.sendTransaction(prepared);
+      const detail =
+        "simulated only — live submission is gated pending issue #23 (confirmed contract " +
+        "interface); set ONCHAIN_DRY_RUN=false and wire the submit path to go live";
+      this.logger.log(
+        `[solver-registry] simulated slash tx for solver=${params.solverAddress} intent=${params.intentId} (${detail})`,
       );
-      return { submitted: false, simulated: true, detail };
+      return { submitted: false, simulated: true, dryRun: false, detail };
     } catch (err) {
       // Issue #300 — the SDK may include serialized transaction/XDR details in
       // thrown errors; do not log the signing key or any raw secret here.
       const detail = err instanceof Error ? err.message : String(err);
-      logger.error(
+      this.logger.error(
         `[solver-registry] slash call errored for solver=${params.solverAddress} intent=${params.intentId}: ${detail}`,
       );
-      return { submitted: false, simulated: false, detail };
+      return { submitted: false, simulated: false, dryRun: false, detail };
     }
   }
 }

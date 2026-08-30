@@ -9,7 +9,7 @@ import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { MetricsService } from "../metrics/metrics.service";
 import { InMemorySolversRepository } from "../solvers/in-memory-solvers.repository";
 import { SOLVERS_REPOSITORY } from "../solvers/solvers.repository";
-import { InMemoryIntentsRepository, INTENTS_REPOSITORY } from "./intents.repository";
+import { InMemoryIntentsRepository } from "./intents.repository";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
