@@ -1,5 +1,6 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
+import { Keypair } from "@stellar/stellar-sdk";
 import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
@@ -11,11 +12,12 @@ import { InMemoryIntentsRepository, INTENTS_REPOSITORY } from "./intents.reposit
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
-import { SEED_SOLVER_KEYPAIRS } from "../solvers/solvers.seed";
 
-const ALPHA_ADDR = SEED_SOLVER_KEYPAIRS.ALPHA.publicKey();
+/** Use a stable test address (does not need to be a real funded key). */
+const ALPHA_KEYPAIR = Keypair.random();
+const ALPHA_ADDR = ALPHA_KEYPAIR.publicKey();
 
-async function buildIntentsService(): Promise<IntentsService> {
+function buildIntentsService(): IntentsService {
   const configService = {
     get: jest.fn().mockReturnValue(false),
   } as unknown as ConfigService<AppConfig, true>;
@@ -26,18 +28,10 @@ async function buildIntentsService(): Promise<IntentsService> {
       findMany: jest.fn().mockResolvedValue([]),
     },
   } as unknown as PrismaService;
-
-  const module: TestingModule = await Test.createTestingModule({
-    providers: [
-      { provide: INTENTS_REPOSITORY, useClass: InMemoryIntentsRepository },
-      { provide: ConfigService, useValue: configService },
-      { provide: StellarTxService, useValue: stellarTxService },
-      { provide: PrismaService, useValue: prismaService },
-      IntentsService,
-    ],
-  }).compile();
-
-  return module.get<IntentsService>(IntentsService);
+  const repo = new InMemoryIntentsRepository();
+  // Clear seed data so tests start with a clean slate
+  (repo as unknown as { store: Map<string, unknown> }).store.clear();
+  return new IntentsService(repo, configService, stellarTxService, prismaService);
 }
 
 async function buildSolversService(): Promise<SolversService> {
@@ -58,8 +52,8 @@ describe("IntentsSweeperService", () => {
   let sweeper: IntentsSweeperService;
 
   beforeEach(async () => {
-    intentsService = await buildIntentsService();
-    gateway = { broadcast: jest.fn() } as unknown as IntentsGateway;
+    intentsService = buildIntentsService();
+    gateway = { broadcast: jest.fn().mockResolvedValue(undefined) } as unknown as IntentsGateway;
     solversService = await buildSolversService();
     solverRegistryService = {
       slashSolver: jest.fn().mockResolvedValue({
@@ -132,6 +126,18 @@ describe("IntentsSweeperService", () => {
 
   it("bumps the solver's fillsFailed counter on a slash", async () => {
     const past = Math.floor(Date.now() / 1000) - 10;
+
+    // Register the solver so recordFailedFill has a record to update
+    await solversService.register({
+      address: ALPHA_ADDR,
+      name: "Alpha Test Solver",
+      bondAmount: "1000000",
+      isActive: true,
+      supportedChains: ["ethereum"],
+      supportedTokens: ["USDC"],
+      avgFillTime: 30,
+    });
+
     const before = (await solversService.get(ALPHA_ADDR))?.fillsFailed ?? 0;
     const intentId = await makeAcceptedIntent(past, ALPHA_ADDR);
 

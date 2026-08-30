@@ -59,7 +59,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
           { deadline: intent.deadline, sweepedAt: now },
         );
         expiredCount++;
-        this.intentsGateway.broadcast({ type: "intent_expired", intentId: intent.intentId });
+        await this.intentsGateway.broadcast({ type: "intent_expired", intentId: intent.intentId });
       }
     }
 
@@ -127,7 +127,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       slashReason: reason,
     });
     if (!slashed) return;
-    this.intentsGateway.broadcast({ type: "intent_slashed", intentId, solver, reason });
+    await this.intentsGateway.broadcast({ type: "intent_slashed", intentId, solver, reason });
 
     if (!solver) {
       // Shouldn't happen in practice — an "accepted" intent always has a

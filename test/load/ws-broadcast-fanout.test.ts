@@ -128,9 +128,9 @@ async function measureBroadcastLatency(
   });
 
   // Kick off the broadcast and record the start time *after* the call returns
-  // (broadcast() is synchronous — it iterates subscribers immediately).
+  // (broadcast() is async — it resolves after subscriber chain lookups complete).
   const broadcastStart = Date.now();
-  gateway.broadcast({ type: eventType, marker: TARGET_SEQ_MARKER });
+  await gateway.broadcast({ type: eventType, marker: TARGET_SEQ_MARKER });
   const broadcastEnd = Date.now();
   const wallClockMs = broadcastEnd - broadcastStart;
 
