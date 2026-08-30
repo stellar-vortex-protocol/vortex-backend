@@ -39,8 +39,8 @@ read endpoints but does **not** take down the intent relay or WebSocket feed.
 | `GET /health` | `200 { status: "ok" }` |
 | `GET /api/v1/chain/health` | `200` with Soroban `status: "healthy"` |
 | Sweeper log (every 30 s) | Debug line: `sweep complete: expired=N duration=Xms` |
-| `MetricsRegistry.sweeper.sweepDurationMs` p99 | < 50 ms under normal load |
-| `MetricsRegistry.sweeper.expiredTotal` | Monotonically increasing; spikes expected near intent `deadline` clusters |
+| `vortex_sweeper_sweep_duration_ms` p99 | < 50 ms under normal load |
+| `vortex_sweeper_expired_total` | Monotonically increasing; spikes expected near intent `deadline` clusters |
 | WS subscriber count | Stable or slowly growing; sudden drops indicate client-side churn |
 | Node.js heap | Steady-state < 200 MB; no sustained upward trend between GC cycles |
 
@@ -142,8 +142,11 @@ A sweep that has been delayed or killed will simply be absent.
 2. Compares each intent's `deadline` (Unix timestamp) against `Date.now()`.
 3. Calls `IntentsService.update()` and `IntentsGateway.broadcast()` for each
    expired intent.
-4. Records `sweepDurationMs` and increments `expiredTotal` in
-   `MetricsRegistry.sweeper`.
+4. Records `vortex_sweeper_sweep_duration_ms` and increments
+   `vortex_sweeper_expired_total` via `MetricsService.recordSweep()` (Prometheus,
+   exposed on `GET /metrics`). The retired `MetricsRegistry` from
+   `src/common/metrics.ts` has been removed (issue #259) — use the
+   Prometheus metric names above for alerting and dashboards.
 
 Because the store is in-memory and the loop is synchronous, the sweep should
 complete in **single-digit milliseconds** for < 10 000 open intents.
@@ -208,8 +211,9 @@ is broken — escalate to the service owner rather than scripting the signal.
 3. **Check metrics** (if a metrics endpoint is wired up):
    ```bash
    curl -s http://localhost:4000/metrics | grep sweeper
-   # sweeper_sweep_duration_ms_count
-   # sweeper_expired_total
+   # vortex_sweeper_sweep_duration_ms_count
+   # vortex_sweeper_sweep_duration_ms_sum
+   # vortex_sweeper_expired_total
    ```
 
 4. **Inspect process health**:
