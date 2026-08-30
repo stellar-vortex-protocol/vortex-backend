@@ -1,16 +1,8 @@
 import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min, MinLength } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { SupportedChain } from "../intents.types";
-
-const SUPPORTED_CHAINS: SupportedChain[] = [
-  "stellar",
-  "ethereum",
-  "base",
-  "polygon",
-  "arbitrum",
-  "optimism",
-  "avalanche",
-];
+import { SUPPORTED_CHAINS, SupportedChain } from "../intents.types";
+import { IsValidAddress } from "../../common/validators/is-valid-address.validator";
+import { IsValidDeadline } from "../../common/validators/deadline.validator";
 
 export class CreateIntentDto {
   @ApiProperty({ description: "Stellar address of the user creating the intent" })
@@ -23,8 +15,7 @@ export class CreateIntentDto {
   srcChain!: SupportedChain;
 
   @ApiProperty({ description: "Source token contract/address on srcChain" })
-  @IsString()
-  @MinLength(10)
+  @IsValidAddress()
   srcTokenAddress!: string;
 
   @ApiProperty({ description: "Source token symbol, e.g. USDC" })
@@ -44,7 +35,7 @@ export class CreateIntentDto {
 
   @ApiProperty({ description: "Destination Stellar token contract" })
   @IsString()
-  @MinLength(10)
+  @Matches(/^[A-Z0-9]{56}$/)
   dstTokenContract!: string;
 
   @ApiProperty({ description: "Destination token symbol, e.g. USDC" })
@@ -62,8 +53,14 @@ export class CreateIntentDto {
   @Matches(/^\d+$/)
   minDstAmount!: string;
 
-  @ApiPropertyOptional({ description: "Unix timestamp deadline; defaults to now + 1800s" })
+  @ApiPropertyOptional({ description: "Unix timestamp deadline; defaults to now + 1800s; must be between now+60s and now+24h" })
   @IsOptional()
   @IsInt()
+  @IsValidDeadline()
   deadline?: number;
+
+  @ApiPropertyOptional({ description: "Idempotency key for deduplicating duplicate requests" })
+  @IsOptional()
+  @IsString()
+  idempotencyKey?: string;
 }

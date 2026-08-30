@@ -1,6 +1,15 @@
 import { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { createTestApp } from "./utils/create-test-app";
+import { SEED_SOLVER_KEYPAIRS } from "../src/solvers/solvers.seed";
+import { buildAcceptMessage, buildFillMessage } from "../src/common/stellar-signature";
+import { Keypair } from "@stellar/stellar-sdk";
+
+const ALPHA_KP = SEED_SOLVER_KEYPAIRS.ALPHA;
+
+function sign(kp: Keypair, message: string): string {
+  return kp.sign(Buffer.from(message, "utf8")).toString("base64");
+}
 
 describe("StatsController (e2e)", () => {
   let app: INestApplication;
@@ -39,20 +48,31 @@ describe("StatsController (e2e)", () => {
         minDstAmount: "990000",
       })
       .expect(201);
-    const intentId = createRes.body.intentId;
+    const intentId = createRes.body.intentId as string;
 
+    const acceptSig = sign(ALPHA_KP, buildAcceptMessage(intentId, ALPHA_KP.publicKey()));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${intentId}/accept`)
-      .send({ solver: "SOLVER_ALPHA" })
+      .send({ solver: ALPHA_KP.publicKey(), signature: acceptSig })
       .expect(201);
+
+    const fillSig = sign(ALPHA_KP, buildFillMessage(intentId, ALPHA_KP.publicKey()));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${intentId}/fill`)
-      .send({ solver: "SOLVER_ALPHA", fillAmount: "995000" })
+      .send({ solver: ALPHA_KP.publicKey(), fillAmount: "995000", signature: fillSig })
       .expect(201);
 
     const after = await request(app.getHttpServer()).get("/api/v1/stats").expect(200);
 
     expect(after.body.totalIntents).toBe(before.body.totalIntents + 1);
     expect(BigInt(after.body.totalVolume) - BigInt(before.body.totalVolume)).toBe(995000n);
+  });
+
+  it("GET /api/v1/stats/ws returns the current WebSocket subscriber count", async () => {
+    const res = await request(app.getHttpServer()).get("/api/v1/stats/ws").expect(200);
+
+    expect(res.body).toHaveProperty("subscriberCount");
+    expect(typeof res.body.subscriberCount).toBe("number");
+    expect(res.body.subscriberCount).toBeGreaterThanOrEqual(0);
   });
 });

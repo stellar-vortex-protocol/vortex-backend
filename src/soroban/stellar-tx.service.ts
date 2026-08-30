@@ -1,18 +1,26 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   BASE_FEE,
-  Contract,
-  Networks,
-  Operation,
+  FeeBumpTransaction,
+  nativeToScVal,
   SorobanRpc,
   Transaction,
   TransactionBuilder,
   xdr,
 } from "@stellar/stellar-sdk";
-import { AppConfig } from "../config/configuration";
-import { SignerService } from "./signer.service";
+import { AppConfig, FeePercentile } from "../config/configuration";
 import { SorobanService } from "./soroban.service";
+import { SignerService } from "./signer.service";
+
+export interface FeeEstimate {
+  /** Classic inclusion fee, in stroops. */
+  baseFee: string;
+  /** Soroban resource fee returned by simulation, in stroops. */
+  resourceFee: string;
+  /** baseFee + resourceFee, in stroops. */
+  totalFee: string;
+}
 
 export interface InvokeContractParams {
   contractId: string;
@@ -25,79 +33,103 @@ export interface InvokeContractResult {
   status: string;
 }
 
-export class SorobanSimulationError extends Error {}
-export class SorobanSubmissionError extends Error {}
-export class SorobanPollingTimeoutError extends Error {}
-
 @Injectable()
 export class StellarTxService {
-  private readonly networkPassphrase: string;
-  private readonly maxPolls = 30;
-  private readonly pollIntervalMs = 1000;
+  private readonly logger = new Logger(StellarTxService.name);
+  private readonly feePercentile: FeePercentile;
 
   constructor(
-    private readonly configService: ConfigService<AppConfig, true>,
     private readonly sorobanService: SorobanService,
-    private readonly signerService: SignerService,
+    configService: ConfigService<AppConfig, true>,
   ) {
-    const network = configService.get("stellar.network", { infer: true });
-    this.networkPassphrase = network === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
+    this.feePercentile = configService.get("stellar.feePercentile", { infer: true });
   }
 
+  /**
+   * Recommended classic inclusion fee based on recent network activity.
+   * Falls back to the network's minimum base fee if fee stats are unavailable
+   * or the reported fee is degenerate (e.g. an idle network reporting "0").
+   */
+  async estimateBaseFee(): Promise<string> {
+    try {
+      const stats = await this.sorobanService.getFeeStats();
+      const fee = stats.sorobanInclusionFee[this.feePercentile];
+      return fee && fee !== "0" ? fee : BASE_FEE;
+    } catch (err) {
+      this.logger.warn(
+        `Failed to fetch Soroban fee stats, falling back to base fee ${BASE_FEE}: ${(err as Error).message}`,
+      );
+      return BASE_FEE;
+    }
+  }
+
+  /**
+   * Estimates the total fee (base + resource) required to submit `transaction`
+   * by simulating it against the network, instead of hardcoding a fee value.
+   */
+  async estimateFee(transaction: Transaction): Promise<FeeEstimate> {
+    const baseFee = await this.estimateBaseFee();
+    const simulation = await this.sorobanService.simulateTransaction(
+      this.withFee(transaction, baseFee),
+    );
+
+    if (SorobanRpc.Api.isSimulationError(simulation)) {
+      throw new Error(
+        `Fee estimation failed: transaction simulation error: ${simulation.error}`,
+      );
+    }
+
+    const resourceFee = (simulation as SorobanRpc.Api.SimulateTransactionSuccessResponse)
+      .minResourceFee;
+    const totalFee = (BigInt(baseFee) + BigInt(resourceFee)).toString();
+
+    return { baseFee, resourceFee, totalFee };
+  }
+
+  /**
+   * Simulates `transaction` and returns it assembled with the estimated
+   * base + resource fee and Soroban transaction data, ready to sign.
+   */
+  async prepareTransaction(transaction: Transaction): Promise<Transaction> {
+    const baseFee = await this.estimateBaseFee();
+    const prepared = await this.sorobanService.prepareTransaction(
+      this.withFee(transaction, baseFee),
+    );
+
+    this.logger.log(
+      `Prepared transaction with fee ${prepared.fee} stroops (base fee ${baseFee})`,
+    );
+
+    return prepared as Transaction;
+  }
+
+  /**
+   * Invokes a Soroban contract method.
+   * Used by IntentsService when ONCHAIN_INTENTS_ENABLED is true.
+   * This is a stub that will be expanded once the on-chain settlement
+   * contract interface is finalised (see docs/architecture/onchain-settlement.md).
+   */
   async invokeContract(params: InvokeContractParams): Promise<InvokeContractResult> {
-    return this.signerService.withNextSequence(async (account) => {
-      const transaction = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: this.networkPassphrase })
-        .addOperation(
-          Operation.invokeHostFunction({
-            func: new Contract(params.contractId).call(params.method, ...params.args),
-            auth: [],
-          }),
-        )
-        .setTimeout(300)
-        .build();
+    this.logger.log(
+      `invokeContract contractId=${params.contractId} method=${params.method}`,
+    );
 
-      const prepared = await this.prepareTransaction(transaction);
-      const signed = this.signerService.sign(prepared);
-      let submitted: any;
-      try {
-        submitted = await this.sorobanService.sendTransaction(signed);
-      } catch (error) {
-        throw new SorobanSubmissionError(`Soroban transaction submission failed: ${String(error)}`);
-      }
-
-      if (submitted.status === "ERROR") {
-        throw new SorobanSubmissionError(submitted.errorResult ?? "Soroban transaction was rejected");
-      }
-      return this.waitForConfirmation(submitted.hash);
-    });
+    // TODO: Build, simulate, sign, and submit the actual Soroban transaction
+    // once SignerService is wired here and the contract bindings are finalised.
+    // For now, throw a clear error so callers know this isn't implemented yet.
+    throw new Error(
+      `invokeContract not yet implemented for method=${params.method} on contract=${params.contractId}`,
+    );
   }
 
-  private async prepareTransaction(transaction: Transaction): Promise<Transaction> {
-    let simulation: any;
-    try {
-      simulation = await this.sorobanService.simulateTransaction(transaction);
-    } catch (error) {
-      throw new SorobanSimulationError(`Soroban simulation failed: ${String(error)}`);
+  private withFee(transaction: Transaction | FeeBumpTransaction, fee: string): Transaction {
+    if ("innerTransaction" in transaction) {
+      throw new TypeError("fee bump transactions are not supported");
     }
-    if (!SorobanRpc.Api.isSimulationSuccess(simulation)) {
-      throw new SorobanSimulationError(simulation.error ?? "Soroban simulation was rejected");
-    }
-    try {
-      return SorobanRpc.assembleTransaction(transaction, simulation).build();
-    } catch (error) {
-      throw new SorobanSimulationError(`Soroban transaction preparation failed: ${String(error)}`);
-    }
-  }
 
-  private async waitForConfirmation(hash: string): Promise<InvokeContractResult> {
-    for (let poll = 0; poll < this.maxPolls; poll += 1) {
-      const result: any = await this.sorobanService.getTransaction(hash);
-      if (result.status === "SUCCESS") return { hash, status: result.status };
-      if (result.status === "FAILED") {
-        throw new SorobanSubmissionError(result.errorResult ?? "Soroban transaction failed");
-      }
-      await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
-    }
-    throw new SorobanPollingTimeoutError(`Timed out waiting for Soroban transaction ${hash}`);
+    return TransactionBuilder.cloneFrom(transaction, {
+      fee,
+      networkPassphrase: transaction.networkPassphrase,
+    }).build();
   }
 }

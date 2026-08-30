@@ -1,85 +1,122 @@
-import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
-import { promises as fs } from "fs";
-import { join } from "path";
-import { IntentsGateway } from "../intents/intents.gateway";
-import { IntentsService } from "../intents/intents.service";
+import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { scValToNative, SorobanRpc } from "@stellar/stellar-sdk";
+import { AppConfig } from "../config/configuration";
 import { SorobanService } from "./soroban.service";
 
-interface IntentFilledEvent {
-  ledger?: number;
-  transactionHash?: string;
-  txHash?: string;
-  topics?: unknown[];
-  topic?: unknown[];
-  data?: unknown;
-  [key: string]: unknown;
+const POLL_INTERVAL_MS = 10_000;
+
+// Bound the in-memory dedupe set so long-lived processes don't leak memory.
+// Once we've tracked this many keys we drop the oldest (lowest-ledger) ones,
+// which is safe because we never re-poll ledgers that far behind the cursor.
+const MAX_TRACKED_KEYS = 10_000;
+
+export interface DedupeKeyParts {
+  ledgerSequence: number;
+  eventIndex: number;
+}
+
+// Soroban RPC event ids are "<ledgerSeq>-<eventIndexInLedger>"; we only use
+// the trailing segment here since `EventResponse.ledger` is the source of
+// truth for the ledger sequence.
+export function parseEventIndex(eventId: string): number {
+  const parts = eventId.split("-");
+  const index = Number(parts[parts.length - 1]);
+  return Number.isFinite(index) ? index : 0;
+}
+
+export function buildDedupeKey({ ledgerSequence, eventIndex }: DedupeKeyParts): string {
+  return `${ledgerSequence}:${eventIndex}`;
 }
 
 @Injectable()
-export class EventIngestionService implements OnModuleInit {
-  private readonly logger = new Logger(EventIngestionService.name);
-  private readonly cursorPath = join(process.cwd(), ".data", "soroban-event-cursor.json");
+export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
+  private interval?: NodeJS.Timeout;
+  private readonly seenKeys = new Set<string>();
   private nextStartLedger?: number;
-  private polling = false;
+  processedCount = 0;
+  duplicateCount = 0;
 
   constructor(
     private readonly sorobanService: SorobanService,
-    private readonly intentsService: IntentsService,
-    private readonly intentsGateway: IntentsGateway,
+    private readonly configService: ConfigService<AppConfig, true>,
   ) {}
 
-  async onModuleInit() {
-    try {
-      const saved = JSON.parse(await fs.readFile(this.cursorPath, "utf8")) as { nextStartLedger?: number };
-      if (Number.isInteger(saved.nextStartLedger)) this.nextStartLedger = saved.nextStartLedger;
-    } catch {
-      // A missing cursor intentionally starts at the latest ledger on first deployment.
-    }
+  onModuleInit() {
+    this.interval = setInterval(() => {
+      this.poll().catch((err) => console.error("[event-ingestion] poll failed", err));
+    }, POLL_INTERVAL_MS);
   }
 
-  async poll() {
-    if (this.polling) return;
-    this.polling = true;
-    try {
-      const startLedger = this.nextStartLedger ?? (await this.sorobanService.getLatestLedger()).sequence;
-      const response: any = await this.sorobanService.getEvents(startLedger);
-      for (const event of response.events ?? []) {
-        if (event.topic?.[0]?.value === "intent_filled" || event.name === "intent_filled") {
-          await this.handleIntentFilled(event);
-        }
-      }
-      const latest = response.latestLedger ?? response.latestLedgerSequence ?? startLedger;
-      this.nextStartLedger = Math.max(startLedger, latest + 1);
-      await this.persistCursor();
-    } finally {
-      this.polling = false;
-    }
+  onModuleDestroy() {
+    if (this.interval) clearInterval(this.interval);
   }
 
-  async handleIntentFilled(event: IntentFilledEvent) {
-    const topicValues = (event.topics ?? event.topic ?? []).map((value: any) => value?.value ?? value);
-    const intentIndex = topicValues[0] === "intent_filled" ? 1 : 0;
-    const intentId = String(topicValues[intentIndex] ?? "");
-    const fillValue: any = event.data ?? topicValues[intentIndex + 1] ?? "0";
-    const fillAmount = String(fillValue?.value ?? fillValue);
-    const txHash = event.transactionHash ?? event.txHash;
-    if (!intentId) return;
+  async poll(): Promise<void> {
+    const settlementContractId = this.configService.get("stellar.settlementContractId", { infer: true });
+    if (!settlementContractId) return;
 
-    const updated = this.intentsService.reconcileFilled(intentId, fillAmount, txHash);
-    if (!updated) {
-      this.logger.warn(`Ignoring intent_filled for unknown local intent ${intentId}`);
-      return;
+    let startLedger = this.nextStartLedger;
+    if (startLedger === undefined) {
+      const latest = await this.sorobanService.getLatestLedger();
+      startLedger = latest.sequence;
     }
-    this.intentsGateway.broadcast({
-      type: "intent_filled",
-      intentId,
-      fillAmount,
-      txHash,
+
+    const response = await this.sorobanService.getEvents({
+      startLedger,
+      filters: [{ type: "contract", contractIds: [settlementContractId] }],
     });
+
+    for (const event of response.events) {
+      this.ingest(event);
+    }
+
+    this.nextStartLedger = response.latestLedger + 1;
   }
 
-  private async persistCursor() {
-    await fs.mkdir(join(process.cwd(), ".data"), { recursive: true });
-    await fs.writeFile(this.cursorPath, JSON.stringify({ nextStartLedger: this.nextStartLedger }), "utf8");
+  // Skips events already seen at this ledger+index, which protects against
+  // redelivery after a restart (cursor rewinds) or overlapping poll windows.
+  ingest(event: SorobanRpc.Api.EventResponse): boolean {
+    const dedupeKey = buildDedupeKey({
+      ledgerSequence: event.ledger,
+      eventIndex: parseEventIndex(event.id),
+    });
+
+    if (this.seenKeys.has(dedupeKey)) {
+      this.duplicateCount++;
+      return false;
+    }
+
+    this.markSeen(dedupeKey);
+    this.processEvent(event);
+    this.processedCount++;
+    return true;
+  }
+
+  private markSeen(dedupeKey: string) {
+    this.seenKeys.add(dedupeKey);
+    if (this.seenKeys.size > MAX_TRACKED_KEYS) {
+      const oldest = this.seenKeys.values().next().value;
+      if (oldest !== undefined) this.seenKeys.delete(oldest);
+    }
+  }
+
+  private processEvent(event: SorobanRpc.Api.EventResponse): void {
+    const topic = event.topic.map((scVal) => {
+      try {
+        return scValToNative(scVal);
+      } catch {
+        return undefined;
+      }
+    });
+
+    const eventName = typeof topic[0] === "string" ? topic[0] : undefined;
+    if (eventName === "intent_filled") {
+      this.handleIntentFilled(event, topic);
+    }
+  }
+
+  private handleIntentFilled(event: SorobanRpc.Api.EventResponse, topic: unknown[]): void {
+    console.log(`[event-ingestion] intent_filled event at ledger=${event.ledger} txHash=${event.txHash}`, topic);
   }
 }

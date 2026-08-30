@@ -1,11 +1,39 @@
-export type SupportedChain =
-  | "stellar"
-  | "ethereum"
-  | "base"
-  | "polygon"
-  | "arbitrum"
-  | "optimism"
-  | "avalanche";
+/**
+ * Single source of truth for every chain the protocol recognises.
+ * `SupportedChain` is derived from this tuple so all three consumers
+ * (intents.types.ts, create-intent.dto.ts, tokens.data.ts) stay in sync
+ * automatically — see issue #128.
+ */
+export const SUPPORTED_CHAINS = [
+  "stellar",
+  "ethereum",
+  "base",
+  "polygon",
+  "arbitrum",
+  "optimism",
+  "avalanche",
+] as const;
+
+export type SupportedChain = (typeof SUPPORTED_CHAINS)[number];
+
+/**
+ * A single entry in the append-only audit log for an intent.
+ * Every state transition — cancel, expire, accept, fill — appends one entry.
+ * Once persistence lands (issue #36) this will be written to an `intent_audit_log`
+ * table; for now it lives in-memory alongside the intent map.
+ */
+export interface IntentAuditEntry {
+  /** ISO-8601 UTC timestamp of the transition. */
+  timestamp: string;
+  /** State the intent moved INTO. */
+  toState: IntentState;
+  /** Actor who triggered the transition: a user address, solver address, or "system". */
+  actor: string;
+  /** Human-readable explanation, e.g. "user cancelled", "deadline passed". */
+  reason: string;
+  /** Optional extra data (fill amount, tx hash, …). */
+  metadata?: Record<string, unknown>;
+}
 
 export type IntentState =
   | "open"
@@ -48,6 +76,8 @@ export interface Intent {
   filledAt?: number;
   fillAmount?: string;
   txHash?: string; // fill tx on Stellar
+  slashedAt?: number;
+  slashReason?: string;
 }
 
 export interface Quote {

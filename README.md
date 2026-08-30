@@ -55,9 +55,45 @@ GET  /api/v1/chain/account/:key   — Stellar account lookup
 
 ```bash
 npm install
-cp .env.example .env
+cp .env.testnet.example .env   # testnet development (most contributors)
+# cp .env.mainnet.example .env # production/mainnet — requires real keys
 npm run dev    # http://localhost:4000
 ```
+
+Three `.env.example` variants are provided for different deployment targets:
+
+| File | Use case |
+|------|----------|
+| `.env.example` | Generic template with all available variables |
+| `.env.testnet.example` | Testnet development — safe defaults, blank contract IDs |
+| `.env.mainnet.example` | Production mainnet — strict CORS, required signing key and contract IDs |
+
+### Signing key
+
+`SOROBAN_SIGNING_KEY` holds the secret key the backend uses to submit its own
+on-chain writes (settlement, slashing). It's optional in development/test —
+leave it blank and those code paths simply have nothing to sign with — but
+**required and format-validated in production** (`NODE_ENV=production`); the
+process refuses to start without a well-formed Stellar secret seed rather
+than falling back to any placeholder.
+
+For local dev, generate a throwaway **testnet-only** keypair — never reuse a
+mainnet or otherwise real key:
+
+```bash
+npx @stellar/stellar-cli keys generate local-dev --network testnet
+npx @stellar/stellar-cli keys show local-dev        # paste into SOROBAN_SIGNING_KEY
+
+# or, ad hoc:
+node -e "console.log(require('@stellar/stellar-sdk').Keypair.random().secret())"
+
+# fund it via Friendbot before using it against testnet:
+curl "https://friendbot.stellar.org/?addr=<PUBLIC_KEY>"
+```
+
+Never commit a filled-in `.env`, and never point a real/funded key at
+anything but `mainnet` with `NODE_ENV=production` behind a proper secrets
+manager.
 
 ### Scripts
 
@@ -85,20 +121,72 @@ No `.env` is required to boot — `ConfigModule`'s validation schema supplies
 defaults for every variable. Pass real values with `--env-file .env` or `-e`
 flags to override them.
 
+### Production deployment
+
+The table below separates variables that **must** be set for a real deployment
+from those that are safe to leave at their testnet/dev defaults.
+
+| Variable | Required for production | Safe default? | Notes |
+|---|---|---|---|
+| `NODE_ENV` | Yes — set to `production` | No | Enables signing-key validation and strict startup checks |
+| `DATABASE_URL` | Yes | No | Must point to a managed Postgres instance, not `localhost` |
+| `CORS_ORIGIN` | Yes | No | Must be an explicit origin (e.g. `https://app.vortex.trade`), never `*` |
+| `SOROBAN_SIGNING_KEY` | Yes (once on-chain writes land) | No | Required and format-validated in `production`; process refuses to start without a valid Stellar secret seed |
+| `SETTLEMENT_CONTRACT_ID` | Yes (on-chain path) | No | 56-char Stellar contract ID of the deployed settlement contract |
+| `SOLVER_REGISTRY_CONTRACT_ID` | Yes (on-chain path) | No | 56-char Stellar contract ID of the deployed solver-registry contract |
+| `STELLAR_NETWORK` | Yes | No | Set to `mainnet`; default is `testnet` |
+| `SOROBAN_RPC_URL` | Yes | No | A production-grade Soroban RPC endpoint; the default points at the public testnet |
+| `INTENTS_PERSISTENCE` | Recommended | `memory` | Set to `prisma` to persist intents to Postgres across restarts; `memory` loses all state on restart |
+| `SOLVERS_PERSISTENCE` | Recommended | `memory` | Set to `prisma` to persist solver registry to Postgres; `memory` loses solver state on restart |
+| `SOROBAN_FEE_PERCENTILE` | Recommended | `p50` | Raise to `p90` on mainnet for better confirmation speed under load |
+| `WS_MAX_CONNECTIONS` | Recommended | `1000` | Tune to expected solver + frontend connection count |
+| `SENTRY_DSN` | Recommended | — (Sentry disabled) | Set to your Sentry project DSN for error alerting |
+| `LOG_LEVEL` | Recommended | `debug` | Set to `info` in production — `debug` is too noisy |
+| `PORT` | Optional | `4000` | Change if the container port mapping differs |
+
+For a production `.env` template, copy `.env.mainnet.example` — every
+`<CHANGE_ME>` value corresponds to a "required for production" row above.
+Store secrets (`SOROBAN_SIGNING_KEY`, `DATABASE_URL`) in a secrets manager
+(AWS Secrets Manager, HashiCorp Vault, etc.) and inject them at runtime;
+never commit filled-in values to version control.
+
+---
+
+## Supported chains
+
+`SupportedChain` in `src/intents/intents.types.ts` lists seven chains.
+The table below clarifies which are **live** (real integration exists today)
+versus **planned** (schema/token data in place, on-chain settlement pending).
+
+| Chain | Status | Notes |
+|-------|--------|-------|
+| **Stellar** | ✅ Live | Soroban RPC reads (`/api/v1/chain/*`), signing service, settlement design in progress |
+| Ethereum | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+| Base | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+| Polygon | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+| Arbitrum | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+| Optimism | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+| Avalanche | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
+
+> **Contributor note:** EVM chains are accepted in the intent DTO and stored
+> in-memory, but no on-chain settlement or bridging logic is wired up yet.
+> See [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md)
+> for the target design.
+
 ---
 
 ## Roadmap
 
 - [x] **Soroban RPC reads** — health/ledger/network/account lookups via `/api/v1/chain/*`
-- [ ] **On-chain writes** — replace the in-memory intent store with real Soroban transactions
+- [ ] **On-chain writes** — replace the in-memory intent store with real Soroban transactions (target design: [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md))
 - [x] **Solver WS client** — reference implementation for a solver bot (`npm run solver:demo`, see [`scripts/README.md`](./scripts/README.md))
 
 ---
 
 ## Contributing
 
-See the org-wide
-[CONTRIBUTING.md](https://github.com/vortex-protocol/.github/blob/main/CONTRIBUTING.md).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for backend-specific setup, conventions, and
+the PR checklist. It links to the org-wide guide for process and code of conduct.
 
 ## License
 

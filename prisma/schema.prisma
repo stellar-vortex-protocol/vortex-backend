@@ -1,0 +1,151 @@
+// ─── Prisma Schema ────────────────────────────────────────────────────────────
+// Database: PostgreSQL (swap to sqlite for local dev / CI without a real DB)
+// Run `npm run db:generate` after editing this file.
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum IntentState {
+  open
+  accepted
+  filled
+  cancelled
+  expired
+  slashed
+}
+
+enum SupportedChain {
+  stellar
+  ethereum
+  base
+  polygon
+  arbitrum
+  optimism
+  avalanche
+}
+
+// ─── Intent ──────────────────────────────────────────────────────────────────
+// Represents a cross-chain swap request submitted by a user.
+// The nested token objects (srcToken / dstToken) are stored as JSONB so the
+// schema remains flexible while the intent's own scalar fields stay queryable.
+
+model Intent {
+  id             String      @id @default(uuid()) @map("id")
+  /// Externally-visible intent identifier (UUID).
+  intentId       String      @unique @map("intent_id")
+  /// Stellar / EVM address of the user that created the intent.
+  user           String      @map("user")
+  srcChain       SupportedChain @map("src_chain")
+  /// ERC-20 / native token info on the source chain (stored as JSON).
+  srcToken       Json        @map("src_token")
+  /// Raw amount in the token's base unit (stored as string to preserve bigint precision).
+  srcAmount      String      @map("src_amount")
+  /// Stellar destination token info (stored as JSON).
+  dstToken       Json        @map("dst_token")
+  /// Minimum acceptable destination amount (base unit string).
+  minDstAmount   String      @map("min_dst_amount")
+  /// Best quote from solvers, populated after quoting.
+  quotedDstAmount String?    @map("quoted_dst_amount")
+  /// Solver address that accepted / filled this intent.
+  solver         String?     @map("solver")
+  state          IntentState @default(open) @map("state")
+  /// Unix epoch seconds.
+  createdAt      Int         @map("created_at")
+  /// Unix epoch seconds – intent expires after this.
+  deadline       Int         @map("deadline")
+  /// Unix epoch seconds – set when state becomes `filled`.
+  filledAt       Int?        @map("filled_at")
+  /// Actual amount received by the user (base unit string).
+  fillAmount     String?     @map("fill_amount")
+  /// On-chain transaction hash of the Stellar fill transaction.
+  txHash         String?     @map("tx_hash")
+
+  @@index([user])
+  @@index([state])
+  @@index([solver])
+  @@map("intents")
+}
+
+// ─── Solver ──────────────────────────────────────────────────────────────────
+// Registered solver nodes that fulfil cross-chain intents.
+
+model Solver {
+  id               String   @id @default(uuid()) @map("id")
+  /// Public key / address that uniquely identifies the solver.
+  address          String   @unique @map("address")
+  name             String   @map("name")
+  /// Bond amount locked in the registry contract (base-unit string).
+  bondAmount       String   @map("bond_amount")
+  fillsCompleted   Int      @default(0) @map("fills_completed")
+  fillsFailed      Int      @default(0) @map("fills_failed")
+  /// Cumulative filled volume (base-unit string).
+  totalVolume      String   @default("0") @map("total_volume")
+  /// Rolling average fill time in seconds.
+  avgFillTime      Float    @default(0) @map("avg_fill_time")
+  isActive         Boolean  @default(true) @map("is_active")
+  /// Unix epoch seconds.
+  registeredAt     Int      @map("registered_at")
+  /// Chains this solver supports (stored as JSON array of SupportedChain values).
+  supportedChains  Json     @map("supported_chains")
+  /// Token symbols this solver can handle.
+  supportedTokens  Json     @map("supported_tokens")
+
+  @@index([isActive])
+  @@map("solvers")
+}
+
+// ─── IntentAuditLog ──────────────────────────────────────────────────────────
+// Append-only record of every state transition for an intent (issue #217 / #62).
+// Queried by intentId to reconstruct the full history of a swap.
+
+model IntentAuditLog {
+  id        BigInt   @id @default(autoincrement()) @map("id")
+  /// FK to intents.intent_id (the user-visible UUID, not the surrogate PK).
+  intentId  String   @map("intent_id")
+  /// ISO-8601 / TIMESTAMPTZ of when the transition was recorded.
+  timestamp DateTime @default(now()) @map("timestamp") @db.Timestamptz
+  /// State the intent moved INTO (e.g. "cancelled", "expired", "slashed").
+  toState   String   @map("to_state")
+  /// Actor who triggered the transition: a user address, solver address, or "system".
+  actor     String   @map("actor")
+  /// Human-readable explanation.
+  reason    String   @map("reason")
+  /// Optional extra data (fill amount, tx hash, deadline, …).
+  metadata  Json?    @map("metadata")
+
+  @@index([intentId, timestamp(sort: Asc)], name: "audit_log_intent_idx")
+  @@map("intent_audit_log")
+}
+
+// ─── Token ───────────────────────────────────────────────────────────────────
+// Static registry of tokens the protocol supports.
+// Kept separate so it can be updated without migrations when the token list changes.
+
+model Token {
+  id        String         @id @default(uuid()) @map("id")
+  /// Contract address (EVM hex address or Stellar contract ID).
+  address   String         @map("address")
+  symbol    String         @map("symbol")
+  name      String         @map("name")
+  decimals  Int            @map("decimals")
+  chain     SupportedChain @map("chain")
+  logoUri   String?        @map("logo_uri")
+  /// Latest known USD price (nullable – updated by a price-feed worker).
+  priceUsd  Float?         @map("price_usd")
+  /// Whether this is a destination-side Stellar token.
+  isStellar Boolean        @default(false) @map("is_stellar")
+
+  @@unique([address, chain])
+  @@index([chain])
+  @@index([symbol])
+  @@map("tokens")
+}
