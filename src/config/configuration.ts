@@ -52,6 +52,8 @@ export interface AppConfig {
   corsOrigin: string;
   /** Maximum concurrent WebSocket connections (0 = unlimited). */
   wsMaxConnections: number;
+  wsBackplane: "memory" | "redis";
+  redisUrl: string;
 }
 
 export default (): AppConfig => ({
@@ -71,4 +73,6 @@ export default (): AppConfig => ({
   onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
   wsMaxConnections: parseInt(process.env.WS_MAX_CONNECTIONS ?? "1000", 10),
+  wsBackplane: (process.env.WS_BACKPLANE ?? "memory") as "memory" | "redis",
+  redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
 });

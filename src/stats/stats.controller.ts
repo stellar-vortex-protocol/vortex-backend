@@ -12,6 +12,11 @@ export class StatsController {
     return this.statsService.getProtocolStats();
   }
 
+  @Get("treasury")
+  getTreasuryStats() {
+    return this.statsService.getTreasuryStats();
+  }
+
   @Get("ws")
   getWsStats() {
     return this.statsService.getWsStats();

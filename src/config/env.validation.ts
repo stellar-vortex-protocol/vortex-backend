@@ -39,6 +39,9 @@ export const envValidationSchema = Joi.object({
 
   CORS_ORIGIN: Joi.string().default("*"),
 
+  WS_BACKPLANE: Joi.string().valid("memory", "redis").default("memory"),
+  REDIS_URL: Joi.string().uri({ scheme: ["redis", "rediss"] }).default("redis://localhost:6379"),
+
   // ── Persistence adapter selection ─────────────────────────────────────────
   // Controls which repository adapter is used for intents and solvers.
   // "memory" (default) keeps everything in-process — no database required.
