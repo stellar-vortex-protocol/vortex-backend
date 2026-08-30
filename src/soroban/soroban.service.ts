@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { SorobanRpc } from "@stellar/stellar-sdk";
+import { Transaction } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 
 @Injectable()
@@ -26,5 +27,21 @@ export class SorobanService {
 
   getAccount(publicKey: string) {
     return this.server.getAccount(publicKey);
+  }
+
+  simulateTransaction(transaction: Transaction) {
+    return this.server.simulateTransaction(transaction);
+  }
+
+  sendTransaction(transaction: Transaction) {
+    return this.server.sendTransaction(transaction);
+  }
+
+  getTransaction(hash: string) {
+    return this.server.getTransaction(hash);
+  }
+
+  getEvents(startLedger: number) {
+    return this.server.getEvents({ startLedger });
   }
 }

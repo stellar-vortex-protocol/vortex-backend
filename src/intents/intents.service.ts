@@ -1,5 +1,9 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Optional } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { Address, xdr } from "@stellar/stellar-sdk";
 import { v4 as uuidv4 } from "uuid";
+import { AppConfig } from "../config/configuration";
+import { StellarTxService } from "../soroban/stellar-tx.service";
 import { Intent, IntentState } from "./intents.types";
 import { buildSeedIntents } from "./intents.seed";
 
@@ -7,11 +11,14 @@ import { buildSeedIntents } from "./intents.seed";
 export class IntentsService {
   private readonly intents = new Map<string, Intent>();
 
-  constructor() {
+  constructor(
+    @Optional() private readonly stellarTxService?: StellarTxService,
+    @Optional() private readonly configService?: ConfigService<AppConfig, true>,
+  ) {
     this.seed();
   }
 
-  create(data: Omit<Intent, "intentId" | "createdAt" | "state">): Intent {
+  async create(data: Omit<Intent, "intentId" | "createdAt" | "state">): Promise<Intent> {
     const now = Math.floor(Date.now() / 1000);
     const intent: Intent = {
       ...data,
@@ -20,8 +27,31 @@ export class IntentsService {
       createdAt: now,
       deadline: data.deadline ?? now + 1800,
     };
+    const enabled = process.env.ONCHAIN_INTENTS_ENABLED === "true";
+    if (enabled) {
+      const contractId = this.configService?.get("stellar.settlementContractId", { infer: true });
+      if (!contractId || !this.stellarTxService) throw new Error("On-chain intent registration is not configured");
+      await this.stellarTxService.invokeContract({
+        contractId,
+        method: "create_intent",
+        args: this.buildCreateIntentArgs(intent),
+      });
+    }
     this.intents.set(intent.intentId, intent);
     return intent;
+  }
+
+  private buildCreateIntentArgs(intent: Intent): xdr.ScVal[] {
+    return [
+      xdr.ScVal.scvString(intent.intentId),
+      xdr.ScVal.scvAddress(Address.fromString(intent.user).toScAddress()),
+      xdr.ScVal.scvString(intent.srcChain),
+      xdr.ScVal.scvString(intent.srcToken.address),
+      xdr.ScVal.scvU128(xdr.UInt128.fromString(intent.srcAmount)),
+      xdr.ScVal.scvAddress(Address.fromString(intent.dstToken.contract).toScAddress()),
+      xdr.ScVal.scvU128(xdr.UInt128.fromString(intent.minDstAmount)),
+      xdr.ScVal.scvU64(xdr.Uint64.fromString(String(intent.deadline))),
+    ];
   }
 
   get(id: string): Intent | undefined {
@@ -46,6 +76,17 @@ export class IntentsService {
     const updated = { ...existing, ...patch };
     this.intents.set(id, updated);
     return updated;
+  }
+
+  reconcileFilled(id: string, fillAmount: string, txHash?: string): Intent | null {
+    const existing = this.intents.get(id);
+    if (!existing) return null;
+    return this.update(id, {
+      state: "filled",
+      filledAt: Math.floor(Date.now() / 1000),
+      fillAmount,
+      txHash,
+    });
   }
 
   private seed() {
