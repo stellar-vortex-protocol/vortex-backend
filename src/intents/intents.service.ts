@@ -9,6 +9,7 @@ import { ConfigService } from "@nestjs/config";
 import { v4 as uuidv4 } from "uuid";
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Intent, IntentAuditEntry, IntentState } from "./intents.types";
+import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
 import { AppConfig } from "../config/configuration";
 import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
@@ -166,6 +167,22 @@ export class IntentsService implements OnModuleDestroy {
 
   async getByUser(user: string): Promise<Intent[]> {
     return this.repo.findByUser(user);
+  }
+
+  /**
+   * Batch-fetch the current record for each of `ids` (issue #275).
+   *
+   * IDs are de-duplicated; IDs with no matching record are simply omitted from
+   * the result (callers get "missing" by comparing lengths, not a 404 per ID).
+   *
+   * This reuses `get()` per ID rather than adding a storage-layer method — fine
+   * for the in-memory adapter. Issue #1's Prisma adapter should implement this
+   * as a single `WHERE intent_id IN (...)` query for efficiency.
+   */
+  async getMany(ids: string[]): Promise<Intent[]> {
+    const unique = [...new Set(ids)];
+    const found = await Promise.all(unique.map((id) => this.get(id)));
+    return found.filter((intent): intent is Intent => intent !== undefined);
   }
 
   async getAcceptedCountBySolver(solver: string): Promise<number> {

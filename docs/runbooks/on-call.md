@@ -3,7 +3,7 @@
 > **Scope:** This document covers the two most common on-call scenarios for
 > `vortex-backend`: (1) Soroban RPC dependency outages and (2) a stuck or
 > slow intent sweeper.  
-> Last updated: 2026-07-28
+> Last updated: 2026-08-30
 
 ---
 
@@ -160,10 +160,36 @@ complete in **single-digit milliseconds** for < 10 000 open intents.
 
 ### Manual sweep trigger (emergency)
 
-There is no HTTP endpoint to trigger a sweep. As a break-glass measure you
-can run a sweep synchronously via the Node.js REPL attached to the process,
-or restart the service (the sweeper fires on the next 30-second tick after
-`onModuleInit`).
+The service installs a **`SIGUSR2` handler** that runs exactly one
+`IntentsSweeperService.sweep()` cycle on demand. This is the supported
+break-glass mechanism — do **not** attach a Node.js REPL to the process.
+
+**Why a signal and not an HTTP endpoint:** it requires shell access to the
+host (so it is inherently operator-only and unreachable by any API client),
+needs no separate secret to manage, and every invocation is logged loudly so
+it shows up clearly in the incident timeline.
+
+```bash
+# 1. Find the backend PID
+pgrep -f "node dist/main.js"
+
+# 2. Trigger one sweep cycle
+kill -USR2 <pid>
+#   In Kubernetes:
+#   kubectl exec <pod> -- kill -USR2 1
+```
+
+The trigger is synchronous and idempotent — sending `SIGUSR2` again simply
+runs another cycle. Confirm it ran by grepping the logs:
+
+```bash
+grep "MANUAL SWEEP" /var/log/vortex-backend.log | tail -5
+# [sweeper] MANUAL SWEEP TRIGGERED (source=SIGUSR2, invokedAt=...) — running one sweep cycle
+# [sweeper] MANUAL SWEEP COMPLETE (source=SIGUSR2, invokedAt=...): expired=N slashed=M duration=Xms
+```
+
+If a manual sweep is needed repeatedly, the sweeper's own 30-second interval
+is broken — escalate to the service owner rather than scripting the signal.
 
 ### Diagnosis steps
 

@@ -36,6 +36,7 @@ import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
 import { QuoteResponseDto } from "./dto/quote-response.dto";
 import { ListIntentsDto } from "./dto/list-intents.dto";
+import { BatchLookupDto } from "./dto/batch-lookup.dto";
 import { UserThrottlerGuard } from "./user-throttler.guard";
 import {
   verifyStellarSignature,
@@ -171,12 +172,14 @@ export class IntentsController {
   async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
 
-    // #219: use typed resolveToken instead of ad-hoc duck-typed any casts
-    const srcToken = this.tokensService.resolveSrcToken(
+    // #219: use typed resolveToken instead of ad-hoc duck-typed any casts.
+    // #276: reject unrecognised tokens outright instead of silently creating an
+    // intent whose priceUSD defaults to undefined.
+    const srcToken = this.tokensService.resolveSrcTokenOrThrow(
       dto.srcChain as SupportedChain,
       dto.srcTokenAddress,
     );
-    const dstToken = this.tokensService.resolveDstToken(dto.dstTokenContract);
+    const dstToken = this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract);
 
     const intent = await this.intentsService.create(
       {
@@ -204,6 +207,34 @@ export class IntentsController {
     );
     this.intentsGateway.broadcast({ type: "intent_created", intent });
     return intent;
+  }
+
+  /**
+   * POST /api/v1/intents/batch
+   *
+   * Issue #275 — bounded batch status lookup. Lets a solver bot (or a frontend
+   * showing a full history) reconcile a known set of intent IDs against current
+   * server state in one call instead of N `GET /:id` requests.
+   *
+   * `POST` (not `GET`) because the ID list can exceed a comfortable query-string
+   * length. Subject to the same global rate limits as every other endpoint —
+   * no dedicated tier. Read-only: batch accept/fill/cancel is explicitly out of
+   * scope.
+   */
+  @Post("batch")
+  @ApiOperation({
+    summary: "Batch-fetch current intent records by ID",
+    description:
+      "Returns the current record for each supplied intent ID. IDs with no " +
+      "matching record are omitted (not individually 404'd). Capped at 100 IDs.",
+  })
+  @ApiOkResponse({ description: "Records for the found intent IDs, plus a count" })
+  @ApiBadRequestResponse({
+    description: "intentIds missing, not an array of strings, or exceeds 100 entries",
+  })
+  async batchLookup(@Body() dto: BatchLookupDto) {
+    const intents = await this.intentsService.getMany(dto.intentIds);
+    return { intents, count: intents.length };
   }
 
   @Post(":id/accept")
@@ -341,12 +372,16 @@ export class IntentsController {
   quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {
     const solvers = this.solversService.getAll().filter((s) => s.isActive);
 
-    // #219: use typed resolveSrcToken / resolveDstToken — no more any casts
-    const srcToken = this.tokensService.resolveSrcToken(
-      dto.srcChain as SupportedChain,
-      dto.srcTokenAddress ?? "",
-    );
-    const dstToken = this.tokensService.resolveDstToken(dto.dstTokenContract ?? "");
+    // #219: use typed resolveSrcToken / resolveDstToken — no more any casts.
+    // #276: a quote may be requested by symbol alone (no contract/address), but
+    // when a token identifier IS supplied it must resolve — otherwise the quote
+    // engine would silently substitute a fake $1 price.
+    const srcToken = dto.srcTokenAddress
+      ? this.tokensService.resolveSrcTokenOrThrow(dto.srcChain as SupportedChain, dto.srcTokenAddress)
+      : undefined;
+    const dstToken = dto.dstTokenContract
+      ? this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract)
+      : undefined;
 
     const srcAmountBigInt = BigInt(dto.srcAmount);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
