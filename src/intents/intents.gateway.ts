@@ -2,7 +2,9 @@ import { OnModuleDestroy } from "@nestjs/common";
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
+import { SolversService } from "../solvers/solvers.service";
 import { logger } from "../common/logger";
+import { buildWsAuthMessage, verifyStellarSignature } from "../common/stellar-signature";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -74,11 +76,15 @@ export class IntentsGateway
 {
   private readonly subscribers = new Set<WebSocket>();
   private readonly alive = new WeakMap<WebSocket, boolean>();
+  private readonly authenticatedSolver = new WeakMap<WebSocket, string>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private heartbeatTimer: any;
   private nextSeq = 1;
 
-  constructor(private readonly intentsService: IntentsService) {
+  constructor(
+    private readonly intentsService: IntentsService,
+    private readonly solversService: SolversService,
+  ) {
     this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
     logger.info("ws heartbeat started");
   }
@@ -89,6 +95,10 @@ export class IntentsGateway
 
     client.on("pong", () => {
       this.alive.set(client, true);
+    });
+
+    client.on("message", (raw) => {
+      void this.handleMessage(client, raw);
     });
 
     client.on("error", () => {
@@ -123,7 +133,63 @@ export class IntentsGateway
 
   handleDisconnect(client: WebSocket) {
     this.subscribers.delete(client);
+    this.authenticatedSolver.delete(client);
     logger.info(`ws client disconnected (subscribers=${this.subscribers.size})`);
+  }
+
+  private async handleMessage(client: WebSocket, raw: unknown) {
+    try {
+      const serialized = Buffer.isBuffer(raw)
+        ? raw.toString("utf8")
+        : typeof raw === "string"
+          ? raw
+          : String(raw);
+      const payload = JSON.parse(serialized);
+      if (!payload || typeof payload !== "object") return;
+
+      switch (payload.type) {
+        case "auth": {
+          await this.handleAuth(client, payload);
+          return;
+        }
+        default:
+          return;
+      }
+    } catch {
+      client.send(JSON.stringify({ type: "auth_error", reason: "Invalid WS message" }));
+    }
+  }
+
+  private async handleAuth(client: WebSocket, payload: Record<string, unknown>) {
+    const solver = typeof payload.solver === "string" ? payload.solver : "";
+    const timestamp = payload.timestamp;
+    const signature = typeof payload.signature === "string" ? payload.signature : "";
+
+    if (!solver || !signature || typeof timestamp !== "number") {
+      client.send(JSON.stringify({ type: "auth_error", reason: "auth payload requires solver, timestamp, and signature" }));
+      return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const skew = Math.abs(now - timestamp);
+    if (skew > 300) {
+      client.send(JSON.stringify({ type: "auth_error", reason: "stale or future auth timestamp" }));
+      return;
+    }
+
+    const solverRecord = await this.solversService.get(solver);
+    if (!solverRecord || !solverRecord.isActive) {
+      client.send(JSON.stringify({ type: "auth_error", reason: "solver not registered or inactive" }));
+      return;
+    }
+
+    try {
+      verifyStellarSignature(solver, buildWsAuthMessage(solver, timestamp), signature);
+      this.authenticatedSolver.set(client, solver);
+      client.send(JSON.stringify({ type: "auth_ok" }));
+    } catch {
+      client.send(JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }));
+    }
   }
 
   broadcast(event: { type: string; [key: string]: unknown }) {

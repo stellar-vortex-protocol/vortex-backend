@@ -47,6 +47,13 @@ export function buildCancelMessage(intentId: string): string {
 }
 
 /**
+ * Build the canonical message that a solver must sign to authenticate its WS connection.
+ */
+export function buildWsAuthMessage(solver: string, timestamp: number | string): string {
+  return `solver-auth:${solver}:${String(timestamp)}`;
+}
+
+/**
  * Build the canonical message that a solver must sign to accept an intent.
  */
 export function buildAcceptMessage(intentId: string, solver: string): string {
