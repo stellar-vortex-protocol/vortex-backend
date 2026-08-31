@@ -60,4 +60,21 @@ export const envValidationSchema = Joi.object({
       // as a documentation hint and config validation guard only.
       "debug",
     ),
+
+  // Log shipping — off by default so local dev/CI remain stdout-only. When
+  // enabled, structured logs are also shipped to LOG_SHIPPING_HOST:PORT.
+  LOG_SHIPPING_ENABLED: Joi.boolean().default(false),
+  LOG_SHIPPING_HOST: Joi.string().when("LOG_SHIPPING_ENABLED", {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.string().allow("").default(""),
+  }),
+  LOG_SHIPPING_PORT: Joi.number().port().when("LOG_SHIPPING_ENABLED", {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.number().optional(),
+  }),
+  LOG_SHIPPING_PATH: Joi.string().default("/"),
+  LOG_SHIPPING_SSL: Joi.boolean().default(false),
+  LOG_SERVICE_NAME: Joi.string().default("vortex-backend"),
 });
