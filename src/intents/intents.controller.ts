@@ -319,7 +319,11 @@ export class IntentsController {
     // Verify the user controls the claimed address
     verifyStellarSignature(dto.user, buildCancelMessage(id), dto.signature);
 
-    const updated = await this.intentsService.update(id, { state: "cancelled" });
+    const updated = await this.intentsService.cancelIfOpen(id);
+    if (!updated) {
+      const current = await this.intentsService.get(id);
+      throw new ConflictException(`Cannot cancel intent in state: ${current?.state ?? "unknown"}`);
+    }
 
     // Audit trail (issue #217 / #62): record who cancelled and when.
     this.intentsService.appendAuditEntry(id, "cancelled", dto.user, "user cancelled");

@@ -37,7 +37,10 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
 
     for (const intent of await this.intentsService.getByState("open")) {
       if (intent.deadline <= now) {
-        await this.intentsService.update(intent.intentId, { state: "expired" });
+        // Atomic guard: a concurrent user cancel() or solver accept() may have
+        // already transitioned this intent out of "open" — skip it if so.
+        const expired = await this.intentsService.expireIfOpen(intent.intentId);
+        if (!expired) continue;
         // Audit trail (issue #62): system-driven expiration.
         this.intentsService.appendAuditEntry(
           intent.intentId,
@@ -75,11 +78,13 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
   ) {
     const reason = "accepted intent not filled before deadline";
 
-    await this.intentsService.update(intentId, {
-      state: "slashed",
+    // Atomic guard: a concurrent solver fill() may have already transitioned
+    // this intent out of "accepted" — skip slashing if so.
+    const slashed = await this.intentsService.slashIfAccepted(intentId, {
       slashedAt: now,
       slashReason: reason,
     });
+    if (!slashed) return;
     this.intentsGateway.broadcast({ type: "intent_slashed", intentId, solver, reason });
 
     if (!solver) {

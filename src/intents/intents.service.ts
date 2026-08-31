@@ -201,6 +201,35 @@ export class IntentsService implements OnModuleDestroy {
     return this.repo.fillIfAccepted(id, solver, patch);
   }
 
+  /**
+   * Atomically cancel an intent only if it is currently "open".
+   * Returns null when the intent is not found or is not in the "open" state
+   * (e.g. a concurrent accept() or sweeper expiry already transitioned it).
+   */
+  async cancelIfOpen(id: string): Promise<Intent | null> {
+    return this.repo.cancelIfOpen(id);
+  }
+
+  /**
+   * Atomically expire an intent only if it is currently "open".
+   * Used by the sweeper so a concurrent user cancel() or solver accept()
+   * always wins the race.
+   */
+  async expireIfOpen(id: string): Promise<Intent | null> {
+    return this.repo.expireIfOpen(id);
+  }
+
+  /**
+   * Atomically slash an intent only if it is currently "accepted".
+   * Used by the sweeper so a concurrent solver fill() always wins the race.
+   */
+  async slashIfAccepted(
+    id: string,
+    patch: { slashedAt: number; slashReason: string },
+  ): Promise<Intent | null> {
+    return this.repo.slashIfAccepted(id, patch);
+  }
+
   // ---------------------------------------------------------------------------
   // Audit trail (issue #217 / #62)
   // ---------------------------------------------------------------------------
