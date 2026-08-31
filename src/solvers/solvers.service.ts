@@ -1,6 +1,19 @@
 import { Inject, Injectable } from "@nestjs/common";
+import { SupportedChain } from "../intents/intents.types";
 import { SOLVERS_REPOSITORY, ISolversRepository } from "./solvers.repository";
 import { SolverRecord } from "./solvers.types";
+
+export function solverSupports(
+  solver: Pick<SolverRecord, "supportedChains" | "supportedTokens">,
+  chain: SupportedChain | string,
+  token: string,
+): boolean {
+  if (!solver.supportedChains.includes(chain as SupportedChain) && chain !== "*") {
+    return false;
+  }
+  const normalizedToken = token.toUpperCase();
+  return solver.supportedTokens.some((supportedToken) => supportedToken.toUpperCase() === normalizedToken);
+}
 
 /**
  * Orchestration layer for solver records.

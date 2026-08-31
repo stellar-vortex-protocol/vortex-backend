@@ -1,13 +1,20 @@
 import {
+  BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   NotFoundException,
   Param,
   Post,
+  Query,
+  Inject,
+  forwardRef,
 } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
-import { SolversService } from "./solvers.service";
+import { IntentsService } from "../intents/intents.service";
+import { ListIntentsDto } from "../intents/dto/list-intents.dto";
+import { SolversService, solverSupports } from "./solvers.service";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
 import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
 import { verifyStellarSignature, buildSolverStatusMessage } from "../common/stellar-signature";
@@ -15,7 +22,11 @@ import { verifyStellarSignature, buildSolverStatusMessage } from "../common/stel
 @ApiTags("solvers")
 @Controller("api/v1/solvers")
 export class SolversController {
-  constructor(private readonly solversService: SolversService) {}
+  constructor(
+    private readonly solversService: SolversService,
+    @Inject(forwardRef(() => IntentsService))
+    private readonly intentsService: IntentsService,
+  ) {}
 
   @Post()
   async register(@Body() dto: RegisterSolverDto) {
@@ -36,6 +47,27 @@ export class SolversController {
       (a, b) => b.fillsCompleted - a.fillsCompleted,
     );
     return { solvers, count: solvers.length };
+  }
+
+  @Get(":address/eligible-intents")
+  async getEligibleIntents(@Param("address") address: string, @Query() dto: ListIntentsDto) {
+    const solver = await this.solversService.get(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+    if (!solver.isActive) throw new ForbiddenException("Solver is not active");
+
+    const open = await this.intentsService.getByState("open");
+    const eligible = open.filter((intent) =>
+      solverSupports(solver, intent.srcChain, intent.srcToken.symbol),
+    );
+
+    const limit = Math.min(dto.limit ?? 20, 100);
+    const offset = dto.offset ?? 0;
+    if ((dto.limit ?? 20) > 100) {
+      throw new BadRequestException("Limit exceeds maximum allowed value of 100");
+    }
+
+    const page = eligible.slice(offset, offset + limit);
+    return { intents: page, total: eligible.length, count: eligible.length, limit, offset };
   }
 
   @Get(":address")
