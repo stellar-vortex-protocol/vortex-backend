@@ -10,7 +10,11 @@ import { ApiTags } from "@nestjs/swagger";
 import { SolversService } from "./solvers.service";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
 import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
-import { verifyStellarSignature, buildSolverStatusMessage } from "../common/stellar-signature";
+import {
+  verifyStellarSignature,
+  buildRegisterMessage,
+  buildSolverStatusMessage,
+} from "../common/stellar-signature";
 
 @ApiTags("solvers")
 @Controller("api/v1/solvers")
@@ -19,6 +23,8 @@ export class SolversController {
 
   @Post()
   async register(@Body() dto: RegisterSolverDto) {
+    verifyStellarSignature(dto.address, buildRegisterMessage(dto.address), dto.proofSignature);
+
     return this.solversService.register({
       address: dto.address,
       name: dto.name,
@@ -71,7 +77,9 @@ export class SolversController {
   }
 
   @Post(":address/deregister")
-  async deregisterSolver(@Param("address") address: string) {
+  async deregisterSolver(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
+    verifyStellarSignature(address, buildSolverStatusMessage("deregister", address), dto.signature);
+
     const solver = await this.solversService.deregister(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return {
@@ -82,14 +90,18 @@ export class SolversController {
   }
 
   @Post(":address/deactivate")
-  async deactivate(@Param("address") address: string) {
+  async deactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
+    verifyStellarSignature(address, buildSolverStatusMessage("deactivate", address), dto.signature);
+
     const solver = await this.solversService.deactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
   }
 
   @Post(":address/reactivate")
-  async reactivate(@Param("address") address: string) {
+  async reactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
+    verifyStellarSignature(address, buildSolverStatusMessage("reactivate", address), dto.signature);
+
     const solver = await this.solversService.reactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
