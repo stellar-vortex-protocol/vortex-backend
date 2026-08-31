@@ -37,7 +37,27 @@ export const envValidationSchema = Joi.object({
       otherwise: Joi.string().allow("").default(""),
     }),
 
+  ONCHAIN_INTENTS_ENABLED: Joi.boolean().default(false),
   CORS_ORIGIN: Joi.string().default("*"),
+  WS_MAX_CONNECTIONS: Joi.number().integer().min(0).default(1000),
+  SOROBAN_FEE_PERCENTILE: Joi.string()
+    .valid(
+      "min",
+      "mode",
+      "p10",
+      "p20",
+      "p30",
+      "p40",
+      "p50",
+      "p60",
+      "p70",
+      "p80",
+      "p90",
+      "p95",
+      "p99",
+      "max",
+    )
+    .default("p50"),
 
   // ── Persistence adapter selection ─────────────────────────────────────────
   // Controls which repository adapter is used for intents and solvers.
