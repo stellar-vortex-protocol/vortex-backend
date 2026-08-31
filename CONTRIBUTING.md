@@ -292,6 +292,13 @@ The validation schema in `src/config/env.validation.ts` documents every
 variable with Joi — run `npm run dev` and check the startup error if any
 variable fails validation.
 
+### License and file headers
+
+This repository is licensed under the [MIT License](./LICENSE). Because the
+project is permissive by default, source files do not require a per-file SPDX or
+copyright banner; just keep the repo-level license in place and avoid adding
+custom header text that conflicts with it.
+
 ---
 
 ## Regenerating the API client SDK
@@ -310,7 +317,10 @@ to collect Swagger metadata, and writes three files to `src/generated/`:
 - `api-types.ts` — TypeScript types for all paths, operations, and schemas
 - `index.ts` — re-export entry point
 
-Commit these files as part of the same PR that changes the API surface.
+The generated SDK follows the backend's release tags (`vX.Y.Z`) for versioning,
+so the publish workflow uses the Git tag as the SDK version when the package is
+published to npm. Commit these files as part of the same PR that changes the API
+surface.
 
 ---
 
