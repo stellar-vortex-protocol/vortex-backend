@@ -160,8 +160,9 @@ export class IntentsController {
       throw new BadRequestException("Limit exceeds maximum allowed value of 100");
     }
 
+    const allEntries = this.intentsService.getAuditLog(id);
     const entries = this.intentsService.getAuditLog(id, limit, offset);
-    const total = this.intentsService.getAuditLog(id).length;
+    const total = allEntries.length;
     return { intentId: id, entries, total, limit, offset };
   }
 
