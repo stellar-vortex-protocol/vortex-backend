@@ -46,6 +46,8 @@ export const envValidationSchema = Joi.object({
   // to a live database.  Intended for production / staging.
   INTENTS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
   SOLVERS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
+  INTENT_RETENTION_DAYS: Joi.number().min(1).default(30),
+  INTENT_RETENTION_SWEEP_MS: Joi.number().min(1000).default(60000),
 
   // ── Observability ─────────────────────────────────────────────────────────
   // Sentry DSN for error alerting.  Omit (or leave blank) to disable Sentry.

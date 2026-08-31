@@ -56,6 +56,12 @@ export interface IIntentsRepository {
   update(id: string, patch: Partial<Intent>): Intent | null | Promise<Intent | null>;
 
   /**
+   * Remove a stored intent. Used only for in-memory retention sweeps for stale
+   * terminal-state records; Prisma-backed stores ignore this call by design.
+   */
+  delete(id: string): boolean | Promise<boolean>;
+
+  /**
    * Atomically transition an intent from `open` → `accepted` only if it is
    * currently in the `open` state.  Mirrors the DB pattern:
    *   UPDATE intents SET state='accepted', solver=$2, deadline=$3
@@ -128,6 +134,10 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     const updated: Intent = { ...existing, ...patch };
     this.store.set(id, updated);
     return updated;
+  }
+
+  delete(id: string): boolean {
+    return this.store.delete(id);
   }
 
   acceptIfOpen(id: string, solver: string, newDeadline: number): Intent | null {
