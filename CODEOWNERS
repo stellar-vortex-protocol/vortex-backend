@@ -1,0 +1,19 @@
+# CODEOWNERS
+# Keep the most specific rules above broad fallback rules. GitHub uses the
+# last matching rule, so the general ownership rule is intentionally placed at
+# the end of the file.
+
+# Core protocol and platform areas
+/src/soroban/ @vortex-protocol/soroban
+/src/intents/ @vortex-protocol/intents
+/src/solvers/ @vortex-protocol/solvers
+/src/routing/ @vortex-protocol/routing
+/src/tokens/ @vortex-protocol/tokens
+/src/common/ @vortex-protocol/platform
+/src/config/ @vortex-protocol/platform
+/src/stats/ @vortex-protocol/stats
+/prisma/ @vortex-protocol/data-models
+/.github/workflows/ @vortex-protocol/platform
+/docs/ @vortex-protocol/docs
+
+* @vortex-protocol/maintainers
