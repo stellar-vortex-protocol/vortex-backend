@@ -103,6 +103,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # ── Env drift check ────────────────────────────────────────────────────
+      # Fast, early-failing check that env.validation.ts, .env*.example, and
+      # configuration.ts's process.env reads all agree on the same variable set.
+      - name: Check env var drift
+        run: npx tsx scripts/check-env-drift.ts
+
       # ── Prisma ──────────────────────────────────────────────────────────────
       - name: Validate Prisma schema
         run: npm run db:validate
