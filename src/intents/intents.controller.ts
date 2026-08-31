@@ -338,7 +338,37 @@ export class IntentsController {
     description: "Rate limit exceeded — max 20 quote requests per 60 s per IP",
   })
   @ApiOkResponse({ type: QuoteResponseDto })
-  quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {
+  async quote(@Body() dto: QuoteRequestDto): Promise<QuoteResponseDto> {
+    // Security fix: quote() is intentionally unauthenticated for price
+    // discovery, but when dto.intentId is supplied we persist quotedDstAmount
+    // onto that intent. Without validation, any caller who knows an intent's
+    // UUID (public — returned from list/create and broadcast over the WS
+    // feed) could overwrite quotedDstAmount with a value computed from an
+    // arbitrary, unrelated token pair/amount. We keep this endpoint
+    // ownership-agnostic (no signature required, matching its public
+    // price-discovery role) but require the request's src/dst token and
+    // amount to strictly match the target intent's stored fields, rejecting
+    // any mismatch. Requiring proof of ownership was considered but rejected:
+    // it would mean adding signature verification to this endpoint, which is
+    // explicitly out of scope and inconsistent with quote() remaining public.
+    let targetIntent: Awaited<ReturnType<typeof this.intentsService.get>> = undefined;
+    if (dto.intentId) {
+      targetIntent = await this.intentsService.get(dto.intentId);
+      if (!targetIntent) {
+        throw new NotFoundException("Intent not found");
+      }
+      const mismatched =
+        targetIntent.srcChain !== dto.srcChain ||
+        targetIntent.srcToken?.address?.toLowerCase() !== (dto.srcTokenAddress ?? "").toLowerCase() ||
+        targetIntent.dstToken?.contract?.toLowerCase() !== (dto.dstTokenContract ?? "").toLowerCase() ||
+        targetIntent.srcAmount !== dto.srcAmount;
+      if (mismatched) {
+        throw new BadRequestException(
+          "Quote request does not match the target intent's srcChain/srcToken/dstToken/srcAmount",
+        );
+      }
+    }
+
     const solvers = this.solversService.getAll().filter((s) => s.isActive);
 
     // #219: use typed resolveSrcToken / resolveDstToken — no more any casts
@@ -418,7 +448,7 @@ export class IntentsController {
       })
       .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
 
-    if (dto.intentId && quotes.length > 0) {
+    if (dto.intentId && targetIntent && quotes.length > 0) {
       await this.intentsService.update(dto.intentId, { quotedDstAmount: quotes[0].dstAmount });
     }
 
