@@ -380,6 +380,41 @@ interest.
 For detailed mapping rules (e.g. how to label issues from the contributor backlog),
 see [docs/LABEL_TAXONOMY.md](./docs/LABEL_TAXONOMY.md).
 
+## Drips Wave contributor accounting
+
+This project offers a points-based contributor incentive program (Drips Wave).
+Contributors who close issues earn points that are recorded in a ledger.
+
+### How points are awarded
+
+Every issue in the contributor backlog has a fixed point value:
+- **High complexity**: 200 points
+- **Medium complexity**: 150 points
+
+When your PR closes an issue, the points for that issue are credited to your contributor account.
+See [docs/DRIPS_WAVE_LEDGER.md](./docs/DRIPS_WAVE_LEDGER.md) for the full ledger and accounting rules.
+
+### For PR authors
+
+When you open a PR that solves an issue from the backlog, include a `Closes` tag in your
+PR description to link the PR to the issue number:
+
+```markdown
+## Description
+
+Brief description of the changes.
+
+Closes #<issue-number>
+```
+
+This creates an auditable record that ties your PR to a specific point value. The ledger
+is updated when the PR is merged.
+
+### Disputes and escalation
+
+If there's a disagreement about points, attribution, or the ledger record, see the
+escalation process in [docs/DRIPS_WAVE_LEDGER.md](./docs/DRIPS_WAVE_LEDGER.md).
+
 ---
 
 ## Submitting a pull request
