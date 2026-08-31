@@ -62,12 +62,17 @@ function checkContractIdEnvVars(
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Issue #20 — trust the first proxy hop so Helmet/HSTS sees the real
+  // forwarded protocol when TLS terminates upstream behind nginx/ALB.
+  app.set("trust proxy", 1);
+
   // Issue #46 — explicit, tight body-size cap (DTOs are tiny)
   app.use(json({ limit: "10kb" }));
 
-  // Issue #43 — baseline HTTP security headers via helmet.
-  // Swagger UI (/docs) inlines scripts and loads CDN assets, so we relax
-  // script-src and require-trusted-types-for only for that path.
+  // Issue #43 / #302 — verify the security headers we rely on in production.
+  // HSTS is explicitly configured so it is not silently skipped when a TLS
+  // terminator sits in front of Express and `req.secure` is false unless the
+  // proxy chain is trusted.
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -79,6 +84,11 @@ async function bootstrap() {
           imgSrc: ["'self'", "data:", "cdn.jsdelivr.net"],
           connectSrc: ["'self'"],
         },
+      },
+      hsts: {
+        maxAge: 31536000,
+        includeSubDomains: true,
+        preload: true,
       },
       // Swagger UI uses inline event handlers; this policy would block it
       crossOriginEmbedderPolicy: false,

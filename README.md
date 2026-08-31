@@ -150,6 +150,17 @@ Store secrets (`SOROBAN_SIGNING_KEY`, `DATABASE_URL`) in a secrets manager
 (AWS Secrets Manager, HashiCorp Vault, etc.) and inject them at runtime;
 never commit filled-in values to version control.
 
+### Verified security headers
+
+The Nest app boots with Helmet enabled and explicitly configures HSTS for HTTPS
+origins. The backend also trusts a single proxy hop (`app.set("trust proxy", 1)`) so a TLS-terminating
+load balancer can pass through `X-Forwarded-Proto: https` and allow Helmet/HSTS to
+emit `Strict-Transport-Security` rather than silently skipping it behind a proxy.
+
+The HTTP response set is verified in the e2e suite to include Helmet defaults such as
+`X-Content-Type-Options: nosniff` alongside the configured HSTS policy. This is the
+baseline transport-security posture the service relies on in production.
+
 ---
 
 ## Supported chains
