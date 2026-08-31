@@ -140,6 +140,8 @@ Rules:
 - Optional fields use `@IsOptional()` + `@ApiPropertyOptional()` and are typed
   with `?:` (not `| undefined`).
 - Amount fields are `string` (bigint-as-string) with a `@Matches(/^\d+$/)` guard.
+- String fields with a clear bound must also declare `@MaxLength(...)` (for example,
+  Ed25519 signatures are base64-encoded 64-byte values and are capped at 88 chars).
 - Custom validators live in `src/common/validators/`.
 
 ### Logger
