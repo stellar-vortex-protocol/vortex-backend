@@ -131,6 +131,60 @@ jobs:
       - name: E2E tests
         run: npm run test:e2e
 
+  # ── Migration rollback verification ────────────────────────────────────────
+  # For every prisma/migrations/*/down.sql, applies migration.sql then
+  # down.sql against a fresh Postgres and asserts the schema returns to its
+  # pre-migration (empty) state. See prisma/migrations/README.md.
+  migration-rollback:
+    name: Migration rollback verification
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vortex
+          POSTGRES_PASSWORD: vortex
+          POSTGRES_DB: vortex_rollback_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: vortex
+      PGPASSWORD: vortex
+      PGDATABASE: vortex_rollback_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply each migration's up then down script and verify schema is restored
+        run: |
+          set -euo pipefail
+          for dir in prisma/migrations/*/; do
+            name=$(basename "$dir")
+            up="$dir/migration.sql"
+            down="$dir/down.sql"
+            [ -f "$down" ] || continue
+
+            echo "::group::$name"
+            before=$(psql -Atc "select tablename from pg_tables where schemaname='public' order by 1")
+            psql -v ON_ERROR_STOP=1 -f "$up"
+            psql -v ON_ERROR_STOP=1 -f "$down"
+            after=$(psql -Atc "select tablename from pg_tables where schemaname='public' order by 1")
+
+            if [ "$before" != "$after" ]; then
+              echo "Schema after down.sql does not match pre-migration state for $name"
+              echo "before: $before"
+              echo "after:  $after"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
+
   # ── Docker build verification (#131) ──────────────────────────────────────
   # Ensures every push that changes application code doesn't silently break
   # the Dockerfile. Image publishing to a registry can be wired up separately
