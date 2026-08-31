@@ -33,6 +33,15 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
   (Closes #137)
 
 ### Fixed
+- Added pagination envelopes to `GET /api/v1/intents/open` and
+  `GET /api/v1/intents/user/:address` with a safe default page size and
+  validation guardrails (Closes #277)
+- Added bounded eviction for stale terminal-state intents in the in-memory
+  store, keeping the retention window configurable and auditable (Closes #278)
+- Added `GET /api/v1/solvers/:address/eligible-intents` to filter open intents
+  by solver capability matches (Closes #279)
+- Added pagination to `GET /api/v1/intents/:id/audit` while preserving the
+  oldest-first log ordering (Closes #281)
 - `TokensModule` was missing `exports: [TokensService]` — `IntentsController`
   could not inject `TokensService` outside the Jest test environment
 - `IntentsModule` was missing `exports: [IntentsGateway]` — `StatsService`
