@@ -114,6 +114,8 @@ export class SolverRegistryService {
       );
       return { submitted: false, simulated: true, detail };
     } catch (err) {
+      // Issue #300 — the SDK may include serialized transaction/XDR details in
+      // thrown errors; do not log the signing key or any raw secret here.
       const detail = err instanceof Error ? err.message : String(err);
       console.error(
         `[solver-registry] slash call errored for solver=${params.solverAddress} intent=${params.intentId}: ${detail}`,
