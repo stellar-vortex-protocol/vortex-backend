@@ -340,6 +340,24 @@ The CI job `commitlint` checks the PR title on every pull request. Squash
 merges are preferred so that the merge commit title is the canonical changelog
 entry.
 
+### Updating the changelog
+
+When working on a feature or fix that affects users, add an entry to `CHANGELOG.md`
+under `[Unreleased]` before opening your PR:
+
+| Commit Type | Changelog Section | Example |
+|-------------|-------------------|---------|
+| `feat(...)` | `Added` | A new endpoint or behavior |
+| `fix(...)` | `Fixed` | A bug fix or behavioral correction |
+| `perf(...)` | `Changed` | Performance improvement |
+| `refactor(...)` | `Changed` | Major structural change affecting users |
+| `docs(...)` | `Documentation` | User-facing documentation changes |
+| `chore(...)` | — | Skip (internal tooling, no user-visible change) |
+| `test(...)` | — | Skip (internal tests, no user-visible change) |
+
+For details on changelog format and section definitions, see the instructions in
+`CHANGELOG.md`.
+
 ---
 
 ## GitHub issue labels
