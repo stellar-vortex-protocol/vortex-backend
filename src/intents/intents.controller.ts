@@ -39,6 +39,7 @@ import { ListIntentsDto } from "./dto/list-intents.dto";
 import { UserThrottlerGuard } from "./user-throttler.guard";
 import {
   verifyStellarSignature,
+  buildAcceptMessage,
   buildCancelMessage,
   buildFillMessage,
 } from "../common/stellar-signature";
@@ -228,6 +229,9 @@ export class IntentsController {
     if (!solver.bondAmount || BigInt(solver.bondAmount) <= 0n) {
       throw new ForbiddenException("Solver has insufficient bond");
     }
+
+    // Verify the solver controls the claimed address (mirrors fill()/cancel()).
+    verifyStellarSignature(dto.solver, buildAcceptMessage(id, dto.solver), dto.signature);
 
     const updated = await this.intentsService.acceptIfOpen(id, dto.solver);
     if (!updated) {
