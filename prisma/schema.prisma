@@ -94,6 +94,8 @@ model Solver {
   isActive         Boolean  @default(true) @map("is_active")
   /// Unix epoch seconds.
   registeredAt     Int      @map("registered_at")
+  /// Unix epoch seconds of the solver's most recent activity (registration, fill, or status change).
+  lastActiveAt     Int      @map("last_active_at")
   /// Chains this solver supports (stored as JSON array of SupportedChain values).
   supportedChains  Json     @map("supported_chains")
   /// Token symbols this solver can handle.

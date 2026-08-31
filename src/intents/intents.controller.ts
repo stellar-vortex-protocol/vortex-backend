@@ -293,6 +293,8 @@ export class IntentsController {
       throw new ConflictException(`Intent is ${current?.state ?? "unknown"}, cannot fill`);
     }
 
+    await this.solversService.recordSuccessfulFill(dto.solver);
+
     this.intentsGateway.broadcast({
       type: "intent_filled",
       intentId: id,
