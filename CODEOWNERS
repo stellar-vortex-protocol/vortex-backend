@@ -1,0 +1,11 @@
+# CODEOWNERS
+#
+# High-risk paths below require review from a qualified code owner before a
+# PR can merge into main. These are enforced via the repository's branch
+# protection rule "Require review from Code Owners" (see SECURITY.md for the
+# rationale and prior-issue history).
+
+/src/soroban/                        @vortex-protocol/security-reviewers
+/src/common/stellar-signature.ts     @vortex-protocol/security-reviewers
+/prisma/schema.prisma                @vortex-protocol/security-reviewers
+/src/soroban/signer.service.ts       @vortex-protocol/security-reviewers
