@@ -20,7 +20,8 @@ Closes #135
 8. [Environment variables](#environment-variables)
 9. [Regenerating the API client SDK](#regenerating-the-api-client-sdk)
 10. [Commit messages](#commit-messages)
-11. [Submitting a pull request](#submitting-a-pull-request)
+11. [GitHub issue labels](#github-issue-labels)
+12. [Submitting a pull request](#submitting-a-pull-request)
 
 ---
 
@@ -338,6 +339,28 @@ chore: regenerate API client SDK after adding quote endpoint
 The CI job `commitlint` checks the PR title on every pull request. Squash
 merges are preferred so that the merge commit title is the canonical changelog
 entry.
+
+---
+
+## GitHub issue labels
+
+When creating or triaging GitHub Issues, use the label taxonomy defined in
+[docs/LABEL_TAXONOMY.md](./docs/LABEL_TAXONOMY.md) to categorize work by difficulty
+and area. This helps contributors discover work that matches their skill level and
+interest.
+
+### Quick reference
+
+- **`good-first-issue`** — Suitable for newcomers; isolated, self-contained, no major
+  prerequisites blocking
+- **`help-wanted`** — Open to anyone; clear scope but could benefit from fresh eyes
+- **`category/*`** — Categorize by area: `category/backend`, `category/security`,
+  `category/devops`, `category/governance`
+- **`status/*`** — Track lifecycle: `status/in-progress`, `status/blocked`,
+  `status/ready-to-merge`
+
+For detailed mapping rules (e.g. how to label issues from the contributor backlog),
+see [docs/LABEL_TAXONOMY.md](./docs/LABEL_TAXONOMY.md).
 
 ---
 
