@@ -2,12 +2,53 @@ name: CD
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  docker:
+  staging:
+    name: Deploy to staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: staging
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t vortex-backend:${GITHUB_REF_NAME} .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build staging image
+        run: cp .env.testnet.example .env && docker build -t vortex-backend:staging .
+
+      - name: Run staging smoke test
+        run: |
+          docker run -d --rm --name vortex-backend-staging \
+            -p 4000:4000 \
+            --env-file .env \
+            -e NODE_ENV=staging \
+            vortex-backend:staging
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4000/health; then
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Staging smoke test failed" >&2
+          exit 1
+
+  production:
+    name: Deploy to production
+    needs: staging
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build -t vortex-backend:production .
