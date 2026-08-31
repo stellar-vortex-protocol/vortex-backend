@@ -3,6 +3,7 @@ import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
+import { logger } from "../common/logger";
 
 const SWEEP_INTERVAL_MS = 30_000;
 
@@ -21,7 +22,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
   onModuleInit() {
     this.interval = setInterval(() => {
       this.sweep().catch((err) => {
-        console.error(`[sweeper] sweep failed: ${err instanceof Error ? err.message : err}`);
+        logger.error(`[sweeper] sweep failed: ${err instanceof Error ? err.message : err}`);
       });
     }, SWEEP_INTERVAL_MS);
   }
@@ -85,7 +86,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     if (!solver) {
       // Shouldn't happen in practice — an "accepted" intent always has a
       // solver — but don't let a bad record throw the whole sweep cycle.
-      console.error(`[sweeper] intent ${intentId} was accepted with no solver on record`);
+      logger.error(`[sweeper] intent ${intentId} was accepted with no solver on record`);
       return;
     }
 
@@ -96,8 +97,6 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       intentId,
       reason,
     });
-    console.log(
-      `[sweeper] slashed solver=${solver} for intent=${intentId}: ${result.detail}`,
-    );
+    logger.info(`[sweeper] slashed solver=${solver} for intent=${intentId}: ${result.detail}`);
   }
 }

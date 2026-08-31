@@ -47,4 +47,8 @@ export class SorobanService {
   ): Promise<Transaction> {
     return this.server.prepareTransaction(transaction) as Promise<Transaction>;
   }
+
+  submitTransaction(transaction: Transaction): Promise<SorobanRpc.Api.SendTransactionResponse> {
+    return this.server.sendTransaction(transaction);
+  }
 }
