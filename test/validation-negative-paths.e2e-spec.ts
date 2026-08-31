@@ -26,6 +26,27 @@ describe("Validation Negative Paths (e2e)", () => {
     minDstAmount: "990000",
   };
 
+  describe("Intent creation validation", () => {
+    it("should return 400 for same-asset self-swaps on Stellar", async () => {
+      const res = await request(app.getHttpServer())
+        .post("/api/v1/intents")
+        .send({
+          ...validCreateBody,
+          srcChain: "stellar",
+          srcTokenAddress: validCreateBody.dstTokenContract,
+          srcTokenSymbol: "USDC",
+          srcAmount: "1000000",
+          dstTokenContract: validCreateBody.dstTokenContract,
+          dstTokenSymbol: "USDC",
+        })
+        .expect(400);
+
+      expect(res.body.message).toEqual(
+        expect.arrayContaining([expect.stringContaining("Self-swaps are not allowed")]),
+      );
+    });
+  });
+
   describe("Pagination validation", () => {
     it("should return 400 for malformed limit (NaN)", async () => {
       const res = await request(app.getHttpServer())
@@ -99,6 +120,20 @@ describe("Validation Negative Paths (e2e)", () => {
       const res = await request(app.getHttpServer())
         .post(`/api/v1/intents/${intentId}/fill`)
         .send({ solver: "SOLVER_ALPHA", fillAmount: "-1000", txHash: "test" })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it("should return 400 for oversized signature strings", async () => {
+      const intentId = await createAndAcceptIntent();
+      const res = await request(app.getHttpServer())
+        .post(`/api/v1/intents/${intentId}/fill`)
+        .send({
+          solver: "SOLVER_ALPHA",
+          fillAmount: "1000",
+          txHash: "test",
+          signature: "A".repeat(89),
+        })
         .expect(400);
       expect(res.body.error).toBeDefined();
     });
