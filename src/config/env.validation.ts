@@ -19,6 +19,7 @@ export const envValidationSchema = Joi.object({
   SOROBAN_RPC_URL: Joi.string().uri().default("https://soroban-testnet.stellar.org"),
   SETTLEMENT_CONTRACT_ID: Joi.string().allow("").default(""),
   SOLVER_REGISTRY_CONTRACT_ID: Joi.string().allow("").default(""),
+  STELLAR_SIGNER_SECRET_KEY: Joi.string().allow("").default(""),
 
   // Secret key for the backend's own Soroban signer (submits on-chain writes
   // such as settlement and slashing calls). No default is provided anywhere
