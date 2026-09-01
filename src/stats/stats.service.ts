@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { IntentsService } from "../intents/intents.service";
+import { SUPPORTED_CHAINS } from "../intents/intents.types";
 import { SolversService } from "../solvers/solvers.service";
 import { IntentsGateway } from "../intents/intents.gateway";
 
