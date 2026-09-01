@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { scValToNative, SorobanRpc } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 import { SorobanService } from "./soroban.service";
+import { SolversService } from "../solvers/solvers.service";
 
 const POLL_INTERVAL_MS = 10_000;
 
@@ -40,6 +41,7 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly sorobanService: SorobanService,
     private readonly configService: ConfigService<AppConfig, true>,
+    private readonly solversService: SolversService,
   ) {}
 
   onModuleInit() {
@@ -113,10 +115,64 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     const eventName = typeof topic[0] === "string" ? topic[0] : undefined;
     if (eventName === "intent_filled") {
       this.handleIntentFilled(event, topic);
+    } else if (eventName === "solver_slashed") {
+      // Fire-and-forget: penalty confirmation is non-blocking relative to
+      // ingestion — a reconciliation failure is logged but never stalls the
+      // poll loop.
+      this.handleSolverSlashed(event, topic).catch((err) =>
+        console.error(
+          `[event-ingestion] solver_slashed reconciliation failed at ledger=${event.ledger}: ${(err as Error).message}`,
+        ),
+      );
     }
   }
 
   private handleIntentFilled(event: SorobanRpc.Api.EventResponse, topic: unknown[]): void {
     console.log(`[event-ingestion] intent_filled event at ledger=${event.ledger} txHash=${event.txHash}`, topic);
+  }
+
+  /**
+   * Handles a solver_slashed event emitted by the Soroban solver-registry
+   * contract once a slash transaction is confirmed on-chain.
+   *
+   * Expected topic layout (positions 1+ after the event name at position 0):
+   *   topic[1] — solver address (string)
+   *   topic[2] — intentId (string)
+   *   topic[3] — slash amount (string or bigint)
+   *
+   * Calls SolversService.confirmPenalty() which reconciles bondAmount and
+   * marks the penalty as "confirmed" in the in-memory pendingPenalties map.
+   *
+   * If topic values cannot be extracted (malformed event), a warning is logged
+   * and the event is silently skipped — this protects against a bad contract
+   * event bringing down the ingestion loop.
+   */
+  private async handleSolverSlashed(
+    event: SorobanRpc.Api.EventResponse,
+    topic: unknown[],
+  ): Promise<void> {
+    const solverAddress = typeof topic[1] === "string" ? topic[1] : undefined;
+    const intentId = typeof topic[2] === "string" ? topic[2] : undefined;
+    const rawAmount = topic[3];
+    const slashAmount =
+      typeof rawAmount === "bigint"
+        ? rawAmount.toString()
+        : typeof rawAmount === "string"
+          ? rawAmount
+          : undefined;
+
+    if (!solverAddress || !intentId || !slashAmount) {
+      console.warn(
+        `[event-ingestion] solver_slashed event at ledger=${event.ledger} has unexpected topic shape; skipping reconciliation`,
+        { solverAddress, intentId, slashAmount, rawTopic: topic },
+      );
+      return;
+    }
+
+    console.log(
+      `[event-ingestion] solver_slashed confirmed: solver=${solverAddress} intentId=${intentId} slashAmount=${slashAmount} ledger=${event.ledger}`,
+    );
+
+    await this.solversService.confirmPenalty(intentId, slashAmount);
   }
 }

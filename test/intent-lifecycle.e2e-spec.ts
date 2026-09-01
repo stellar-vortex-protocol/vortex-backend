@@ -11,6 +11,7 @@
 import { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { createTestApp } from "./utils/create-test-app";
+import { MAX_OPEN_INTENTS_PER_USER } from "../src/intents/intents.service";
 
 const BASE_INTENT = {
   user: "GLIFECYCLEE2ETEST12",
@@ -194,5 +195,69 @@ describe("Intent lifecycle e2e (create → accept → fill)", () => {
       .post(`/api/v1/intents/${intentId}/accept`)
       .send({ solver: "SOLVER_ALPHA" })
       .expect(409);
+  });
+
+  /**
+   * Per-user open-intent cap (issue: per-user open-intent cap)
+   *
+   * Creates exactly MAX_OPEN_INTENTS_PER_USER intents for a dedicated user,
+   * asserts the (N+1)th creation returns 409 with an explanatory message, then
+   * asserts that transitioning one existing intent out of open/accepted state
+   * (here: cancel) frees up the slot and allows creation to succeed again.
+   *
+   * NOTE: the seed data already occupies the store but belongs to different
+   * user addresses, so this test uses a unique address that starts at 0 open
+   * intents.
+   */
+  it(`rejects the (MAX+1)th open intent for a user with 409 and succeeds again after one is cancelled`, async () => {
+    const CAP_USER = "GCAP_TEST_USER_E2E_01";
+    const CAP_BASE = {
+      ...BASE_INTENT,
+      user: CAP_USER,
+    };
+
+    // Create exactly MAX_OPEN_INTENTS_PER_USER intents for this user.
+    // Use a low minDstAmount so the validation never blocks us.
+    const createdIds: string[] = [];
+    for (let i = 0; i < MAX_OPEN_INTENTS_PER_USER; i++) {
+      const res = await request(app.getHttpServer())
+        .post("/api/v1/intents")
+        .send(CAP_BASE)
+        .expect(201);
+      createdIds.push(res.body.intentId as string);
+    }
+
+    expect(createdIds).toHaveLength(MAX_OPEN_INTENTS_PER_USER);
+
+    // The (MAX_OPEN_INTENTS_PER_USER + 1)th attempt must fail with 409.
+    const capRes = await request(app.getHttpServer())
+      .post("/api/v1/intents")
+      .send(CAP_BASE)
+      .expect(409);
+
+    // Error message must be distinct from the rate-limit 429 and explain the cap.
+    expect(capRes.body.message).toMatch(/cap reached/i);
+    expect(capRes.body.message).toMatch(String(MAX_OPEN_INTENTS_PER_USER));
+
+    // Cancel one existing intent to free up the slot.
+    const intentToCancel = createdIds[0];
+    await request(app.getHttpServer())
+      .post(`/api/v1/intents/${intentToCancel}/cancel`)
+      .send({ user: CAP_USER })
+      .expect(201);
+
+    // Verify the cancelled intent is no longer open.
+    const cancelledCheck = await request(app.getHttpServer())
+      .get(`/api/v1/intents/${intentToCancel}`)
+      .expect(200);
+    expect(cancelledCheck.body.state).toBe("cancelled");
+
+    // Now creation must succeed again — the cap is user+state-scoped, not absolute.
+    const afterCancelRes = await request(app.getHttpServer())
+      .post("/api/v1/intents")
+      .send(CAP_BASE)
+      .expect(201);
+    expect(afterCancelRes.body.state).toBe("open");
+    expect(afterCancelRes.body.user).toBe(CAP_USER);
   });
 });

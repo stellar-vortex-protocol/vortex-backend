@@ -89,15 +89,29 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    await this.solversService.recordFailedFill(solver);
+    // Step 1: record a pending penalty (optimistic fillsFailed bump).
+    // At this point the slash is detected locally but not yet confirmed
+    // on-chain.  The solver's record enters "pending" state.
+    await this.solversService.recordFailedFill(solver, intentId);
 
-    const result = await this.solverRegistryService.slashSolver({
-      solverAddress: solver,
-      intentId,
-      reason,
-    });
-    console.log(
-      `[sweeper] slashed solver=${solver} for intent=${intentId}: ${result.detail}`,
-    );
+    // Step 2: submit the on-chain slash.  If submission fails we roll back
+    // the pending penalty so the solver is not permanently penalised for a
+    // slash that was never enforced.  If it succeeds, EventIngestionService
+    // will call confirmPenalty() once the solver_slashed event arrives.
+    try {
+      const result = await this.solverRegistryService.slashSolver({
+        solverAddress: solver,
+        intentId,
+        reason,
+      });
+      console.log(
+        `[sweeper] slash submitted: solver=${solver} intent=${intentId} detail=${result.detail} — awaiting on-chain confirmation`,
+      );
+    } catch (err) {
+      console.error(
+        `[sweeper] on-chain slash submission FAILED for solver=${solver} intent=${intentId}: ${(err as Error).message} — rolling back pending penalty`,
+      );
+      await this.solversService.rollbackPenalty(intentId);
+    }
   }
 }

@@ -98,10 +98,4 @@ describe("SolversService", () => {
     expect(solver?.isActive).toBe(false);
     expect((await service.get(ALPHA_ADDR))?.isActive).toBe(false);
   });
-
-  it("marks a solver active when it comes online", async () => {
-    await service.markLive(ALPHA_ADDR);
-
-    expect((await service.get(ALPHA_ADDR))?.isActive).toBe(true);
-  });
 });

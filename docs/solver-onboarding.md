@@ -178,3 +178,32 @@ The backend runs an automated sweeper service (`IntentsSweeperService`) every 30
    - **Contract Call**: `slash(solverAddress, intentId)`
    - **Penalty**: Collateral is slashed from the solver's bond and transferred/burned according to protocol rules.
 4. **WebSocket Alert**: An `intent_slashed` event is broadcast across the feed.
+
+### Per-Chain Fill Windows
+
+When a solver calls `POST /api/v1/intents/:id/accept`, the intent's `deadline` is reset to `now + <chain fill window>`. The fill window is **chain-specific** and shorter than the open-intent deadline, reflecting the realistic settlement time for each chain:
+
+| Source chain | Fill window | Rationale |
+|---|---|---|
+| `stellar` | **120 s** (2 min) | ~5-second ledger time; solver has ample margin |
+| `base` | **600 s** (10 min) | 2-second blocks; bridging latency dominates |
+| `optimism` | **600 s** (10 min) | Same block cadence as Base |
+| `arbitrum` | **600 s** (10 min) | Sub-second blocks but L1 batch delay applies |
+| `ethereum` | **1800 s** (30 min) | 12-second slots + confirmation depth |
+| `polygon` | **900 s** (15 min) | ~2-second blocks; moderate finality |
+| `avalanche` | **600 s** (10 min) | Fast finality; bridge latency dominates |
+| *(unknown)* | **600 s** | Default fallback |
+
+> **Operator note:** Make sure your solver bot completes on-chain settlement and calls
+> `POST /api/v1/intents/:id/fill` **before** the chain's fill window elapses.
+> Exceeding the fill window triggers slashing regardless of the on-chain status
+> of your settlement transaction. Plan for network latency and retry budgets
+> within these windows, especially for Ethereum.
+
+### Pending vs. Confirmed Slash
+
+When the sweeper detects a missed deadline it immediately transitions the intent to `slashed` and records a **pending penalty** on the solver's record. The `fillsFailed` counter is incremented at this point.
+
+The pending penalty is then submitted on-chain via `SolverRegistryService.slashSolver()`. Once the chain confirms the slash event (`solver_slashed` emitted by the solver-registry contract), the solver's `bondAmount` is reconciled downward to match the on-chain balance.
+
+If the on-chain submission **never confirms** (network error, insufficient fee, contract rejection) the solver's `fillsFailed` counter may reflect a penalty that was never enforced on-chain. The backend will flag these as "unconfirmed" and operators should monitor for discrepancies between the `bondAmount` in `/api/v1/solvers/:addr/stats` and their on-chain balance. A future reconciliation pass (see on-chain settlement roadmap) will correct any divergence.

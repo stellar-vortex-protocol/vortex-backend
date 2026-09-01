@@ -27,7 +27,7 @@ function makeIntentsService(): IntentsService {
       findMany: jest.fn().mockResolvedValue([]),
     },
   } as unknown as PrismaService;
-  return new IntentsService(configService, {} as StellarTxService, prismaService);
+  return new IntentsService(new InMemoryIntentsRepository(), configService, {} as StellarTxService, prismaService);
 }
 
 function createMockClient() {

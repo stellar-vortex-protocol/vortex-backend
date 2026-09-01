@@ -28,6 +28,7 @@ import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { TokensService } from "../tokens/tokens.service";
 import { RoutingService } from "../routing/routing.service";
+import { MAX_OPEN_INTENTS_PER_USER } from "./intents.service";
 import { CreateIntentDto } from "./dto/create-intent.dto";
 import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { AcceptIntentDto } from "./dto/accept-intent.dto";
@@ -168,8 +169,23 @@ export class IntentsController {
       "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)",
   })
   @ApiBadRequestResponse({ description: "Invalid request body" })
+  @ApiConflictResponse({
+    description: `Open-intent cap reached — a single user may not hold more than ${MAX_OPEN_INTENTS_PER_USER} open/accepted intents simultaneously`,
+  })
   async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
+
+    // Enforce the per-user open-intent cap before touching anything else.
+    // This is a distinct 409 (not the rate-limit 429) so callers can
+    // differentiate "slow down" from "close some intents first".
+    const openCount = await this.intentsService.countOpenByUser(dto.user);
+    if (openCount >= MAX_OPEN_INTENTS_PER_USER) {
+      throw new ConflictException(
+        `Open-intent cap reached: user already has ${openCount} open or accepted intent(s). ` +
+          `Cancel or wait for existing intents to fill/expire before creating new ones ` +
+          `(max ${MAX_OPEN_INTENTS_PER_USER} per user).`,
+      );
+    }
 
     // #219: use typed resolveToken instead of ad-hoc duck-typed any casts
     const srcToken = this.tokensService.resolveSrcToken(

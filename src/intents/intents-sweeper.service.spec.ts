@@ -6,12 +6,16 @@ import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { InMemorySolversRepository } from "../solvers/in-memory-solvers.repository";
+import { SOLVERS_REPOSITORY } from "../solvers/solvers.repository";
 import { InMemoryIntentsRepository, INTENTS_REPOSITORY } from "./intents.repository";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
+import { SEED_SOLVER_KEYPAIRS } from "../solvers/solvers.seed";
 
-function fakeIntentsService(): IntentsService {
+const ALPHA_ADDR = SEED_SOLVER_KEYPAIRS.ALPHA.publicKey();
+
+async function buildIntentsService(): Promise<IntentsService> {
   const configService = {
     get: jest.fn().mockReturnValue(false),
   } as unknown as ConfigService<AppConfig, true>;
@@ -22,7 +26,18 @@ function fakeIntentsService(): IntentsService {
       findMany: jest.fn().mockResolvedValue([]),
     },
   } as unknown as PrismaService;
-  return new IntentsService(configService, stellarTxService, prismaService);
+
+  const module: TestingModule = await Test.createTestingModule({
+    providers: [
+      { provide: INTENTS_REPOSITORY, useClass: InMemoryIntentsRepository },
+      { provide: ConfigService, useValue: configService },
+      { provide: StellarTxService, useValue: stellarTxService },
+      { provide: PrismaService, useValue: prismaService },
+      IntentsService,
+    ],
+  }).compile();
+
+  return module.get<IntentsService>(IntentsService);
 }
 
 async function buildSolversService(): Promise<SolversService> {

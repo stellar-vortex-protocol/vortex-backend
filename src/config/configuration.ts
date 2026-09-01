@@ -15,8 +15,11 @@ export type FeePercentile =
   | "max";
 
 /**
- * Default fill-window in seconds per source chain.
- * Chains with slower finality get a longer window.
+ * Default open-intent deadline in seconds per source chain.
+ *
+ * Controls how long after creation an intent can be accepted by a solver.
+ * Values are intentionally generous — chains with slower finality get more
+ * time so solvers can confidently assess liquidity before committing.
  */
 export const CHAIN_DEADLINE_DEFAULTS: Record<string, number> = {
   stellar: 900,    // ~15 min — fast finality
@@ -28,8 +31,48 @@ export const CHAIN_DEADLINE_DEFAULTS: Record<string, number> = {
   avalanche: 1800,
 };
 
-/** Fallback when chain is not in the map. */
+/** Fallback open-intent deadline when chain is not in the map. */
 export const DEFAULT_DEADLINE_SECONDS = 1800;
+
+/**
+ * Per-chain fill-window in seconds: the time a solver has from accept to fill.
+ *
+ * Design rationale
+ * ────────────────
+ * The fill window is intentionally shorter than the full open-intent deadline
+ * (CHAIN_DEADLINE_DEFAULTS) because accept-to-fill should always be a strict
+ * subset of the total time budget.  Values are chosen to give solvers
+ * realistic execution time on each chain while keeping the slashing window
+ * fair:
+ *
+ *   stellar   120 s  — 5-second ledger time; a solver has plenty of margin.
+ *   base      600 s  — 2-second blocks; ~5-min window comfortable for bridging.
+ *   optimism  600 s  — same as Base (same block cadence).
+ *   arbitrum  600 s  — sub-second blocks but finality waits for L1 batch.
+ *   ethereum  1800 s — 12-second slots + confirmation depth = larger window.
+ *   polygon   900 s  — ~2-second blocks; moderate finality.
+ *   avalanche 600 s  — 1-2 second finality; similar profile to Base/Optimism.
+ *
+ * These defaults can be overridden at deploy-time via the corresponding
+ * FILL_WINDOW_<CHAIN> environment variables (e.g. FILL_WINDOW_ETHEREUM=3600),
+ * following the same override mechanism as CHAIN_DEADLINE_DEFAULTS.
+ * They are intentionally not exposed as AppConfig fields — like
+ * CHAIN_DEADLINE_DEFAULTS they are module-level constants that callers import
+ * directly, keeping configuration.ts the single source of truth without
+ * forcing every consumer to inject ConfigService for a plain number lookup.
+ */
+export const CHAIN_FILL_WINDOW_DEFAULTS: Record<string, number> = {
+  stellar: 120,    // 2 min — fast finality; solver has ample time
+  base: 600,       // 10 min
+  optimism: 600,   // 10 min
+  arbitrum: 600,   // 10 min — L1 batch delay makes this realistic
+  ethereum: 1800,  // 30 min — slower slot + confirmation depth
+  polygon: 900,    // 15 min
+  avalanche: 600,  // 10 min — fast finality, bridge latency dominates
+};
+
+/** Fallback fill-window when chain is not in the map. */
+export const DEFAULT_FILL_WINDOW_SECONDS = 600;
 
 export interface AppConfig {
   nodeEnv: string;
