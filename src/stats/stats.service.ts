@@ -42,44 +42,65 @@ export class StatsService {
     };
   }
 
-  async getPublicStats() {
+  async getTreasuryStats() {
     const intents = await this.intentsService.getAll();
-    const solvers = await this.solversService.getAll();
-    const totalVolume = intents
-      .filter((intent) => intent.state === "filled")
-      .reduce((sum, intent) => sum + BigInt(intent.fillAmount ?? "0"), 0n);
+    const now = Math.floor(Date.now() / 1000);
+    const last24hCutoff = now - 86_400;
 
-    const perChain = Object.fromEntries(
-      SUPPORTED_CHAINS.map((chain) => {
-        const chainIntents = intents.filter((intent) => intent.srcChain === chain);
-        const filledIntents = chainIntents.filter((intent) => intent.state === "filled");
-        const chainVolume = filledIntents.reduce(
-          (sum, intent) => sum + BigInt(intent.fillAmount ?? "0"),
-          0n,
-        );
+    const allTime = intents
+      .filter((intent) => typeof intent.feeAmount === "string" && intent.feeAmount.length > 0)
+      .reduce((sum, intent) => sum + BigInt(intent.feeAmount ?? "0"), 0n);
 
-        return [
-          chain,
-          {
-            intentCount: chainIntents.length,
-            filledIntentCount: filledIntents.length,
-            totalVolume: chainVolume.toString(),
-          },
-        ];
-      }),
-    );
+    const last24h = intents
+      .filter(
+        (intent) =>
+          typeof intent.feeAmount === "string" &&
+          intent.feeAmount.length > 0 &&
+          typeof intent.filledAt === "number" &&
+          intent.filledAt >= last24hCutoff,
+      )
+      .reduce((sum, intent) => sum + BigInt(intent.feeAmount ?? "0"), 0n);
+
+    const byChain = new Map<string, { totalFees: bigint; last24hFees: bigint; filledCount: number }>();
+
+    for (const intent of intents) {
+      if (typeof intent.feeAmount !== "string" || intent.feeAmount.length === 0) continue;
+      const fee = BigInt(intent.feeAmount ?? "0");
+      const entry = byChain.get(intent.srcChain) ?? {
+        totalFees: 0n,
+        last24hFees: 0n,
+        filledCount: 0,
+      };
+
+      entry.totalFees += fee;
+      entry.filledCount += 1;
+      if (typeof intent.filledAt === "number" && intent.filledAt >= last24hCutoff) {
+        entry.last24hFees += fee;
+      }
+      byChain.set(intent.srcChain, entry);
+    }
 
     return {
-      contract: "protocol-transparency-v1",
-      schemaVersion: "1.0",
-      generatedAt: Math.floor(Date.now() / 1000),
-      totalIntents: intents.length,
-      openIntents: intents.filter((intent) => intent.state === "open").length,
-      filledIntents: intents.filter((intent) => intent.state === "filled").length,
-      totalVolume: totalVolume.toString(),
-      activeSolverCount: solvers.filter((solver) => solver.isActive).length,
-      wsSubscriberCount: this.intentsGateway.getSubscriberCount(),
-      perChain,
+      allTime: {
+        totalFees: allTime.toString(),
+        filledIntents: intents.filter((intent) => typeof intent.feeAmount === "string" && intent.feeAmount.length > 0).length,
+      },
+      last24h: {
+        totalFees: last24h.toString(),
+        filledIntents: intents.filter(
+          (intent) =>
+            typeof intent.feeAmount === "string" &&
+            intent.feeAmount.length > 0 &&
+            typeof intent.filledAt === "number" &&
+            intent.filledAt >= last24hCutoff,
+        ).length,
+      },
+      byChain: Array.from(byChain.entries()).map(([srcChain, stats]) => ({
+        srcChain,
+        totalFees: stats.totalFees.toString(),
+        last24hFees: stats.last24hFees.toString(),
+        filledIntents: stats.filledCount,
+      })),
     };
   }
 

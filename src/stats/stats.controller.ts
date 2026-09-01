@@ -12,14 +12,9 @@ export class StatsController {
     return this.statsService.getProtocolStats();
   }
 
-  @Get("public")
-  @ApiOperation({
-    summary: "Public protocol transparency snapshot",
-    description:
-      "Stable, versioned public metadata for external dashboards. Contract is intended to be additive-only across minor changes; any breaking field removal or shape change should require a version bump to a new contract path.",
-  })
-  getPublicStats() {
-    return this.statsService.getPublicStats();
+  @Get("treasury")
+  getTreasuryStats() {
+    return this.statsService.getTreasuryStats();
   }
 
   @Get("ws")
