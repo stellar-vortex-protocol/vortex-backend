@@ -3,11 +3,15 @@ import request from "supertest";
 import { Keypair } from "@stellar/stellar-sdk";
 import { createTestApp } from "./utils/create-test-app";
 import { SEED_SOLVER_KEYPAIRS } from "../src/solvers/solvers.seed";
-import { buildRegisterMessage } from "../src/common/stellar-signature";
+import { buildRegisterMessage, buildSolverStatusMessage } from "../src/common/stellar-signature";
 
 const ALPHA_ADDR = SEED_SOLVER_KEYPAIRS.ALPHA.publicKey();
 const BETA_ADDR  = SEED_SOLVER_KEYPAIRS.BETA.publicKey();
 const GAMMA_ADDR = SEED_SOLVER_KEYPAIRS.GAMMA.publicKey();
+
+function signMessage(message: string, signer: Keypair): string {
+  return signer.sign(Buffer.from(message, "utf8")).toString("base64");
+}
 
 describe("SolversController (e2e)", () => {
   let app: INestApplication;
@@ -61,8 +65,12 @@ describe("SolversController (e2e)", () => {
   });
 
   it("POST /api/v1/solvers/:address/deregister marks the solver inactive", async () => {
+    const message = buildSolverStatusMessage("deregister", ALPHA_ADDR);
+    const signature = signMessage(message, SEED_SOLVER_KEYPAIRS.ALPHA);
+
     const res = await request(app.getHttpServer())
-      .post("/api/v1/solvers/SOLVER_ALPHA/deregister")
+      .post(`/api/v1/solvers/${ALPHA_ADDR}/deregister`)
+      .send({ signature })
       .expect(200);
     expect(res.body.isActive).toBe(false);
     expect(res.body.withdrawalStatus).toBe("pending");
@@ -74,15 +82,20 @@ describe("SolversController (e2e)", () => {
   });
 
   it("POST /api/v1/solvers registers a new solver", async () => {
+    const keypair = Keypair.random();
+    const address = keypair.publicKey();
+    const proofSignature = signMessage(buildRegisterMessage(address), keypair);
+
     const res = await request(app.getHttpServer())
       .post("/api/v1/solvers")
       .send({
-        address: "GNEWSOLVER123456789",
+        address,
         name: "New Solver Inc",
         bondAmount: "500000000",
         avgFillTime: 45,
         supportedChains: ["ethereum", "stellar"],
         supportedTokens: ["USDC", "USDT"],
+        proofSignature,
       })
       .expect(201);
 
@@ -98,7 +111,7 @@ describe("SolversController (e2e)", () => {
 
     // Verify the solver is now queryable
     const fetchRes = await request(app.getHttpServer())
-      .get("/api/v1/solvers/GNEWSOLVER123456789")
+      .get(`/api/v1/solvers/${address}`)
       .expect(200);
     expect(fetchRes.body.name).toBe("New Solver Inc");
   });

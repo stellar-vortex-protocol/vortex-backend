@@ -261,6 +261,9 @@ export class IntentsController {
       throw new GoneException("Intent has expired");
     }
 
+    // Verify the solver controls the claimed address before it can accept.
+    verifyStellarSignature(dto.solver, buildAcceptMessage(id, dto.solver), dto.signature);
+
     const solver = await this.solversService.get(dto.solver);
     if (!solver?.isActive) {
       throw new ForbiddenException("Solver not registered or inactive");

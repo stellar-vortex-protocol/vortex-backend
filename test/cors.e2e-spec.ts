@@ -8,6 +8,7 @@ import { INestApplication, ValidationPipe } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { ConfigService } from "@nestjs/config";
+import helmet from "helmet";
 import request from "supertest";
 import { AppModule } from "../src/app.module";
 import { AppConfig } from "../src/config/configuration";
@@ -29,6 +30,26 @@ async function createAppWithOrigin(origin: string): Promise<INestApplication> {
   const configService = app.get(ConfigService<AppConfig, true>);
   const corsOrigin = configService.get("corsOrigin", { infer: true });
   app.enableCors({ origin: corsOrigin });
+
+  await app.init();
+  return app;
+}
+
+async function createAppWithSecurityHeaders(): Promise<INestApplication> {
+  const moduleRef = await Test.createTestingModule({
+    imports: [AppModule],
+  }).compile();
+
+  const app = moduleRef.createNestApplication();
+  app.set("trust proxy", 1);
+  app.use(
+    helmet({
+      hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+    }),
+  );
+  app.useWebSocketAdapter(new WsAdapter(app));
+  app.useGlobalFilters(new HttpExceptionFilter());
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
   await app.init();
   return app;
@@ -81,6 +102,21 @@ describe("CORS (e2e)", () => {
       // express-cors either omits the header or sets it to the allowed origin.
       // Either way it must NOT be the attacker's origin.
       expect(res.headers["access-control-allow-origin"]).not.toBe("https://evil.example.com");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("adds HSTS and nosniff headers behind a trusted proxy", async () => {
+    const app = await createAppWithSecurityHeaders();
+    try {
+      const res = await request(app.getHttpServer())
+        .get("/health")
+        .set("X-Forwarded-Proto", "https")
+        .expect(200);
+
+      expect(res.headers["strict-transport-security"]).toContain("max-age=31536000");
+      expect(res.headers["x-content-type-options"]).toBe("nosniff");
     } finally {
       await app.close();
     }
