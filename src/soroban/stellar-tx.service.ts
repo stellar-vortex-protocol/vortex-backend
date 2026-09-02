@@ -56,6 +56,9 @@ export class StellarTxService {
       const fee = stats.sorobanInclusionFee[this.feePercentile];
       return fee && fee !== "0" ? fee : BASE_FEE;
     } catch (err) {
+      // Issue #300 — keep the log message operational but avoid leaking raw keys.
+      // SDK errors can include XDR/transaction detail, so we only include the
+      // sanitized error summary here rather than serializing the whole object.
       this.logger.warn(
         `Failed to fetch Soroban fee stats, falling back to base fee ${BASE_FEE}: ${(err as Error).message}`,
       );

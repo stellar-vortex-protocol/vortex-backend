@@ -19,8 +19,13 @@ import {
 } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
 
 const STORE_SIZE_LOG_INTERVAL_MS = 60_000;
+const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slashed"];
+
+/** How long a completed idempotency-key result stays replayable. */
+const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
 
 /**
  * Maximum number of simultaneously open (state = "open" | "accepted") intents
@@ -59,6 +64,14 @@ export class IntentsService implements OnModuleDestroy {
   private readonly idempotencyCache = new Map<string, { intentId: string; expiresAt: number }>();
 
   /**
+   * Keys whose creation is currently in flight → the in-flight creation
+   * promise. Claimed synchronously in {@link create} so that concurrent
+   * requests carrying the same idempotency key collapse onto a single created
+   * intent instead of racing the check-then-set window (issue #274).
+   */
+  private readonly idempotencyInFlight = new Map<string, Promise<Intent>>();
+
+  /**
    * In-memory audit log used as a fast read path and fallback when the DB is
    * unavailable. The canonical source of truth is the intent_audit_log table
    * (issue #217 / #62). Writes are fire-and-forget against PrismaService so a
@@ -75,7 +88,8 @@ export class IntentsService implements OnModuleDestroy {
     private readonly stellarTxService: StellarTxService,
     private readonly prisma: PrismaService,
   ) {
-    this.sizeLogTimer = setInterval(() => this.logStoreSize(), STORE_SIZE_LOG_INTERVAL_MS);
+    const sweepMs = Number(this.configService.get("intentRetentionSweepMs", { infer: true }) ?? STORE_SIZE_LOG_INTERVAL_MS);
+    this.sizeLogTimer = setInterval(() => this.logStoreSize(), sweepMs || STORE_SIZE_LOG_INTERVAL_MS);
     // Allow the process to exit even if the timer is still active.
     this.sizeLogTimer.unref?.();
   }
@@ -84,35 +98,117 @@ export class IntentsService implements OnModuleDestroy {
     clearInterval(this.sizeLogTimer);
   }
 
-  /** Logs the current intent store size so unbounded growth is observable. */
+  /**
+   * Logs the store size and evicts stale terminal intents from the in-memory
+   * adapter when it is the active backend. This keeps the memory footprint
+   * bounded without affecting on-chain or durable storage paths.
+   */
   async logStoreSize(): Promise<void> {
+    const evicted = await this.evictTerminalIntents();
+    const remaining = await this.repo.findAll();
+    this.logger.log(`[store-monitor] intents store size: ${remaining.length} (evicted=${evicted})`);
+  }
+
+  private async evictTerminalIntents(): Promise<number> {
+    const persistence = process.env.INTENTS_PERSISTENCE ?? "memory";
+    const onchainEnabled = this.configService.get("onchainIntentsEnabled", { infer: true });
+    if (persistence !== "memory" || onchainEnabled) {
+      return 0;
+    }
+
+    const retentionDays = Number(this.configService.get("intentRetentionDays", { infer: true }) ?? 30);
+    const retentionSeconds = Math.max(0, Number.isFinite(retentionDays) ? retentionDays * 86400 : 30 * 86400);
+    const cutoff = Math.floor(Date.now() / 1000) - retentionSeconds;
+
     const all = await this.repo.findAll();
-    this.logger.log(`[store-monitor] intents store size: ${all.length}`);
+    const stale = all.filter((intent) => {
+      if (!TERMINAL_STATES.includes(intent.state)) return false;
+      const lastTerminalTs = intent.filledAt ?? intent.createdAt;
+      return lastTerminalTs <= cutoff;
+    });
+
+    let evicted = 0;
+    for (const intent of stale) {
+      const removed = await this.repo.delete(intent.intentId);
+      if (removed) evicted += 1;
+      this.logger.warn(
+        `[retention] evicted terminal intent ${intent.intentId} from in-memory store (state=${intent.state}, createdAt=${intent.createdAt})`,
+      );
+    }
+
+    return evicted;
   }
 
   async create(
     data: Omit<Intent, "intentId" | "createdAt" | "state">,
     idempotencyKey?: string,
   ): Promise<Intent> {
+    if (!idempotencyKey) {
+      return this.persistNewIntent(data);
+    }
+
     const now = Math.floor(Date.now() / 1000);
 
-    if (idempotencyKey) {
-      const cached = this.idempotencyCache.get(idempotencyKey);
-      if (cached && cached.expiresAt > now) {
-        const cachedIntent = await this.repo.findById(cached.intentId);
-        if (cachedIntent) {
-          return cachedIntent;
-        }
+    // 1. Fast path — a previous request with this key already completed.
+    const cached = this.idempotencyCache.get(idempotencyKey);
+    if (cached && cached.expiresAt > now) {
+      const cachedIntent = await this.repo.findById(cached.intentId);
+      if (cachedIntent) {
+        return cachedIntent;
       }
+      // Cache entry outlived its intent — drop it and fall through.
       this.idempotencyCache.delete(idempotencyKey);
     }
+
+    // 2. Race-safe claim. The check-and-set on `idempotencyInFlight` runs
+    //    synchronously — there is no `await` between the `get` and the `set` —
+    //    so two concurrent callers carrying the same key can never both proceed
+    //    to create. The loser awaits the winner's in-flight promise and returns
+    //    its result. The claim is taken *before* the conditional
+    //    `registerOnChain()` await inside persistNewIntent(), so the race window
+    //    is closed rather than merely shifted past the on-chain call.
+    //
+    //    The future Prisma-backed adapter (issue #1) must preserve the same
+    //    guarantee at the storage layer: an atomic
+    //    `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING` followed by a
+    //    read-back of the winning row, rather than a read-then-write.
+    const inFlight = this.idempotencyInFlight.get(idempotencyKey);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const creation = this.persistNewIntent(data)
+      .then((intent) => {
+        this.idempotencyCache.set(idempotencyKey, {
+          intentId: intent.intentId,
+          expiresAt: now + IDEMPOTENCY_TTL_SECONDS,
+        });
+        return intent;
+      })
+      .finally(() => {
+        this.idempotencyInFlight.delete(idempotencyKey);
+      });
+
+    this.idempotencyInFlight.set(idempotencyKey, creation);
+    return creation;
+  }
+
+  /**
+   * Build, optionally register on-chain, and persist a brand-new intent.
+   * Contains no idempotency logic — deduplication is the caller's concern.
+   */
+  private async persistNewIntent(
+    data: Omit<Intent, "intentId" | "createdAt" | "state">,
+  ): Promise<Intent> {
+    const now = Math.floor(Date.now() / 1000);
 
     const intent: Intent = {
       ...data,
       intentId: uuidv4(),
       state: "open",
       createdAt: now,
-      deadline: data.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[data.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
+      deadline:
+        data.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[data.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
     };
 
     if (this.configService.get("onchainIntentsEnabled", { infer: true })) {
@@ -120,15 +216,6 @@ export class IntentsService implements OnModuleDestroy {
     }
 
     await this.repo.save(intent);
-
-    if (idempotencyKey) {
-      const ttl = 86400; // 24 hours
-      this.idempotencyCache.set(idempotencyKey, {
-        intentId: intent.intentId,
-        expiresAt: now + ttl,
-      });
-    }
-
     return intent;
   }
 
@@ -191,6 +278,22 @@ export class IntentsService implements OnModuleDestroy {
     return this.repo.findByUser(user);
   }
 
+  /**
+   * Batch-fetch the current record for each of `ids` (issue #275).
+   *
+   * IDs are de-duplicated; IDs with no matching record are simply omitted from
+   * the result (callers get "missing" by comparing lengths, not a 404 per ID).
+   *
+   * This reuses `get()` per ID rather than adding a storage-layer method — fine
+   * for the in-memory adapter. Issue #1's Prisma adapter should implement this
+   * as a single `WHERE intent_id IN (...)` query for efficiency.
+   */
+  async getMany(ids: string[]): Promise<Intent[]> {
+    const unique = [...new Set(ids)];
+    const found = await Promise.all(unique.map((id) => this.get(id)));
+    return found.filter((intent): intent is Intent => intent !== undefined);
+  }
+
   async getAcceptedCountBySolver(solver: string): Promise<number> {
     const all = await this.repo.findAll();
     return all.filter((i) => i.state === "accepted" && i.solver === solver).length;
@@ -246,6 +349,35 @@ export class IntentsService implements OnModuleDestroy {
     patch: Omit<Partial<Intent>, "state" | "solver">,
   ): Promise<Intent | null> {
     return this.repo.fillIfAccepted(id, solver, patch);
+  }
+
+  /**
+   * Atomically cancel an intent only if it is currently "open".
+   * Returns null when the intent is not found or is not in the "open" state
+   * (e.g. a concurrent accept() or sweeper expiry already transitioned it).
+   */
+  async cancelIfOpen(id: string): Promise<Intent | null> {
+    return this.repo.cancelIfOpen(id);
+  }
+
+  /**
+   * Atomically expire an intent only if it is currently "open".
+   * Used by the sweeper so a concurrent user cancel() or solver accept()
+   * always wins the race.
+   */
+  async expireIfOpen(id: string): Promise<Intent | null> {
+    return this.repo.expireIfOpen(id);
+  }
+
+  /**
+   * Atomically slash an intent only if it is currently "accepted".
+   * Used by the sweeper so a concurrent solver fill() always wins the race.
+   */
+  async slashIfAccepted(
+    id: string,
+    patch: { slashedAt: number; slashReason: string },
+  ): Promise<Intent | null> {
+    return this.repo.slashIfAccepted(id, patch);
   }
 
   // ---------------------------------------------------------------------------
@@ -329,7 +461,12 @@ export class IntentsService implements OnModuleDestroy {
    *
    * Returns an empty array if the intent has no recorded transitions.
    */
-  getAuditLog(intentId: string): IntentAuditEntry[] {
-    return this.auditLog.get(intentId) ?? [];
+  getAuditLog(intentId: string, limit?: number, offset?: number): IntentAuditEntry[] {
+    const entries = this.auditLog.get(intentId) ?? [];
+    if (limit === undefined && offset === undefined) return entries;
+
+    const safeLimit = Math.min(limit ?? 20, 100);
+    const safeOffset = Math.max(0, offset ?? 0);
+    return entries.slice(safeOffset, safeOffset + safeLimit);
   }
 }

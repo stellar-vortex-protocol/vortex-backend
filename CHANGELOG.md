@@ -7,9 +7,21 @@ and [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 Commit message format is enforced via [commitlint](https://commitlint.js.org/) starting with v0.2.0.
 
 > **How to update this file**
-> Run `npm run generate:client` after any API surface change and bump the version
-> in `package.json`. Add your changes under `[Unreleased]` as you work; entries
-> are moved to a versioned section on release.
+>
+> Add entries to the `[Unreleased]` section as you work on features and fixes.
+> Organize by subsection (`Added`, `Fixed`, `Removed`, etc.) as defined below.
+>
+> **Mapping from Conventional Commits:**
+> - `feat(scope): ...` → `[Added]`
+> - `fix(scope): ...` → `[Fixed]`
+> - `perf(scope): ...` → `[Changed]` (with note about performance improvement)
+> - `refactor(scope): ...` → `[Changed]` (with scope of refactoring)
+> - `docs(scope): ...` → `[Documentation]` (if user-facing; skip if internal only)
+> - `chore(scope): ...` → Skip (internal tooling, no user-visible change)
+>
+> On version release, the `[Unreleased]` section is renamed to `[X.Y.Z]` with the
+> release date, and a new `[Unreleased]` section is created. Version must be bumped
+> in `package.json` to match.
 
 ---
 
@@ -31,8 +43,23 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
 - Husky `commit-msg` hook — runs commitlint on every local commit (Closes #137)
 - CI job `commitlint` — validates commit messages on every push/PR in GitHub Actions
   (Closes #137)
+- `src/common/amount.ts` — shared, unit-tested base-units ↔ decimal conversion plus
+  the protocol fee (0.05 %) and quote-variance helpers; `IntentsController.quote()`
+  and `fill()` now use it instead of duplicated inline `BigInt`/decimal math
+  (Closes #272)
+- `PATCH /api/v1/solvers/:address` (`UpdateSolverDto`, `buildUpdateSolverMessage`) —
+  signature-verified partial update of a solver's mutable profile fields
+  (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`); immutable fields
+  are stripped by the DTO whitelist (Closes #273)
+- Typed Swagger response documentation for every `SorobanController` and
+  `TokensController` route, including the account route's 400/429 responses
+  (Closes #271)
 
 ### Fixed
+- `IntentsService.create()` idempotency-key handling is now race-safe — concurrent
+  requests carrying the same key synchronously claim an in-flight slot before any
+  `await`, so exactly one intent is created and the losers replay its result
+  (Closes #274)
 - `TokensModule` was missing `exports: [TokensService]` — `IntentsController`
   could not inject `TokensService` outside the Jest test environment
 - `IntentsModule` was missing `exports: [IntentsGateway]` — `StatsService`

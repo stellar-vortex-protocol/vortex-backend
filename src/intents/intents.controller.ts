@@ -23,6 +23,7 @@ import {
   ApiTooManyRequestsResponse,
   ApiOperation,
 } from "@nestjs/swagger";
+import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
@@ -37,12 +38,21 @@ import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
 import { QuoteResponseDto } from "./dto/quote-response.dto";
 import { ListIntentsDto } from "./dto/list-intents.dto";
+import { BatchLookupDto } from "./dto/batch-lookup.dto";
 import { UserThrottlerGuard } from "./user-throttler.guard";
 import {
   verifyStellarSignature,
+  buildAcceptMessage,
   buildCancelMessage,
   buildFillMessage,
 } from "../common/stellar-signature";
+import {
+  applyVarianceScale,
+  calculateProtocolFee,
+  parseBaseUnits,
+  toDecimalNumber,
+  varianceScaleFromPerfScore,
+} from "../common/amount";
 import { SupportedChain } from "./intents.types";
 
 @ApiTags("intents")
@@ -77,15 +87,31 @@ export class IntentsController {
   }
 
   @Get("open")
-  async listOpen() {
+  async listOpen(@Query() dto: ListIntentsDto) {
     const open = await this.intentsService.getByState("open");
-    return { intents: open, count: open.length };
+    const limit = Math.min(dto.limit ?? 20, 100);
+    const offset = dto.offset ?? 0;
+
+    if ((dto.limit ?? 20) > 100) {
+      throw new BadRequestException("Limit exceeds maximum allowed value of 100");
+    }
+
+    const page = open.slice(offset, offset + limit);
+    return { intents: page, total: open.length, count: open.length, limit, offset };
   }
 
   @Get("user/:address")
-  async listByUser(@Param("address") address: string) {
+  async listByUser(@Param("address") address: string, @Query() dto: ListIntentsDto) {
     const intents = await this.intentsService.getByUser(address);
-    return { intents, count: intents.length };
+    const limit = Math.min(dto.limit ?? 20, 100);
+    const offset = dto.offset ?? 0;
+
+    if ((dto.limit ?? 20) > 100) {
+      throw new BadRequestException("Limit exceeds maximum allowed value of 100");
+    }
+
+    const page = intents.slice(offset, offset + limit);
+    return { intents: page, total: intents.length, count: intents.length, limit, offset };
   }
 
   @Get(":id")
@@ -135,11 +161,20 @@ export class IntentsController {
     },
   })
   @ApiNotFoundResponse({ description: "Intent not found" })
-  getAudit(@Param("id") id: string) {
-    const intent = this.intentsService.get(id);
+  async getAudit(@Param("id") id: string, @Query() dto: ListIntentsDto) {
+    const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
-    const entries = this.intentsService.getAuditLog(id);
-    return { intentId: id, entries };
+
+    const limit = Math.min(dto.limit ?? 20, 100);
+    const offset = dto.offset ?? 0;
+    if ((dto.limit ?? 20) > 100) {
+      throw new BadRequestException("Limit exceeds maximum allowed value of 100");
+    }
+
+    const allEntries = this.intentsService.getAuditLog(id);
+    const entries = this.intentsService.getAuditLog(id, limit, offset);
+    const total = allEntries.length;
+    return { intentId: id, entries, total, limit, offset };
   }
 
   /**
@@ -175,24 +210,14 @@ export class IntentsController {
   async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
 
-    // Enforce the per-user open-intent cap before touching anything else.
-    // This is a distinct 409 (not the rate-limit 429) so callers can
-    // differentiate "slow down" from "close some intents first".
-    const openCount = await this.intentsService.countOpenByUser(dto.user);
-    if (openCount >= MAX_OPEN_INTENTS_PER_USER) {
-      throw new ConflictException(
-        `Open-intent cap reached: user already has ${openCount} open or accepted intent(s). ` +
-          `Cancel or wait for existing intents to fill/expire before creating new ones ` +
-          `(max ${MAX_OPEN_INTENTS_PER_USER} per user).`,
-      );
-    }
-
-    // #219: use typed resolveToken instead of ad-hoc duck-typed any casts
-    const srcToken = this.tokensService.resolveSrcToken(
+    // #219: use typed resolveToken instead of ad-hoc duck-typed any casts.
+    // #276: reject unrecognised tokens outright instead of silently creating an
+    // intent whose priceUSD defaults to undefined.
+    const srcToken = this.tokensService.resolveSrcTokenOrThrow(
       dto.srcChain as SupportedChain,
       dto.srcTokenAddress,
     );
-    const dstToken = this.tokensService.resolveDstToken(dto.dstTokenContract);
+    const dstToken = this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract);
 
     const intent = await this.intentsService.create(
       {
@@ -222,6 +247,34 @@ export class IntentsController {
     return intent;
   }
 
+  /**
+   * POST /api/v1/intents/batch
+   *
+   * Issue #275 — bounded batch status lookup. Lets a solver bot (or a frontend
+   * showing a full history) reconcile a known set of intent IDs against current
+   * server state in one call instead of N `GET /:id` requests.
+   *
+   * `POST` (not `GET`) because the ID list can exceed a comfortable query-string
+   * length. Subject to the same global rate limits as every other endpoint —
+   * no dedicated tier. Read-only: batch accept/fill/cancel is explicitly out of
+   * scope.
+   */
+  @Post("batch")
+  @ApiOperation({
+    summary: "Batch-fetch current intent records by ID",
+    description:
+      "Returns the current record for each supplied intent ID. IDs with no " +
+      "matching record are omitted (not individually 404'd). Capped at 100 IDs.",
+  })
+  @ApiOkResponse({ description: "Records for the found intent IDs, plus a count" })
+  @ApiBadRequestResponse({
+    description: "intentIds missing, not an array of strings, or exceeds 100 entries",
+  })
+  async batchLookup(@Body() dto: BatchLookupDto) {
+    const intents = await this.intentsService.getMany(dto.intentIds);
+    return { intents, count: intents.length };
+  }
+
   @Post(":id/accept")
   @ApiNotFoundResponse({ description: "Intent not found" })
   @ApiConflictResponse({ description: "Intent is not in open state" })
@@ -237,6 +290,9 @@ export class IntentsController {
       throw new GoneException("Intent has expired");
     }
 
+    // Verify the solver controls the claimed address before it can accept.
+    verifyStellarSignature(dto.solver, buildAcceptMessage(id, dto.solver), dto.signature);
+
     const solver = await this.solversService.get(dto.solver);
     if (!solver?.isActive) {
       throw new ForbiddenException("Solver not registered or inactive");
@@ -244,6 +300,9 @@ export class IntentsController {
     if (!solver.bondAmount || BigInt(solver.bondAmount) <= 0n) {
       throw new ForbiddenException("Solver has insufficient bond");
     }
+
+    // Verify the solver controls the claimed address (mirrors fill()/cancel()).
+    verifyStellarSignature(dto.solver, buildAcceptMessage(id, dto.solver), dto.signature);
 
     const updated = await this.intentsService.acceptIfOpen(id, dto.solver);
     if (!updated) {
@@ -277,7 +336,7 @@ export class IntentsController {
     // Verify the solver controls the claimed address
     verifyStellarSignature(dto.solver, buildFillMessage(id, dto.solver), dto.signature);
 
-    const fillAmount = BigInt(dto.fillAmount);
+    const fillAmount = parseBaseUnits(dto.fillAmount);
     let minAmount: bigint;
     try {
       minAmount = BigInt(intent.minDstAmount);
@@ -296,9 +355,12 @@ export class IntentsController {
       });
     }
 
+    const feeAmount = (BigInt(dto.fillAmount) * 5n) / 10000n;
+
     const updated = await this.intentsService.fillIfAccepted(id, dto.solver, {
       filledAt: now,
       fillAmount: dto.fillAmount,
+      feeAmount: feeAmount.toString(),
       txHash: dto.txHash,
     });
     if (!updated) {
@@ -308,6 +370,8 @@ export class IntentsController {
       }
       throw new ConflictException(`Intent is ${current?.state ?? "unknown"}, cannot fill`);
     }
+
+    await this.solversService.recordSuccessfulFill(dto.solver);
 
     this.intentsGateway.broadcast({
       type: "intent_filled",
@@ -335,7 +399,11 @@ export class IntentsController {
     // Verify the user controls the claimed address
     verifyStellarSignature(dto.user, buildCancelMessage(id), dto.signature);
 
-    const updated = await this.intentsService.update(id, { state: "cancelled" });
+    const updated = await this.intentsService.cancelIfOpen(id);
+    if (!updated) {
+      const current = await this.intentsService.get(id);
+      throw new ConflictException(`Cannot cancel intent in state: ${current?.state ?? "unknown"}`);
+    }
 
     // Audit trail (issue #217 / #62): record who cancelled and when.
     this.intentsService.appendAuditEntry(id, "cancelled", dto.user, "user cancelled");
@@ -354,17 +422,21 @@ export class IntentsController {
     description: "Rate limit exceeded — max 20 quote requests per 60 s per IP",
   })
   @ApiOkResponse({ type: QuoteResponseDto })
-  quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {
-    const solvers = this.solversService.getAll().filter((s) => s.isActive);
+  async quote(@Body() dto: QuoteRequestDto): Promise<QuoteResponseDto> {
+    const solvers = (await this.solversService.getAll()).filter((s) => s.isActive);
 
-    // #219: use typed resolveSrcToken / resolveDstToken — no more any casts
-    const srcToken = this.tokensService.resolveSrcToken(
-      dto.srcChain as SupportedChain,
-      dto.srcTokenAddress ?? "",
-    );
-    const dstToken = this.tokensService.resolveDstToken(dto.dstTokenContract ?? "");
+    // #219: use typed resolveSrcToken / resolveDstToken — no more any casts.
+    // #276: a quote may be requested by symbol alone (no contract/address), but
+    // when a token identifier IS supplied it must resolve — otherwise the quote
+    // engine would silently substitute a fake $1 price.
+    const srcToken = dto.srcTokenAddress
+      ? this.tokensService.resolveSrcTokenOrThrow(dto.srcChain as SupportedChain, dto.srcTokenAddress)
+      : undefined;
+    const dstToken = dto.dstTokenContract
+      ? this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract)
+      : undefined;
 
-    const srcAmountBigInt = BigInt(dto.srcAmount);
+    const srcAmountBigInt = parseBaseUnits(dto.srcAmount);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const dstPriceUSD: number = (dstToken as any)?.priceUSD ?? 1;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -377,17 +449,16 @@ export class IntentsController {
         const successRate = totalFills > 0 ? solver.fillsCompleted / totalFills : 0.5;
         const fillCountScore = Math.min(solver.fillsCompleted / 100, 1);
         const perfScore = successRate * 0.7 + fillCountScore * 0.3;
-        const variancePct = (1 - perfScore) * 0.008;
-        const varianceScaled = Math.round(1000 * (1 - variancePct));
-        const dstAmount = (srcAmountBigInt * BigInt(varianceScaled)) / BigInt(1000);
-        const fee = (dstAmount * BigInt(5)) / BigInt(10000); // 0.05%
+        const varianceScaled = varianceScaleFromPerfScore(perfScore);
+        const dstAmount = applyVarianceScale(srcAmountBigInt, varianceScaled);
+        const fee = calculateProtocolFee(dstAmount); // 0.05%
 
         // Issue #126: compute USD fee total and price impact.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const feeUnits = Number(fee) / Math.pow(10, (dstToken as any)?.decimals ?? 7);
+        const feeUnits = toDecimalNumber(fee, (dstToken as any)?.decimals ?? 7);
         const totalFeesUSD = feeUnits * dstPriceUSD;
-        const srcUnits = Number(srcAmountBigInt) / Math.pow(10, srcToken?.decimals ?? 7);
-        const dstUnits = Number(dstAmount) / Math.pow(10, dstToken?.decimals ?? 7);
+        const srcUnits = toDecimalNumber(srcAmountBigInt, srcToken?.decimals ?? 7);
+        const dstUnits = toDecimalNumber(dstAmount, dstToken?.decimals ?? 7);
         const priceImpact =
           srcPriceUSD > 0 && dstPriceUSD > 0
             ? Math.max(0, 1 - (dstUnits * dstPriceUSD) / (srcUnits * srcPriceUSD))
@@ -434,7 +505,7 @@ export class IntentsController {
       })
       .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
 
-    if (dto.intentId && quotes.length > 0) {
+    if (dto.intentId && targetIntent && quotes.length > 0) {
       await this.intentsService.update(dto.intentId, { quotedDstAmount: quotes[0].dstAmount });
     }
 
@@ -446,6 +517,108 @@ export class IntentsController {
       srcTokenSymbol: dto.srcTokenSymbol,
       srcAmount: dto.srcAmount,
       dstTokenSymbol: dto.dstTokenSymbol,
+      estimatedFillTime: best?.fillTime ?? 0,
+      totalFeesUSD: best?.totalFeesUSD ?? 0,
+      priceImpact: best?.priceImpact ?? 0,
+    };
+  }
+
+  /**
+   * POST /api/v1/intents/:id/requote
+   *
+   * Convenience endpoint for re-quoting an already-created intent without
+   * resupplying srcChain/srcToken/srcAmount/dstToken — they're read straight
+   * off the stored Intent record. Only valid while the intent is "open".
+   */
+  @Post(":id/requote")
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @ApiOperation({ summary: "Re-quote an existing open intent using its stored fields" })
+  @ApiTooManyRequestsResponse({
+    description: "Rate limit exceeded — max 20 quote requests per 60 s per IP",
+  })
+  @ApiOkResponse({ type: QuoteResponseDto })
+  @ApiNotFoundResponse({ description: "Intent not found" })
+  @ApiConflictResponse({ description: "Intent is not in the open state" })
+  async requote(@Param("id") id: string): Promise<QuoteResponseDto> {
+    const intent = await this.intentsService.get(id);
+    if (!intent) throw new NotFoundException("Intent not found");
+    if (intent.state !== "open") {
+      throw new ConflictException(
+        `Cannot requote intent in state "${intent.state}"; only open intents can be requoted`,
+      );
+    }
+
+    const solvers = this.solversService.getAll().filter((s) => s.isActive);
+    const srcToken = intent.srcToken;
+    const dstToken = intent.dstToken;
+    const srcAmountBigInt = BigInt(intent.srcAmount);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dstPriceUSD: number = (dstToken as any)?.priceUSD ?? 1;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const srcPriceUSD: number = (srcToken as any)?.priceUSD ?? dstPriceUSD;
+
+    const quotes = solvers
+      .map((solver) => {
+        const totalFills = solver.fillsCompleted + solver.fillsFailed;
+        const successRate = totalFills > 0 ? solver.fillsCompleted / totalFills : 0.5;
+        const fillCountScore = Math.min(solver.fillsCompleted / 100, 1);
+        const perfScore = successRate * 0.7 + fillCountScore * 0.3;
+        const variancePct = (1 - perfScore) * 0.008;
+        const varianceScaled = Math.round(1000 * (1 - variancePct));
+        const dstAmount = (srcAmountBigInt * BigInt(varianceScaled)) / BigInt(1000);
+        const fee = (dstAmount * BigInt(5)) / BigInt(10000);
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const feeUnits = Number(fee) / Math.pow(10, (dstToken as any)?.decimals ?? 7);
+        const totalFeesUSD = feeUnits * dstPriceUSD;
+        const srcUnits = Number(srcAmountBigInt) / Math.pow(10, srcToken?.decimals ?? 7);
+        const dstUnits = Number(dstAmount) / Math.pow(10, dstToken?.decimals ?? 7);
+        const priceImpact =
+          srcPriceUSD > 0 && dstPriceUSD > 0
+            ? Math.max(0, 1 - (dstUnits * dstPriceUSD) / (srcUnits * srcPriceUSD))
+            : 0;
+
+        const dstTokenInfo = {
+          address: dstToken?.contract ?? "",
+          symbol: dstToken?.symbol ?? "",
+          name: dstToken?.symbol ?? "",
+          decimals: dstToken?.decimals ?? 7,
+          chain: "stellar" as SupportedChain,
+          priceUSD: dstToken?.priceUSD,
+        };
+
+        const route = this.routingService.buildRoute(srcToken, dstTokenInfo, solver.address, {
+          totalFeesUSD,
+          priceImpact,
+          estimatedFillTime: solver.avgFillTime + Math.floor(Math.random() * 30),
+        });
+
+        return {
+          solver: solver.address,
+          solverName: solver.name,
+          dstAmount: dstAmount.toString(),
+          fee: fee.toString(),
+          fillTime: solver.avgFillTime + Math.floor(Math.random() * 30),
+          expiresAt: Math.floor(Date.now() / 1000) + 60,
+          totalFeesUSD,
+          priceImpact,
+          route,
+        };
+      })
+      .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
+
+    if (quotes.length > 0) {
+      await this.intentsService.update(id, { quotedDstAmount: quotes[0].dstAmount });
+    }
+
+    const best = quotes[0] ?? null;
+    return {
+      quotes,
+      bestQuote: best,
+      srcChain: intent.srcChain,
+      srcTokenSymbol: srcToken?.symbol ?? "",
+      srcAmount: intent.srcAmount,
+      dstTokenSymbol: dstToken?.symbol ?? "",
       estimatedFillTime: best?.fillTime ?? 0,
       totalFeesUSD: best?.totalFeesUSD ?? 0,
       priceImpact: best?.priceImpact ?? 0,

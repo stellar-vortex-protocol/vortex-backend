@@ -78,6 +78,42 @@ register:<solverAddress>
 
 ---
 
+## 1a. Updating Your Solver Profile
+
+Once registered, a solver operator can edit their **mutable** profile fields as
+their operation scales — for example adding a newly-supported chain or fixing a
+typo in the display name — without re-registering.
+
+### HTTP Request
+`PATCH /api/v1/solvers/:address`
+
+- **Authentication**: same proof-of-control convention as registration. Sign the
+  UTF-8 bytes of the message `update-solver:G...` (the `:address` path segment)
+  with the solver's Stellar secret key and send the base64 signature in the body.
+- **Editable fields**: `name`, `supportedChains`, `supportedTokens`, `avgFillTime`
+  (all optional — send only what changes). Arrays are replaced wholesale.
+- **Immutable fields** (`address`, `bondAmount`, `fillsCompleted`, `fillsFailed`,
+  `totalVolume`, `registeredAt`, `isActive`) are silently stripped by the
+  request validator; sending them is a no-op, not an error. Bond changes are an
+  on-chain concern — see section 2.
+
+**Payload (`UpdateSolverDto`)**:
+```json
+{
+  "name": "Alpha-Liquidity-Solver",
+  "supportedChains": ["stellar", "ethereum", "polygon", "arbitrum", "base"],
+  "supportedTokens": ["USDC", "XLM", "ETH", "WBTC"],
+  "avgFillTime": 38,
+  "signature": "base64EncodedSignatureString=="
+}
+```
+
+**Responses**: `200 OK` with the updated solver record; `400` for an invalid
+body (e.g. an unsupported chain or a missing signature); `401` for a bad or
+mismatched signature; `404` when `:address` is not a registered solver.
+
+---
+
 ## 2. Bond Posting & On-Chain Enforcement
 
 ### Posting a Bond

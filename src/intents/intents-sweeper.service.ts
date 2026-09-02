@@ -3,8 +3,16 @@ import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
+import { logger } from "../common/logger";
 
 const SWEEP_INTERVAL_MS = 30_000;
+
+/** Outcome of a single sweep cycle — returned so a manual trigger can log it. */
+export interface SweepResult {
+  expiredCount: number;
+  slashedCount: number;
+  durationMs: number;
+}
 
 @Injectable()
 export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
@@ -21,7 +29,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
   onModuleInit() {
     this.interval = setInterval(() => {
       this.sweep().catch((err) => {
-        console.error(`[sweeper] sweep failed: ${err instanceof Error ? err.message : err}`);
+        logger.error(`[sweeper] sweep failed: ${err instanceof Error ? err.message : err}`);
       });
     }, SWEEP_INTERVAL_MS);
   }
@@ -30,14 +38,18 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     if (this.interval) clearInterval(this.interval);
   }
 
-  async sweep() {
+  async sweep(): Promise<SweepResult> {
     const startMs = Date.now();
     const now = Math.floor(startMs / 1000);
     let expiredCount = 0;
+    let slashedCount = 0;
 
     for (const intent of await this.intentsService.getByState("open")) {
       if (intent.deadline <= now) {
-        await this.intentsService.update(intent.intentId, { state: "expired" });
+        // Atomic guard: a concurrent user cancel() or solver accept() may have
+        // already transitioned this intent out of "open" — skip it if so.
+        const expired = await this.intentsService.expireIfOpen(intent.intentId);
+        if (!expired) continue;
         // Audit trail (issue #62): system-driven expiration.
         this.intentsService.appendAuditEntry(
           intent.intentId,
@@ -65,6 +77,39 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
 
     for (const intent of missedFills) {
       await this.slashMissedFill(intent.intentId, intent.solver, now);
+      slashedCount++;
+    }
+
+    return { expiredCount, slashedCount, durationMs: Date.now() - startMs };
+  }
+
+  /**
+   * Issue #269 — safe, auditable manual sweep trigger (operator break-glass).
+   *
+   * Runs exactly one sweep cycle on demand and logs the invocation loudly —
+   * source, timestamp, and result — so a manual trigger is unmistakable in an
+   * incident timeline. Wired to `SIGUSR2` in `main.ts`; there is deliberately
+   * no HTTP surface, so it is not reachable by any API client.
+   */
+  async triggerManualSweep(source: string): Promise<SweepResult> {
+    const invokedAt = new Date().toISOString();
+    this.logger.warn(
+      `[sweeper] MANUAL SWEEP TRIGGERED (source=${source}, invokedAt=${invokedAt}) — running one sweep cycle`,
+    );
+
+    try {
+      const result = await this.sweep();
+      this.logger.warn(
+        `[sweeper] MANUAL SWEEP COMPLETE (source=${source}, invokedAt=${invokedAt}): ` +
+          `expired=${result.expiredCount} slashed=${result.slashedCount} duration=${result.durationMs}ms`,
+      );
+      return result;
+    } catch (err) {
+      this.logger.error(
+        `[sweeper] MANUAL SWEEP FAILED (source=${source}, invokedAt=${invokedAt}): ` +
+          `${err instanceof Error ? err.message : err}`,
+      );
+      throw err;
     }
   }
 
@@ -75,43 +120,32 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
   ) {
     const reason = "accepted intent not filled before deadline";
 
-    await this.intentsService.update(intentId, {
-      state: "slashed",
+    // Atomic guard: a concurrent solver fill() may have already transitioned
+    // this intent out of "accepted" — skip slashing if so.
+    const slashed = await this.intentsService.slashIfAccepted(intentId, {
       slashedAt: now,
       slashReason: reason,
     });
+    if (!slashed) return;
     this.intentsGateway.broadcast({ type: "intent_slashed", intentId, solver, reason });
 
     if (!solver) {
       // Shouldn't happen in practice — an "accepted" intent always has a
       // solver — but don't let a bad record throw the whole sweep cycle.
-      console.error(`[sweeper] intent ${intentId} was accepted with no solver on record`);
+      logger.error(`[sweeper] intent ${intentId} was accepted with no solver on record`);
       return;
     }
 
-    // Step 1: record a pending penalty (optimistic fillsFailed bump).
-    // At this point the slash is detected locally but not yet confirmed
-    // on-chain.  The solver's record enters "pending" state.
-    await this.solversService.recordFailedFill(solver, intentId);
+    await this.solversService.recordFailedFill(solver);
+    const slashRecord = await this.solversService.recordSlash(solver, intentId, reason, now);
 
-    // Step 2: submit the on-chain slash.  If submission fails we roll back
-    // the pending penalty so the solver is not permanently penalised for a
-    // slash that was never enforced.  If it succeeds, EventIngestionService
-    // will call confirmPenalty() once the solver_slashed event arrives.
-    try {
-      const result = await this.solverRegistryService.slashSolver({
-        solverAddress: solver,
-        intentId,
-        reason,
-      });
-      console.log(
-        `[sweeper] slash submitted: solver=${solver} intent=${intentId} detail=${result.detail} — awaiting on-chain confirmation`,
-      );
-    } catch (err) {
-      console.error(
-        `[sweeper] on-chain slash submission FAILED for solver=${solver} intent=${intentId}: ${(err as Error).message} — rolling back pending penalty`,
-      );
-      await this.solversService.rollbackPenalty(intentId);
-    }
+    const result = await this.solverRegistryService.slashSolver({
+      solverAddress: solver,
+      intentId,
+      reason,
+    });
+    console.log(
+      `[sweeper] slashed solver=${solver} for intent=${intentId}: ${result.detail} slashId=${slashRecord?.slashId ?? "unknown"}`,
+    );
   }
 }

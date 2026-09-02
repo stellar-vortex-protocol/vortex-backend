@@ -2,10 +2,13 @@ import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { scValToNative, SorobanRpc } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
+import { logger } from "../common/logger";
 import { SorobanService } from "./soroban.service";
 import { SolversService } from "../solvers/solvers.service";
 
 const POLL_INTERVAL_MS = 10_000;
+const RECONCILE_INTERVAL_MS = 60_000;
+const STALE_INTENT_THRESHOLD_SECONDS = 300;
 
 // Bound the in-memory dedupe set so long-lived processes don't leak memory.
 // Once we've tracked this many keys we drop the oldest (lowest-ledger) ones,
@@ -33,7 +36,9 @@ export function buildDedupeKey({ ledgerSequence, eventIndex }: DedupeKeyParts): 
 @Injectable()
 export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
   private interval?: NodeJS.Timeout;
+  private reconcileInterval?: NodeJS.Timeout;
   private readonly seenKeys = new Set<string>();
+  private readonly lastIntentUpdateById = new Map<string, number>();
   private nextStartLedger?: number;
   processedCount = 0;
   duplicateCount = 0;
@@ -46,12 +51,21 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit() {
     this.interval = setInterval(() => {
-      this.poll().catch((err) => console.error("[event-ingestion] poll failed", err));
+      this.poll().catch((err) => logger.error(`[event-ingestion] poll failed: ${err instanceof Error ? err.message : String(err)}`));
     }, POLL_INTERVAL_MS);
+
+    this.reconcileInterval = setInterval(() => {
+      this.reconcileStaleIntents().catch((err) => {
+        logger.error(
+          `[event-ingestion] stale-intent reconciliation failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }, RECONCILE_INTERVAL_MS);
   }
 
   onModuleDestroy() {
     if (this.interval) clearInterval(this.interval);
+    if (this.reconcileInterval) clearInterval(this.reconcileInterval);
   }
 
   async poll(): Promise<void> {
@@ -125,10 +139,39 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
         ),
       );
     }
+
+    const intentId = typeof topic[1] === "string" ? topic[1] : undefined;
+    if (intentId) {
+      this.lastIntentUpdateById.set(intentId, Math.floor(Date.now() / 1000));
+    }
   }
 
   private handleIntentFilled(event: SorobanRpc.Api.EventResponse, topic: unknown[]): void {
-    console.log(`[event-ingestion] intent_filled event at ledger=${event.ledger} txHash=${event.txHash}`, topic);
+    logger.info(
+      `[event-ingestion] intent_filled event at ledger=${event.ledger} txHash=${event.txHash} topic=${JSON.stringify(topic)}`,
+    );
+  }
+
+  private async reconcileStaleIntents(): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    for (const [intentId, lastUpdated] of this.lastIntentUpdateById.entries()) {
+      if (now - lastUpdated <= STALE_INTENT_THRESHOLD_SECONDS) continue;
+
+      logger.warn(
+        `[event-ingestion] stale intent state detected for intent=${intentId} lastUpdatedSecondsAgo=${now - lastUpdated}; polling chain for reconciliation`,
+      );
+
+      const settlementContractId = this.configService.get("stellar.settlementContractId", { infer: true });
+      if (!settlementContractId) continue;
+
+      const latestLedger = await this.sorobanService.getLatestLedger();
+      await this.sorobanService.getEvents({
+        startLedger: Math.max(1, latestLedger.sequence - 1),
+        filters: [{ type: "contract", contractIds: [settlementContractId] }],
+      });
+
+      this.lastIntentUpdateById.set(intentId, Math.floor(Date.now() / 1000));
+    }
   }
 
   /**

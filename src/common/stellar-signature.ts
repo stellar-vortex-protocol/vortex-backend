@@ -47,6 +47,13 @@ export function buildCancelMessage(intentId: string): string {
 }
 
 /**
+ * Build the canonical message that a solver must sign to authenticate its WS connection.
+ */
+export function buildWsAuthMessage(solver: string, timestamp: number | string): string {
+  return `solver-auth:${solver}:${String(timestamp)}`;
+}
+
+/**
  * Build the canonical message that a solver must sign to accept an intent.
  */
 export function buildAcceptMessage(intentId: string, solver: string): string {
@@ -72,4 +79,11 @@ export function buildRegisterMessage(address: string): string {
  */
 export function buildSolverStatusMessage(action: "deactivate" | "reactivate" | "deregister", address: string): string {
   return `${action}:${address}`;
+}
+
+/**
+ * Build the canonical message that a solver must sign to submit a slash dispute.
+ */
+export function buildDisputeMessage(slashId: string, address: string, reason: string): string {
+  return `dispute:${slashId}:${address}:${reason}`;
 }

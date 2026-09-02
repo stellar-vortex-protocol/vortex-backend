@@ -52,6 +52,7 @@ GET  /api/v1/chain/account/:key   — Stellar account lookup
 ### Prerequisites
 
 - Node.js 20+
+- Docker (optional, for the one-command local Postgres + app dev stack)
 
 ```bash
 npm install
@@ -59,6 +60,21 @@ cp .env.testnet.example .env   # testnet development (most contributors)
 # cp .env.mainnet.example .env # production/mainnet — requires real keys
 npm run dev    # http://localhost:4000
 ```
+
+### One-command local stack with Postgres
+
+If you need the Prisma-backed local database flow, use the repo-provided compose stack:
+
+```bash
+docker compose up --build
+```
+
+This starts:
+- a `postgres:16-alpine` service matching the CI credentials (`vortex` / `vortex` / `vortex`)
+- the app service built from the existing Dockerfile
+- the app already pointed at `DATABASE_URL=postgresql://vortex:vortex@postgres:5432/vortex?schema=public`
+
+After the stack is up, the backend is available at http://localhost:4000 and the DB is reachable using the same default credentials shown in `.env.example`.
 
 Three `.env.example` variants are provided for different deployment targets:
 
@@ -150,6 +166,17 @@ Store secrets (`SOROBAN_SIGNING_KEY`, `DATABASE_URL`) in a secrets manager
 (AWS Secrets Manager, HashiCorp Vault, etc.) and inject them at runtime;
 never commit filled-in values to version control.
 
+### Verified security headers
+
+The Nest app boots with Helmet enabled and explicitly configures HSTS for HTTPS
+origins. The backend also trusts a single proxy hop (`app.set("trust proxy", 1)`) so a TLS-terminating
+load balancer can pass through `X-Forwarded-Proto: https` and allow Helmet/HSTS to
+emit `Strict-Transport-Security` rather than silently skipping it behind a proxy.
+
+The HTTP response set is verified in the e2e suite to include Helmet defaults such as
+`X-Content-Type-Options: nosniff` alongside the configured HSTS policy. This is the
+baseline transport-security posture the service relies on in production.
+
 ---
 
 ## Supported chains
@@ -185,8 +212,10 @@ versus **planned** (schema/token data in place, on-chain settlement pending).
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for backend-specific setup, conventions, and
-the PR checklist. It links to the org-wide guide for process and code of conduct.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for backend-specific setup, conventions,
+and the PR checklist. For community expectations and governance, see
+[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) and
+[docs/rfcs/README.md](./docs/rfcs/README.md).
 
 ## License
 

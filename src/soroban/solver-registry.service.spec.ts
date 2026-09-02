@@ -18,6 +18,7 @@ function makeConfigService(overrides: Partial<AppConfig["stellar"]> = {}) {
     databaseUrl: "postgresql://vortex:vortex@localhost:5432/vortex?schema=public",
     stellar,
     onchainIntentsEnabled: false,
+    onchainWritesDryRun: true,
     corsOrigin: "*",
     wsMaxConnections: 1000,
   };

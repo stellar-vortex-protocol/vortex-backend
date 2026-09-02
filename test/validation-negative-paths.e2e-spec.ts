@@ -26,6 +26,27 @@ describe("Validation Negative Paths (e2e)", () => {
     minDstAmount: "990000",
   };
 
+  describe("Intent creation validation", () => {
+    it("should return 400 for same-asset self-swaps on Stellar", async () => {
+      const res = await request(app.getHttpServer())
+        .post("/api/v1/intents")
+        .send({
+          ...validCreateBody,
+          srcChain: "stellar",
+          srcTokenAddress: validCreateBody.dstTokenContract,
+          srcTokenSymbol: "USDC",
+          srcAmount: "1000000",
+          dstTokenContract: validCreateBody.dstTokenContract,
+          dstTokenSymbol: "USDC",
+        })
+        .expect(400);
+
+      expect(res.body.message).toEqual(
+        expect.arrayContaining([expect.stringContaining("Self-swaps are not allowed")]),
+      );
+    });
+  });
+
   describe("Pagination validation", () => {
     it("should return 400 for malformed limit (NaN)", async () => {
       const res = await request(app.getHttpServer())
@@ -99,6 +120,69 @@ describe("Validation Negative Paths (e2e)", () => {
       const res = await request(app.getHttpServer())
         .post(`/api/v1/intents/${intentId}/fill`)
         .send({ solver: "SOLVER_ALPHA", fillAmount: "-1000", txHash: "test" })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it("should return 400 for oversized signature strings", async () => {
+      const intentId = await createAndAcceptIntent();
+      const res = await request(app.getHttpServer())
+        .post(`/api/v1/intents/${intentId}/fill`)
+        .send({
+          solver: "SOLVER_ALPHA",
+          fillAmount: "1000",
+          txHash: "test",
+          signature: "A".repeat(89),
+        })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+  });
+
+  describe("List filter enum validation (#270)", () => {
+    it("should return 400 for an unknown state filter", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ state: "bogus", limit: 20, offset: 0 })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it("should return 400 for an unknown chain filter", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ chain: "notachain", limit: 20, offset: 0 })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it("should still accept a valid state filter", async () => {
+      await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ state: "open", limit: 20, offset: 0 })
+        .expect(200);
+    });
+  });
+
+  describe("Unknown destination/source token rejection (#276)", () => {
+    it("should return 400 for a well-formed but unregistered dstTokenContract", async () => {
+      const res = await request(app.getHttpServer())
+        .post("/api/v1/intents")
+        .send({
+          ...validCreateBody,
+          dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMZZZZZZ",
+        })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it("should return 400 for a well-formed but unregistered srcTokenAddress on a known chain", async () => {
+      const res = await request(app.getHttpServer())
+        .post("/api/v1/intents")
+        .send({
+          ...validCreateBody,
+          srcTokenAddress: "0x1111111111111111111111111111111111111111",
+        })
         .expect(400);
       expect(res.body.error).toBeDefined();
     });

@@ -8,7 +8,7 @@ import { StellarTxService } from "./stellar-tx.service";
 import { SolversModule } from "../solvers/solvers.module";
 
 @Module({
-  imports: [SolversModule],
+  imports: [forwardRef(() => IntentsModule)],
   controllers: [SorobanController],
   providers: [
     SorobanService,
