@@ -130,6 +130,57 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     return row ? this.fromRow(row) : null;
   }
 
+  /**
+   * Atomically cancel an intent only when it is currently `open`. Guards
+   * against a concurrent solver accept() or sweeper expiry on the same intent.
+   */
+  async cancelIfOpen(id: string): Promise<Intent | null> {
+    const result = await this.prisma.intent.updateMany({
+      where: { intentId: id, state: PrismaIntentState.open },
+      data: { state: PrismaIntentState.cancelled },
+    });
+
+    if (result.count === 0) return null;
+
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
+  }
+
+  /**
+   * Atomically expire an intent only when it is currently `open`. Used by the
+   * sweeper so a concurrent user cancel() or solver accept() always wins the race.
+   */
+  async expireIfOpen(id: string): Promise<Intent | null> {
+    const result = await this.prisma.intent.updateMany({
+      where: { intentId: id, state: PrismaIntentState.open },
+      data: { state: PrismaIntentState.expired },
+    });
+
+    if (result.count === 0) return null;
+
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
+  }
+
+  /**
+   * Atomically slash an intent only when it is currently `accepted`. Used by
+   * the sweeper so a concurrent solver fill() always wins the race.
+   */
+  async slashIfAccepted(
+    id: string,
+    patch: { slashedAt: number; slashReason: string },
+  ): Promise<Intent | null> {
+    const result = await this.prisma.intent.updateMany({
+      where: { intentId: id, state: PrismaIntentState.accepted },
+      data: { state: PrismaIntentState.slashed },
+    });
+
+    if (result.count === 0) return null;
+
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
+  }
+
   // ── Private helpers ────────────────────────────────────────────────────────
 
   /** Map Intent → Prisma create/update data (omits intentId which is the key). */
