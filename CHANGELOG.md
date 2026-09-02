@@ -7,9 +7,21 @@ and [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 Commit message format is enforced via [commitlint](https://commitlint.js.org/) starting with v0.2.0.
 
 > **How to update this file**
-> Run `npm run generate:client` after any API surface change and bump the version
-> in `package.json`. Add your changes under `[Unreleased]` as you work; entries
-> are moved to a versioned section on release.
+>
+> Add entries to the `[Unreleased]` section as you work on features and fixes.
+> Organize by subsection (`Added`, `Fixed`, `Removed`, etc.) as defined below.
+>
+> **Mapping from Conventional Commits:**
+> - `feat(scope): ...` → `[Added]`
+> - `fix(scope): ...` → `[Fixed]`
+> - `perf(scope): ...` → `[Changed]` (with note about performance improvement)
+> - `refactor(scope): ...` → `[Changed]` (with scope of refactoring)
+> - `docs(scope): ...` → `[Documentation]` (if user-facing; skip if internal only)
+> - `chore(scope): ...` → Skip (internal tooling, no user-visible change)
+>
+> On version release, the `[Unreleased]` section is renamed to `[X.Y.Z]` with the
+> release date, and a new `[Unreleased]` section is created. Version must be bumped
+> in `package.json` to match.
 
 ---
 

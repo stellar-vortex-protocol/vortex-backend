@@ -382,6 +382,81 @@ The CI job `commitlint` checks the PR title on every pull request. Squash
 merges are preferred so that the merge commit title is the canonical changelog
 entry.
 
+### Updating the changelog
+
+When working on a feature or fix that affects users, add an entry to `CHANGELOG.md`
+under `[Unreleased]` before opening your PR:
+
+| Commit Type | Changelog Section | Example |
+|-------------|-------------------|---------|
+| `feat(...)` | `Added` | A new endpoint or behavior |
+| `fix(...)` | `Fixed` | A bug fix or behavioral correction |
+| `perf(...)` | `Changed` | Performance improvement |
+| `refactor(...)` | `Changed` | Major structural change affecting users |
+| `docs(...)` | `Documentation` | User-facing documentation changes |
+| `chore(...)` | — | Skip (internal tooling, no user-visible change) |
+| `test(...)` | — | Skip (internal tests, no user-visible change) |
+
+For details on changelog format and section definitions, see the instructions in
+`CHANGELOG.md`.
+
+---
+
+## GitHub issue labels
+
+When creating or triaging GitHub Issues, use the label taxonomy defined in
+[docs/LABEL_TAXONOMY.md](./docs/LABEL_TAXONOMY.md) to categorize work by difficulty
+and area. This helps contributors discover work that matches their skill level and
+interest.
+
+### Quick reference
+
+- **`good-first-issue`** — Suitable for newcomers; isolated, self-contained, no major
+  prerequisites blocking
+- **`help-wanted`** — Open to anyone; clear scope but could benefit from fresh eyes
+- **`category/*`** — Categorize by area: `category/backend`, `category/security`,
+  `category/devops`, `category/governance`
+- **`status/*`** — Track lifecycle: `status/in-progress`, `status/blocked`,
+  `status/ready-to-merge`
+
+For detailed mapping rules (e.g. how to label issues from the contributor backlog),
+see [docs/LABEL_TAXONOMY.md](./docs/LABEL_TAXONOMY.md).
+
+## Drips Wave contributor accounting
+
+This project offers a points-based contributor incentive program (Drips Wave).
+Contributors who close issues earn points that are recorded in a ledger.
+
+### How points are awarded
+
+Every issue in the contributor backlog has a fixed point value:
+- **High complexity**: 200 points
+- **Medium complexity**: 150 points
+
+When your PR closes an issue, the points for that issue are credited to your contributor account.
+See [docs/DRIPS_WAVE_LEDGER.md](./docs/DRIPS_WAVE_LEDGER.md) for the full ledger and accounting rules.
+
+### For PR authors
+
+When you open a PR that solves an issue from the backlog, include a `Closes` tag in your
+PR description to link the PR to the issue number:
+
+```markdown
+## Description
+
+Brief description of the changes.
+
+Closes #<issue-number>
+```
+
+This creates an auditable record that ties your PR to a specific point value. The ledger
+is updated when the PR is merged.
+
+### Disputes and escalation
+
+If there's a disagreement about points, attribution, or the ledger record, see the
+escalation process in [docs/DRIPS_WAVE_LEDGER.md](./docs/DRIPS_WAVE_LEDGER.md).
+
 ---
 
 ## Submitting a pull request
