@@ -7,6 +7,7 @@ import { SignerService } from "./signer.service";
 import { StellarTxService } from "./stellar-tx.service";
 
 @Module({
+  imports: [forwardRef(() => IntentsModule)],
   controllers: [SorobanController],
   providers: [
     SorobanService,

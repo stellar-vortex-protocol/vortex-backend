@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable } from "@nestjs/common";
 import { SUPPORTED_TOKENS, STELLAR_TOKENS, SourceToken, StellarToken } from "./tokens.data";
 import { SupportedChain } from "../intents/intents.types";
 import { ITokensRepository, TOKENS_REPOSITORY, TokenRecord } from "./tokens.repository";
@@ -82,9 +82,40 @@ export class TokensService {
     };
   }
 
-  async getByChain(chain?: string) {
-    const chainRecords = chain ? await this.repo.findByChain(chain) : await this.repo.findAll();
-    const stellarTokens = chainRecords.filter((t) => t.chain === "stellar");
+  /**
+   * Like {@link resolveSrcToken} but throws a `BadRequestException` instead of
+   * returning `undefined` when the chain + address does not resolve to a token
+   * in the configured registry (issue #276).
+   *
+   * Use this on the write path (intent creation) where an unrecognised token
+   * must be rejected outright rather than silently stored with no priceUSD.
+   */
+  resolveSrcTokenOrThrow(chain: SupportedChain, address: string): ResolvedSrcToken {
+    const token = this.resolveSrcToken(chain, address);
+    if (!token) {
+      throw new BadRequestException(
+        `Unknown source token '${address}' for chain '${chain}' in the configured token registry`,
+      );
+    }
+    return token;
+  }
+
+  /**
+   * Like {@link resolveDstToken} but throws a `BadRequestException` instead of
+   * returning `undefined` when the contract does not resolve to a known Stellar
+   * token (issue #276).
+   */
+  resolveDstTokenOrThrow(contract: string): ResolvedDstToken {
+    const token = this.resolveDstToken(contract);
+    if (!token) {
+      throw new BadRequestException(
+        "Unknown destination token contract for the configured token registry",
+      );
+    }
+    return token;
+  }
+
+  getByChain(chain?: string) {
     if (chain === "stellar") {
       return { tokens: stellarTokens.map((t) => ({ ...t, contract: t.address })), chain: "stellar" };
     }

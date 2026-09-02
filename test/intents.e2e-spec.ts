@@ -340,17 +340,18 @@ describe("IntentsController (e2e)", () => {
     expect(res.body.srcToken.priceUSD).toBe(1.0);
   });
 
-  it("POST /api/v1/intents create with unknown srcToken address still succeeds (priceUSD undefined)", async () => {
+  it("POST /api/v1/intents create rejects an unregistered srcToken address (#276)", async () => {
+    // Previously this silently created an intent with priceUSD undefined; #276
+    // tightens it to a clean 400 so an unknown asset can't enter the system.
     const res = await request(app.getHttpServer())
       .post("/api/v1/intents")
       .send({
         ...validCreateBody,
-        srcTokenAddress: "0xunknowntoken000000000000000000000000000",
+        srcTokenAddress: "0x1111111111111111111111111111111111111111",
       })
-      .expect(201);
+      .expect(400);
 
-    // priceUSD should be undefined (not found in registry)
-    expect(res.body.srcToken.priceUSD).toBeUndefined();
+    expect(res.body.error).toBeDefined();
   });
 
   it("POST /api/v1/intents/quote includes route.steps in each quote (#220)", async () => {
@@ -462,5 +463,39 @@ describe("IntentsController (e2e)", () => {
     await request(app.getHttpServer())
       .get(`/api/v1/intents/${created.intentId}/quote`)
       .expect(404);
+  });
+
+  // ── #275: batch intent-status lookup ─────────────────────────────────────
+
+  it("POST /api/v1/intents/batch returns the record for each found ID and omits unknown ones", async () => {
+    const a = await createIntent();
+    const b = await createIntent();
+
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents/batch")
+      .send({ intentIds: [a.intentId, b.intentId, "does-not-exist"] })
+      .expect(201);
+
+    expect(res.body.count).toBe(2);
+    const ids = res.body.intents.map((i: { intentId: string }) => i.intentId).sort();
+    expect(ids).toEqual([a.intentId, b.intentId].sort());
+  });
+
+  it("POST /api/v1/intents/batch returns an empty list when nothing matches", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents/batch")
+      .send({ intentIds: ["nope-1", "nope-2"] })
+      .expect(201);
+
+    expect(res.body).toEqual({ intents: [], count: 0 });
+  });
+
+  it("POST /api/v1/intents/batch rejects a list larger than 100 IDs with 400", async () => {
+    const res = await request(app.getHttpServer())
+      .post("/api/v1/intents/batch")
+      .send({ intentIds: Array.from({ length: 101 }, (_, i) => `id-${i}`) })
+      .expect(400);
+
+    expect(res.body.error).toBeDefined();
   });
 });

@@ -9,12 +9,17 @@ import { ConfigService } from "@nestjs/config";
 import { v4 as uuidv4 } from "uuid";
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Intent, IntentAuditEntry, IntentState } from "./intents.types";
+import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
 import { AppConfig } from "../config/configuration";
 import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
 
 const STORE_SIZE_LOG_INTERVAL_MS = 60_000;
+
+/** How long a completed idempotency-key result stays replayable. */
+const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
 
 /**
  * Orchestration layer for intents.
@@ -34,6 +39,14 @@ export class IntentsService implements OnModuleDestroy {
    * request deduplication concern, not a durable persistence concern.
    */
   private readonly idempotencyCache = new Map<string, { intentId: string; expiresAt: number }>();
+
+  /**
+   * Keys whose creation is currently in flight → the in-flight creation
+   * promise. Claimed synchronously in {@link create} so that concurrent
+   * requests carrying the same idempotency key collapse onto a single created
+   * intent instead of racing the check-then-set window (issue #274).
+   */
+  private readonly idempotencyInFlight = new Map<string, Promise<Intent>>();
 
   /**
    * In-memory audit log used as a fast read path and fallback when the DB is
@@ -71,25 +84,72 @@ export class IntentsService implements OnModuleDestroy {
     data: Omit<Intent, "intentId" | "createdAt" | "state">,
     idempotencyKey?: string,
   ): Promise<Intent> {
+    if (!idempotencyKey) {
+      return this.persistNewIntent(data);
+    }
+
     const now = Math.floor(Date.now() / 1000);
 
-    if (idempotencyKey) {
-      const cached = this.idempotencyCache.get(idempotencyKey);
-      if (cached && cached.expiresAt > now) {
-        const cachedIntent = await this.repo.findById(cached.intentId);
-        if (cachedIntent) {
-          return cachedIntent;
-        }
+    // 1. Fast path — a previous request with this key already completed.
+    const cached = this.idempotencyCache.get(idempotencyKey);
+    if (cached && cached.expiresAt > now) {
+      const cachedIntent = await this.repo.findById(cached.intentId);
+      if (cachedIntent) {
+        return cachedIntent;
       }
+      // Cache entry outlived its intent — drop it and fall through.
       this.idempotencyCache.delete(idempotencyKey);
     }
+
+    // 2. Race-safe claim. The check-and-set on `idempotencyInFlight` runs
+    //    synchronously — there is no `await` between the `get` and the `set` —
+    //    so two concurrent callers carrying the same key can never both proceed
+    //    to create. The loser awaits the winner's in-flight promise and returns
+    //    its result. The claim is taken *before* the conditional
+    //    `registerOnChain()` await inside persistNewIntent(), so the race window
+    //    is closed rather than merely shifted past the on-chain call.
+    //
+    //    The future Prisma-backed adapter (issue #1) must preserve the same
+    //    guarantee at the storage layer: an atomic
+    //    `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING` followed by a
+    //    read-back of the winning row, rather than a read-then-write.
+    const inFlight = this.idempotencyInFlight.get(idempotencyKey);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const creation = this.persistNewIntent(data)
+      .then((intent) => {
+        this.idempotencyCache.set(idempotencyKey, {
+          intentId: intent.intentId,
+          expiresAt: now + IDEMPOTENCY_TTL_SECONDS,
+        });
+        return intent;
+      })
+      .finally(() => {
+        this.idempotencyInFlight.delete(idempotencyKey);
+      });
+
+    this.idempotencyInFlight.set(idempotencyKey, creation);
+    return creation;
+  }
+
+  /**
+   * Build, optionally register on-chain, and persist a brand-new intent.
+   * Contains no idempotency logic — deduplication is the caller's concern.
+   */
+  private async persistNewIntent(
+    data: Omit<Intent, "intentId" | "createdAt" | "state">,
+  ): Promise<Intent> {
+    const now = Math.floor(Date.now() / 1000);
 
     const intent: Intent = {
       ...data,
       intentId: uuidv4(),
       state: "open",
       createdAt: now,
-      deadline: data.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[data.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
+      deadline:
+        data.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[data.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
     };
 
     if (this.configService.get("onchainIntentsEnabled", { infer: true })) {
@@ -97,15 +157,6 @@ export class IntentsService implements OnModuleDestroy {
     }
 
     await this.repo.save(intent);
-
-    if (idempotencyKey) {
-      const ttl = 86400; // 24 hours
-      this.idempotencyCache.set(idempotencyKey, {
-        intentId: intent.intentId,
-        expiresAt: now + ttl,
-      });
-    }
-
     return intent;
   }
 
@@ -166,6 +217,22 @@ export class IntentsService implements OnModuleDestroy {
 
   async getByUser(user: string): Promise<Intent[]> {
     return this.repo.findByUser(user);
+  }
+
+  /**
+   * Batch-fetch the current record for each of `ids` (issue #275).
+   *
+   * IDs are de-duplicated; IDs with no matching record are simply omitted from
+   * the result (callers get "missing" by comparing lengths, not a 404 per ID).
+   *
+   * This reuses `get()` per ID rather than adding a storage-layer method — fine
+   * for the in-memory adapter. Issue #1's Prisma adapter should implement this
+   * as a single `WHERE intent_id IN (...)` query for efficiency.
+   */
+  async getMany(ids: string[]): Promise<Intent[]> {
+    const unique = [...new Set(ids)];
+    const found = await Promise.all(unique.map((id) => this.get(id)));
+    return found.filter((intent): intent is Intent => intent !== undefined);
   }
 
   async getAcceptedCountBySolver(solver: string): Promise<number> {

@@ -52,6 +52,7 @@ GET  /api/v1/chain/account/:key   — Stellar account lookup
 ### Prerequisites
 
 - Node.js 20+
+- Docker (optional, for the one-command local Postgres + app dev stack)
 
 ```bash
 npm install
@@ -59,6 +60,21 @@ cp .env.testnet.example .env   # testnet development (most contributors)
 # cp .env.mainnet.example .env # production/mainnet — requires real keys
 npm run dev    # http://localhost:4000
 ```
+
+### One-command local stack with Postgres
+
+If you need the Prisma-backed local database flow, use the repo-provided compose stack:
+
+```bash
+docker compose up --build
+```
+
+This starts:
+- a `postgres:16-alpine` service matching the CI credentials (`vortex` / `vortex` / `vortex`)
+- the app service built from the existing Dockerfile
+- the app already pointed at `DATABASE_URL=postgresql://vortex:vortex@postgres:5432/vortex?schema=public`
+
+After the stack is up, the backend is available at http://localhost:4000 and the DB is reachable using the same default credentials shown in `.env.example`.
 
 Three `.env.example` variants are provided for different deployment targets:
 
