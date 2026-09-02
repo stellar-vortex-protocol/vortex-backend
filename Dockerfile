@@ -21,9 +21,9 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-# Install production-only deps.
+# Install production-only deps and keep the runtime image slim.
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm ci --omit=dev --ignore-scripts=false && npm cache clean --force
 
 # Copy generated Prisma client and migration files so `migrate deploy` works at
 # container start without needing the full dev toolchain.

@@ -10,6 +10,8 @@ export interface SolverRecord {
   avgFillTime: number; // seconds
   isActive: boolean;
   registeredAt: number;
+  /** Unix epoch seconds of the solver's most recent activity (registration, fill, or status change). */
+  lastActiveAt: number;
   supportedChains: SupportedChain[];
   supportedTokens: string[];
 }

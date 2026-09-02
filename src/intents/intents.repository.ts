@@ -56,6 +56,12 @@ export interface IIntentsRepository {
   update(id: string, patch: Partial<Intent>): Intent | null | Promise<Intent | null>;
 
   /**
+   * Remove a stored intent. Used only for in-memory retention sweeps for stale
+   * terminal-state records; Prisma-backed stores ignore this call by design.
+   */
+  delete(id: string): boolean | Promise<boolean>;
+
+  /**
    * Atomically transition an intent from `open` → `accepted` only if it is
    * currently in the `open` state.  Mirrors the DB pattern:
    *   UPDATE intents SET state='accepted', solver=$2, deadline=$3
@@ -82,6 +88,34 @@ export interface IIntentsRepository {
     id: string,
     solver: string,
     patch: Omit<Partial<Intent>, "state" | "solver">,
+  ): Intent | null | Promise<Intent | null>;
+
+  /**
+   * Atomically transition an intent from `open` → `cancelled` only if it is
+   * currently in the `open` state.  Mirrors the DB pattern:
+   *   UPDATE intents SET state='cancelled'
+   *   WHERE intent_id=$1 AND state='open'
+   *   RETURNING *
+   * Returns the updated intent on success, `null` when the intent is not
+   * found or is not in the `open` state (e.g. already accepted or expired).
+   */
+  cancelIfOpen(id: string): Intent | null | Promise<Intent | null>;
+
+  /**
+   * Atomically transition an intent from `open` → `expired` only if it is
+   * currently in the `open` state.  Guards the sweeper's expiry pass against
+   * a concurrent user cancel() or solver accept() on the same intent.
+   */
+  expireIfOpen(id: string): Intent | null | Promise<Intent | null>;
+
+  /**
+   * Atomically transition an intent from `accepted` → `slashed` only if it is
+   * currently in the `accepted` state.  Guards the sweeper's slashing pass
+   * against a concurrent solver fill().
+   */
+  slashIfAccepted(
+    id: string,
+    patch: { slashedAt: number; slashReason: string },
   ): Intent | null | Promise<Intent | null>;
 }
 
@@ -130,6 +164,10 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     return updated;
   }
 
+  delete(id: string): boolean {
+    return this.store.delete(id);
+  }
+
   acceptIfOpen(id: string, solver: string, newDeadline: number): Intent | null {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "open") return null;
@@ -146,6 +184,33 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "accepted" || existing.solver !== solver) return null;
     const updated: Intent = { ...existing, ...patch, state: "filled" };
+    this.store.set(id, updated);
+    return updated;
+  }
+
+  cancelIfOpen(id: string): Intent | null {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "open") return null;
+    const updated: Intent = { ...existing, state: "cancelled" };
+    this.store.set(id, updated);
+    return updated;
+  }
+
+  expireIfOpen(id: string): Intent | null {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "open") return null;
+    const updated: Intent = { ...existing, state: "expired" };
+    this.store.set(id, updated);
+    return updated;
+  }
+
+  slashIfAccepted(
+    id: string,
+    patch: { slashedAt: number; slashReason: string },
+  ): Intent | null {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "accepted") return null;
+    const updated: Intent = { ...existing, ...patch, state: "slashed" };
     this.store.set(id, updated);
     return updated;
   }

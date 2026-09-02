@@ -1,5 +1,6 @@
 import { Test } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
+import { Keypair } from "@stellar/stellar-sdk";
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
 import { StellarTxService } from "../soroban/stellar-tx.service";
@@ -7,6 +8,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
 import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
 import { logger } from "../common/logger";
+import { buildWsAuthMessage } from "../common/stellar-signature";
 
 jest.mock("../common/logger", () => ({
   logger: {
@@ -18,6 +20,16 @@ jest.mock("../common/logger", () => ({
 }));
 
 function makeIntentsService(): IntentsService {
+  const repo = {
+    findAll: jest.fn().mockResolvedValue([]),
+    save: jest.fn().mockResolvedValue({}),
+    findById: jest.fn().mockResolvedValue(undefined),
+    getByState: jest.fn().mockResolvedValue([]),
+    getByUser: jest.fn().mockResolvedValue([]),
+    findByIdAndUser: jest.fn().mockResolvedValue(undefined),
+    update: jest.fn().mockResolvedValue(undefined),
+    clear: jest.fn(),
+  };
   const configService = {
     get: jest.fn().mockReturnValue(false),
   } as unknown as ConfigService<AppConfig, true>;
@@ -27,7 +39,18 @@ function makeIntentsService(): IntentsService {
       findMany: jest.fn().mockResolvedValue([]),
     },
   } as unknown as PrismaService;
-  return new IntentsService(configService, {} as StellarTxService, prismaService);
+  return new IntentsService(
+    repo as any,
+    configService,
+    {} as StellarTxService,
+    prismaService,
+  );
+}
+
+function makeSolversService() {
+  return {
+    get: jest.fn().mockResolvedValue({ address: "GTEST", isActive: true }),
+  } as any;
 }
 
 function createMockClient() {
@@ -48,12 +71,14 @@ function createMockClient() {
 describe("IntentsGateway heartbeat", () => {
   let gateway: IntentsGateway;
   let intentsService: IntentsService;
+  let solversService: ReturnType<typeof makeSolversService>;
 
   beforeEach(async () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = await makeIntentsService();
-    gateway = new IntentsGateway(intentsService);
+    solversService = makeSolversService();
+    gateway = new IntentsGateway(intentsService, solversService);
   });
 
   afterEach(() => {
@@ -128,17 +153,37 @@ describe("IntentsGateway heartbeat", () => {
     expect(c1.send).toHaveBeenCalledWith(expected);
     expect(c2.send).toHaveBeenCalledWith(expected);
   });
+
+  it("accepts a valid solver auth message and rejects invalid signatures", async () => {
+    const keypair = Keypair.random();
+    const client = createMockClient();
+    const timestamp = Math.floor(Date.now() / 1000);
+    solversService.get = jest.fn().mockResolvedValue({ address: keypair.publicKey(), isActive: true });
+
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    const message = buildWsAuthMessage(keypair.publicKey(), timestamp);
+    const signature = keypair.sign(Buffer.from(message, "utf8")).toString("base64");
+
+    await client._listeners.message(JSON.stringify({ type: "auth", solver: keypair.publicKey(), timestamp, signature }));
+    expect(client.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "auth_ok" }));
+
+    await client._listeners.message(JSON.stringify({ type: "auth", solver: keypair.publicKey(), timestamp, signature: "bad" }));
+    expect(client.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }));
+  });
 });
 
 describe("IntentsGateway logging", () => {
   let gateway: IntentsGateway;
   let intentsService: IntentsService;
+  let solversService: ReturnType<typeof makeSolversService>;
 
   beforeEach(async () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = await makeIntentsService();
-    gateway = new IntentsGateway(intentsService);
+    solversService = makeSolversService();
+    gateway = new IntentsGateway(intentsService, solversService);
   });
 
   afterEach(() => {

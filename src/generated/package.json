@@ -1,0 +1,19 @@
+{
+  "name": "@vortex-protocol/backend-sdk",
+  "version": "0.1.0",
+  "description": "Typed TypeScript client for the Vortex Backend API.",
+  "license": "MIT",
+  "types": "index.ts",
+  "main": "index.ts",
+  "exports": {
+    ".": {
+      "types": "./index.ts",
+      "default": "./index.ts"
+    }
+  },
+  "files": [
+    "index.ts",
+    "api-types.ts",
+    "openapi.json"
+  ]
+}

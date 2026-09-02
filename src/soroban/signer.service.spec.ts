@@ -4,6 +4,7 @@ import { Account, Keypair, Networks, Operation, TransactionBuilder } from "@stel
 import { AppConfig } from "../config/configuration";
 import { SignerService } from "./signer.service";
 import { SorobanService } from "./soroban.service";
+import { findSensitiveKeyMaterial } from "./redaction";
 
 function configWith(signerSecretKey: string, network: AppConfig["stellar"]["network"] = "testnet") {
   const values: Record<string, unknown> = {
@@ -68,6 +69,19 @@ describe("SignerService", () => {
     expect(String(service)).not.toContain(secret);
     expect(JSON.stringify(service)).not.toContain(secret);
     expect(inspect(service)).not.toContain(secret);
+    expect(findSensitiveKeyMaterial(service)).toEqual([]);
+  });
+
+  it("exposes no raw Stellar secret in serialized error payloads", () => {
+    const keypair = Keypair.random();
+    const secret = keypair.secret();
+    const payload = {
+      error: "transaction simulation failed",
+      signer: { secretKey: secret, publicKey: keypair.publicKey() },
+    };
+
+    expect(findSensitiveKeyMaterial(payload)).toContain(secret);
+    expect(findSensitiveKeyMaterial({ error: "ok" })).toEqual([]);
   });
 
   describe("withNextSequence", () => {
