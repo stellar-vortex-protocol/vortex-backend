@@ -31,29 +31,23 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
 - Husky `commit-msg` hook — runs commitlint on every local commit (Closes #137)
 - CI job `commitlint` — validates commit messages on every push/PR in GitHub Actions
   (Closes #137)
-- `POST /api/v1/intents/batch` — bounded batch intent-status lookup (`{ intentIds: string[] }`,
-  capped at 100). Returns the current record for each found ID; unknown IDs are omitted.
-  Lets solver bots and history views reconcile a known set of intent IDs in one call
-  instead of N `GET /:id` requests (Closes #275)
-- `SIGUSR2` manual sweep trigger — operator-only break-glass that runs exactly one
-  `IntentsSweeperService.sweep()` cycle on demand, logged loudly. Replaces the
-  REPL-based procedure in `docs/runbooks/on-call.md` (Closes #269)
-
-### Changed
-- `ListIntentsDto.state` and `.chain` are now validated against the real
-  `IntentState` / `SUPPORTED_CHAINS` values (`@IsIn`) instead of a bare `@IsString()`.
-  `GET /api/v1/intents?state=bogus` (or `?chain=bogus`) now returns `400` with
-  validation details instead of silently returning an empty result set. Swagger
-  `enum` annotations added. `INTENT_STATES` is now exported from `intents.types.ts`
-  (Closes #270)
-- Intent creation (`POST /api/v1/intents`) now rejects an unrecognised
-  `srcTokenAddress` or `dstTokenContract` with a `400` instead of silently creating
-  an intent with `priceUSD: undefined`. `POST /api/v1/intents/quote` applies the same
-  check when a token contract/address is supplied. **Behavior tightening:**
-  requests that were previously accepted with an unknown token will now be rejected
-  (Closes #276)
+- `src/common/amount.ts` — shared, unit-tested base-units ↔ decimal conversion plus
+  the protocol fee (0.05 %) and quote-variance helpers; `IntentsController.quote()`
+  and `fill()` now use it instead of duplicated inline `BigInt`/decimal math
+  (Closes #272)
+- `PATCH /api/v1/solvers/:address` (`UpdateSolverDto`, `buildUpdateSolverMessage`) —
+  signature-verified partial update of a solver's mutable profile fields
+  (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`); immutable fields
+  are stripped by the DTO whitelist (Closes #273)
+- Typed Swagger response documentation for every `SorobanController` and
+  `TokensController` route, including the account route's 400/429 responses
+  (Closes #271)
 
 ### Fixed
+- `IntentsService.create()` idempotency-key handling is now race-safe — concurrent
+  requests carrying the same key synchronously claim an in-flight slot before any
+  `await`, so exactly one intent is created and the losers replay its result
+  (Closes #274)
 - `TokensModule` was missing `exports: [TokensService]` — `IntentsController`
   could not inject `TokensService` outside the Jest test environment
 - `IntentsModule` was missing `exports: [IntentsGateway]` — `StatsService`

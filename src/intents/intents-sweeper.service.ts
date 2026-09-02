@@ -131,6 +131,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     }
 
     await this.solversService.recordFailedFill(solver);
+    const slashRecord = await this.solversService.recordSlash(solver, intentId, reason, now);
 
     const result = await this.solverRegistryService.slashSolver({
       solverAddress: solver,
@@ -138,7 +139,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       reason,
     });
     console.log(
-      `[sweeper] slashed solver=${solver} for intent=${intentId}: ${result.detail}`,
+      `[sweeper] slashed solver=${solver} for intent=${intentId}: ${result.detail} slashId=${slashRecord?.slashId ?? "unknown"}`,
     );
   }
 }
