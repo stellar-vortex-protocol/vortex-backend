@@ -73,6 +73,16 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     }
   }
 
+  async delete(id: string): Promise<boolean> {
+    try {
+      await this.prisma.intent.delete({ where: { intentId: id } });
+      return true;
+    } catch (err) {
+      if ((err as Prisma.PrismaClientKnownRequestError).code === "P2025") return false;
+      throw err;
+    }
+  }
+
   /**
    * Atomically accept an intent only when it is currently `open`.
    *

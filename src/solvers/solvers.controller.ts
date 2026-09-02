@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   NotFoundException,
   Param,
@@ -117,6 +118,27 @@ export class SolversController {
       (a, b) => b.fillsCompleted - a.fillsCompleted,
     );
     return { solvers, count: solvers.length };
+  }
+
+  @Get(":address/eligible-intents")
+  async getEligibleIntents(@Param("address") address: string, @Query() dto: ListIntentsDto) {
+    const solver = await this.solversService.get(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+    if (!solver.isActive) throw new ForbiddenException("Solver is not active");
+
+    const open = await this.intentsService.getByState("open");
+    const eligible = open.filter((intent) =>
+      solverSupports(solver, intent.srcChain, intent.srcToken.symbol),
+    );
+
+    const limit = Math.min(dto.limit ?? 20, 100);
+    const offset = dto.offset ?? 0;
+    if ((dto.limit ?? 20) > 100) {
+      throw new BadRequestException("Limit exceeds maximum allowed value of 100");
+    }
+
+    const page = eligible.slice(offset, offset + limit);
+    return { intents: page, total: eligible.length, count: eligible.length, limit, offset };
   }
 
   @Get(":address")

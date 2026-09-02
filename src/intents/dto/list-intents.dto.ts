@@ -29,19 +29,21 @@ export class ListIntentsDto {
   @IsIn(SUPPORTED_CHAINS)
   chain?: SupportedChain;
 
-  @ApiProperty({ minimum: 1, maximum: 100, default: 20, description: "Number of results per page" })
+  @ApiPropertyOptional({ minimum: 1, maximum: 100, default: 20, description: "Number of results per page" })
+  @IsOptional()
   @IsInt()
   @Min(1)
   @Max(100)
-  limit!: number;
+  limit?: number;
 
   @ApiPropertyOptional({ description: "Cursor for the next page of intents" })
   @IsOptional()
   @IsString()
   cursor?: string;
 
-  @ApiProperty({ minimum: 0, default: 0, description: "Number of results to skip" })
+  @ApiPropertyOptional({ minimum: 0, default: 0, description: "Number of results to skip" })
+  @IsOptional()
   @IsInt()
   @Min(0)
-  offset!: number;
+  offset?: number;
 }

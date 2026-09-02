@@ -86,15 +86,31 @@ export class IntentsController {
   }
 
   @Get("open")
-  async listOpen() {
+  async listOpen(@Query() dto: ListIntentsDto) {
     const open = await this.intentsService.getByState("open");
-    return { intents: open, count: open.length };
+    const limit = Math.min(dto.limit ?? 20, 100);
+    const offset = dto.offset ?? 0;
+
+    if ((dto.limit ?? 20) > 100) {
+      throw new BadRequestException("Limit exceeds maximum allowed value of 100");
+    }
+
+    const page = open.slice(offset, offset + limit);
+    return { intents: page, total: open.length, count: open.length, limit, offset };
   }
 
   @Get("user/:address")
-  async listByUser(@Param("address") address: string) {
+  async listByUser(@Param("address") address: string, @Query() dto: ListIntentsDto) {
     const intents = await this.intentsService.getByUser(address);
-    return { intents, count: intents.length };
+    const limit = Math.min(dto.limit ?? 20, 100);
+    const offset = dto.offset ?? 0;
+
+    if ((dto.limit ?? 20) > 100) {
+      throw new BadRequestException("Limit exceeds maximum allowed value of 100");
+    }
+
+    const page = intents.slice(offset, offset + limit);
+    return { intents: page, total: intents.length, count: intents.length, limit, offset };
   }
 
   @Get(":id")
@@ -144,11 +160,20 @@ export class IntentsController {
     },
   })
   @ApiNotFoundResponse({ description: "Intent not found" })
-  getAudit(@Param("id") id: string) {
-    const intent = this.intentsService.get(id);
+  async getAudit(@Param("id") id: string, @Query() dto: ListIntentsDto) {
+    const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
-    const entries = this.intentsService.getAuditLog(id);
-    return { intentId: id, entries };
+
+    const limit = Math.min(dto.limit ?? 20, 100);
+    const offset = dto.offset ?? 0;
+    if ((dto.limit ?? 20) > 100) {
+      throw new BadRequestException("Limit exceeds maximum allowed value of 100");
+    }
+
+    const allEntries = this.intentsService.getAuditLog(id);
+    const entries = this.intentsService.getAuditLog(id, limit, offset);
+    const total = allEntries.length;
+    return { intentId: id, entries, total, limit, offset };
   }
 
   /**

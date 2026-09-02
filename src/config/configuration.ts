@@ -74,6 +74,8 @@ export default (): AppConfig => ({
     feePercentile: (process.env.SOROBAN_FEE_PERCENTILE ?? "p50") as FeePercentile,
   },
   onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
+  intentRetentionDays: parseInt(process.env.INTENT_RETENTION_DAYS ?? "30", 10),
+  intentRetentionSweepMs: parseInt(process.env.INTENT_RETENTION_SWEEP_MS ?? "60000", 10),
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
   wsMaxConnections: parseInt(process.env.WS_MAX_CONNECTIONS ?? "1000", 10),
   wsBackplane: (process.env.WS_BACKPLANE ?? "memory") as "memory" | "redis",

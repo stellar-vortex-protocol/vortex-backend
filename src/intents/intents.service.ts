@@ -17,6 +17,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
 
 const STORE_SIZE_LOG_INTERVAL_MS = 60_000;
+const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slashed"];
 
 /** How long a completed idempotency-key result stays replayable. */
 const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
@@ -65,7 +66,8 @@ export class IntentsService implements OnModuleDestroy {
     private readonly stellarTxService: StellarTxService,
     private readonly prisma: PrismaService,
   ) {
-    this.sizeLogTimer = setInterval(() => this.logStoreSize(), STORE_SIZE_LOG_INTERVAL_MS);
+    const sweepMs = Number(this.configService.get("intentRetentionSweepMs", { infer: true }) ?? STORE_SIZE_LOG_INTERVAL_MS);
+    this.sizeLogTimer = setInterval(() => this.logStoreSize(), sweepMs || STORE_SIZE_LOG_INTERVAL_MS);
     // Allow the process to exit even if the timer is still active.
     this.sizeLogTimer.unref?.();
   }
@@ -74,10 +76,45 @@ export class IntentsService implements OnModuleDestroy {
     clearInterval(this.sizeLogTimer);
   }
 
-  /** Logs the current intent store size so unbounded growth is observable. */
+  /**
+   * Logs the store size and evicts stale terminal intents from the in-memory
+   * adapter when it is the active backend. This keeps the memory footprint
+   * bounded without affecting on-chain or durable storage paths.
+   */
   async logStoreSize(): Promise<void> {
+    const evicted = await this.evictTerminalIntents();
+    const remaining = await this.repo.findAll();
+    this.logger.log(`[store-monitor] intents store size: ${remaining.length} (evicted=${evicted})`);
+  }
+
+  private async evictTerminalIntents(): Promise<number> {
+    const persistence = process.env.INTENTS_PERSISTENCE ?? "memory";
+    const onchainEnabled = this.configService.get("onchainIntentsEnabled", { infer: true });
+    if (persistence !== "memory" || onchainEnabled) {
+      return 0;
+    }
+
+    const retentionDays = Number(this.configService.get("intentRetentionDays", { infer: true }) ?? 30);
+    const retentionSeconds = Math.max(0, Number.isFinite(retentionDays) ? retentionDays * 86400 : 30 * 86400);
+    const cutoff = Math.floor(Date.now() / 1000) - retentionSeconds;
+
     const all = await this.repo.findAll();
-    this.logger.log(`[store-monitor] intents store size: ${all.length}`);
+    const stale = all.filter((intent) => {
+      if (!TERMINAL_STATES.includes(intent.state)) return false;
+      const lastTerminalTs = intent.filledAt ?? intent.createdAt;
+      return lastTerminalTs <= cutoff;
+    });
+
+    let evicted = 0;
+    for (const intent of stale) {
+      const removed = await this.repo.delete(intent.intentId);
+      if (removed) evicted += 1;
+      this.logger.warn(
+        `[retention] evicted terminal intent ${intent.intentId} from in-memory store (state=${intent.state}, createdAt=${intent.createdAt})`,
+      );
+    }
+
+    return evicted;
   }
 
   async create(
@@ -378,7 +415,12 @@ export class IntentsService implements OnModuleDestroy {
    *
    * Returns an empty array if the intent has no recorded transitions.
    */
-  getAuditLog(intentId: string): IntentAuditEntry[] {
-    return this.auditLog.get(intentId) ?? [];
+  getAuditLog(intentId: string, limit?: number, offset?: number): IntentAuditEntry[] {
+    const entries = this.auditLog.get(intentId) ?? [];
+    if (limit === undefined && offset === undefined) return entries;
+
+    const safeLimit = Math.min(limit ?? 20, 100);
+    const safeOffset = Math.max(0, offset ?? 0);
+    return entries.slice(safeOffset, safeOffset + safeLimit);
   }
 }

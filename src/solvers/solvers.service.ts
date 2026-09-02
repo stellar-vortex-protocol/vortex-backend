@@ -1,4 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
+import { SupportedChain } from "../intents/intents.types";
 import { SOLVERS_REPOSITORY, ISolversRepository } from "./solvers.repository";
 import { SolverRecord } from "./solvers.types";
 
