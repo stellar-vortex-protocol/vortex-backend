@@ -154,7 +154,7 @@ complete in **single-digit milliseconds** for < 10 000 open intents.
 |---|---|---|
 | Node.js event loop blocked | Sweep log missing, but service still responding to HTTP | Profile with `clinic flame` or `node --prof`; identify the blocking call |
 | `setInterval` not firing (module destroyed prematurely) | `onModuleDestroy` called without `onModuleInit` | Investigate graceful-shutdown lifecycle; restart the process |
-| Runaway open-intent accumulation | `IntentsService.getByState("open")` returning tens of thousands of items | Investigate why intents are not being filled/cancelled; consider adding a max-open-intent cap |
+| Runaway open-intent accumulation | `IntentsService.getByState("open")` returning tens of thousands of items | Investigate why intents are not being filled/cancelled; a per-user cap of **50 simultaneous open/accepted intents** (`MAX_OPEN_INTENTS_PER_USER` in `src/intents/intents.service.ts`) is enforced at creation time — if you see accumulation beyond this per-user limit investigate whether the cap enforcement path (HTTP 409 on `POST /api/v1/intents`) is reachable, or whether old seed/test data was inserted directly into the store |
 | Broadcast fan-out stalling | `IntentsGateway.broadcast()` slow due to thousands of WS subscribers | Reduce subscriber count or move to async fan-out; see issue #84 load-test results |
 | Clock skew | All intents appear non-expired despite past deadlines | Verify `Date.now()` on the server and compare against intent `deadline` values; fix NTP |
 

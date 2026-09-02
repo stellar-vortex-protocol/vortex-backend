@@ -5,6 +5,7 @@ import { SorobanService } from "./soroban.service";
 import { SolverRegistryService } from "./solver-registry.service";
 import { SignerService } from "./signer.service";
 import { StellarTxService } from "./stellar-tx.service";
+import { SolversModule } from "../solvers/solvers.module";
 
 @Module({
   imports: [forwardRef(() => IntentsModule)],

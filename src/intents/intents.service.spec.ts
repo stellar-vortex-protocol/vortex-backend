@@ -1,9 +1,10 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { Keypair } from "@stellar/stellar-sdk";
-import { AppConfig } from "../config/configuration";
+import { AppConfig, CHAIN_FILL_WINDOW_DEFAULTS, DEFAULT_FILL_WINDOW_SECONDS } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { IntentsService } from "./intents.service";
+import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
 import { PrismaService } from "../prisma/prisma.service";
 
 const VALID_CONTRACT_ID = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
@@ -34,6 +35,7 @@ function makeService(
   stellarTx?: jest.Mocked<StellarTxService>,
 ) {
   return new IntentsService(
+    new InMemoryIntentsRepository(),
     fakeConfig(configOverrides),
     stellarTx ?? fakeStellarTxService(),
     fakePrismaService(),
@@ -69,6 +71,10 @@ async function buildService(
       {
         provide: StellarTxService,
         useValue: stellarTxService ?? fakeStellarTxService(),
+      },
+      {
+        provide: PrismaService,
+        useValue: fakePrismaService(),
       },
       IntentsService,
     ],
@@ -190,7 +196,111 @@ describe("IntentsService", () => {
       expect(successes).toHaveLength(1);
       expect(successes[0]!.state).toBe("accepted");
     });
-  });
+
+    // -----------------------------------------------------------------------
+    // Per-chain fill-window tests (issue: chain-aware fill window)
+    // -----------------------------------------------------------------------
+
+    it("sets deadline to now + stellar fill window (120 s) for a stellar intent", async () => {
+      const now = Math.floor(Date.now() / 1000);
+      const intent = await service.create({
+        user: "GTEST_STELLAR_CHAIN1",
+        srcChain: "stellar",
+        srcToken: { address: "native", symbol: "XLM", name: "Stellar Lumens", decimals: 7, chain: "stellar" },
+        srcAmount: "1000000",
+        dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+        minDstAmount: "990000",
+        deadline: now + 900,
+      });
+
+      const result = await service.acceptIfOpen(intent.intentId, "SOLVER_X");
+
+      expect(result).not.toBeNull();
+      const expectedWindow = CHAIN_FILL_WINDOW_DEFAULTS["stellar"] ?? DEFAULT_FILL_WINDOW_SECONDS;
+      // Allow a 2-second tolerance for test execution time
+      expect(result!.deadline).toBeGreaterThanOrEqual(now + expectedWindow - 2);
+      expect(result!.deadline).toBeLessThanOrEqual(now + expectedWindow + 2);
+    });
+
+    it("sets deadline to now + ethereum fill window (1800 s) for an ethereum intent", async () => {
+      const now = Math.floor(Date.now() / 1000);
+      const intent = await service.create({
+        user: "GTEST_ETHEREUM_CHAIN1",
+        srcChain: "ethereum",
+        srcToken: { address: "0xabc", symbol: "USDC", name: "USD Coin", decimals: 6, chain: "ethereum" },
+        srcAmount: "1000000",
+        dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+        minDstAmount: "990000",
+        deadline: now + 3600,
+      });
+
+      const result = await service.acceptIfOpen(intent.intentId, "SOLVER_X");
+
+      expect(result).not.toBeNull();
+      const expectedWindow = CHAIN_FILL_WINDOW_DEFAULTS["ethereum"] ?? DEFAULT_FILL_WINDOW_SECONDS;
+      // Allow a 2-second tolerance for test execution time
+      expect(result!.deadline).toBeGreaterThanOrEqual(now + expectedWindow - 2);
+      expect(result!.deadline).toBeLessThanOrEqual(now + expectedWindow + 2);
+    });
+
+    it("stellar and ethereum accepted intents get distinct (non-equal) fill deadlines", async () => {
+      const now = Math.floor(Date.now() / 1000);
+
+      const stellarIntent = await service.create({
+        user: "GTEST_STELLAR_DIFF1",
+        srcChain: "stellar",
+        srcToken: { address: "native", symbol: "XLM", name: "Stellar Lumens", decimals: 7, chain: "stellar" },
+        srcAmount: "1000000",
+        dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+        minDstAmount: "990000",
+        deadline: now + 900,
+      });
+      const ethIntent = await service.create({
+        user: "GTEST_ETHEREUM_DIFF1",
+        srcChain: "ethereum",
+        srcToken: { address: "0xabc", symbol: "USDC", name: "USD Coin", decimals: 6, chain: "ethereum" },
+        srcAmount: "1000000",
+        dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+        minDstAmount: "990000",
+        deadline: now + 3600,
+      });
+
+      const stellarResult = await service.acceptIfOpen(stellarIntent.intentId, "SOLVER_STELLAR");
+      const ethResult = await service.acceptIfOpen(ethIntent.intentId, "SOLVER_ETH");
+
+      expect(stellarResult).not.toBeNull();
+      expect(ethResult).not.toBeNull();
+
+      // Ethereum solver gets a materially larger fill window than Stellar
+      expect(ethResult!.deadline).toBeGreaterThan(stellarResult!.deadline);
+
+      // Confirm the windows match the config constants exactly (allowing 2 s clock drift)
+      const stellarWindow = CHAIN_FILL_WINDOW_DEFAULTS["stellar"] ?? DEFAULT_FILL_WINDOW_SECONDS;
+      const ethWindow = CHAIN_FILL_WINDOW_DEFAULTS["ethereum"] ?? DEFAULT_FILL_WINDOW_SECONDS;
+      expect(ethWindow).toBeGreaterThan(stellarWindow); // sanity-check on config
+    });
+
+    it("falls back to DEFAULT_FILL_WINDOW_SECONDS for an unknown chain", async () => {
+      const now = Math.floor(Date.now() / 1000);
+      const intent = await service.create({
+        user: "GTEST_UNKNOWN_CHAIN01",
+        srcChain: "stellar", // create as valid chain, then patch for test
+        srcToken: { address: "native", symbol: "XLM", name: "Stellar Lumens", decimals: 7, chain: "stellar" },
+        srcAmount: "1000000",
+        dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+        minDstAmount: "990000",
+        deadline: now + 3600,
+      });
+      // Manually patch to an unknown chain to exercise the fallback
+      await service.update(intent.intentId, { srcChain: "unknown_chain" as never });
+
+      const result = await service.acceptIfOpen(intent.intentId, "SOLVER_X");
+
+      expect(result).not.toBeNull();
+      expect(result!.deadline).toBeGreaterThanOrEqual(now + DEFAULT_FILL_WINDOW_SECONDS - 2);
+      expect(result!.deadline).toBeLessThanOrEqual(now + DEFAULT_FILL_WINDOW_SECONDS + 2);
+    });
+  }); // end describe("acceptIfOpen")
 
   describe("fillIfAccepted", () => {
     it("transitions an accepted intent to filled when solver matches", async () => {
@@ -365,7 +475,7 @@ describe("IntentsService", () => {
           findMany: jest.fn().mockResolvedValue([]),
         },
       } as unknown as PrismaService;
-      const svc = new IntentsService(fakeConfig(), fakeStellarTxService(), prismaService);
+      const svc = new IntentsService(new InMemoryIntentsRepository(), fakeConfig(), fakeStellarTxService(), prismaService);
 
       svc.appendAuditEntry("intent-db", "slashed", "system", "missed fill", { foo: "bar" });
 
@@ -394,7 +504,7 @@ describe("IntentsService", () => {
           findMany: jest.fn().mockResolvedValue([]),
         },
       } as unknown as PrismaService;
-      const svc = new IntentsService(fakeConfig(), fakeStellarTxService(), prismaService);
+      const svc = new IntentsService(new InMemoryIntentsRepository(), fakeConfig(), fakeStellarTxService(), prismaService);
 
       // Should not throw synchronously
       expect(() =>

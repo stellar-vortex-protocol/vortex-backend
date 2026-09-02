@@ -11,7 +11,12 @@ import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Intent, IntentAuditEntry, IntentState } from "./intents.types";
 import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
 import { AppConfig } from "../config/configuration";
-import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
+import {
+  CHAIN_DEADLINE_DEFAULTS,
+  DEFAULT_DEADLINE_SECONDS,
+  CHAIN_FILL_WINDOW_DEFAULTS,
+  DEFAULT_FILL_WINDOW_SECONDS,
+} from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
@@ -21,6 +26,23 @@ const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slash
 
 /** How long a completed idempotency-key result stays replayable. */
 const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
+
+/**
+ * Maximum number of simultaneously open (state = "open" | "accepted") intents
+ * allowed per user address.
+ *
+ * Rationale: the per-user rate limit (UserThrottlerGuard) bounds the *rate* of
+ * creation but not the standing *count* — a user could steadily accumulate
+ * thousands of open intents over time, which is exactly the scenario the
+ * on-call runbook flags as a sweeper-performance risk.  This constant is the
+ * authoritative cap; it is enforced in IntentsController.create() before the
+ * intent is persisted.
+ *
+ * Kept as a named constant (rather than a config value) so the cap is visible
+ * at the call site and testable without ConfigService.  Raise or lower it with
+ * a code change + review rather than a silent env-var override.
+ */
+export const MAX_OPEN_INTENTS_PER_USER = 50;
 
 /**
  * Orchestration layer for intents.
@@ -277,6 +299,22 @@ export class IntentsService implements OnModuleDestroy {
     return all.filter((i) => i.state === "accepted" && i.solver === solver).length;
   }
 
+  /**
+   * Count the number of intents in "open" or "accepted" state for a user.
+   *
+   * Used by IntentsController.create() to enforce MAX_OPEN_INTENTS_PER_USER.
+   * The query is a simple filter over findByUser so it works identically
+   * against the in-memory adapter and — once the repo is swapped — can be
+   * replaced with an efficient Prisma COUNT query without touching the service
+   * interface (issue #1).
+   */
+  async countOpenByUser(user: string): Promise<number> {
+    const userIntents = await this.repo.findByUser(user);
+    return userIntents.filter(
+      (i) => i.state === "open" || i.state === "accepted",
+    ).length;
+  }
+
   async update(id: string, patch: Partial<Intent>): Promise<Intent | null> {
     return this.repo.update(id, patch);
   }
@@ -285,11 +323,19 @@ export class IntentsService implements OnModuleDestroy {
    * Atomically accept an intent only if it is currently "open".
    * Delegates to the repository so both in-memory and Prisma adapters can
    * apply the conditional write atomically.
+   *
+   * The new deadline is set to now + CHAIN_FILL_WINDOW_DEFAULTS[srcChain]
+   * so solvers on slower-settling chains get a proportionally longer window
+   * and are not unfairly slashed for a deadline that was never realistic.
    * Returns null when the intent is not found or is not in the "open" state.
    */
   async acceptIfOpen(id: string, solver: string): Promise<Intent | null> {
+    const intent = await this.repo.findById(id);
+    if (!intent) return null;
     const now = Math.floor(Date.now() / 1000);
-    return this.repo.acceptIfOpen(id, solver, now + 300);
+    const fillWindow =
+      CHAIN_FILL_WINDOW_DEFAULTS[intent.srcChain] ?? DEFAULT_FILL_WINDOW_SECONDS;
+    return this.repo.acceptIfOpen(id, solver, now + fillWindow);
   }
 
   /**

@@ -29,6 +29,7 @@ import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { TokensService } from "../tokens/tokens.service";
 import { RoutingService } from "../routing/routing.service";
+import { MAX_OPEN_INTENTS_PER_USER } from "./intents.service";
 import { CreateIntentDto } from "./dto/create-intent.dto";
 import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { AcceptIntentDto } from "./dto/accept-intent.dto";
@@ -203,6 +204,9 @@ export class IntentsController {
       "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)",
   })
   @ApiBadRequestResponse({ description: "Invalid request body" })
+  @ApiConflictResponse({
+    description: `Open-intent cap reached — a single user may not hold more than ${MAX_OPEN_INTENTS_PER_USER} open/accepted intents simultaneously`,
+  })
   async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
 

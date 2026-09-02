@@ -7,6 +7,13 @@ import {
   parseEventIndex,
 } from "./event-ingestion.service";
 import { SorobanService } from "./soroban.service";
+import { SolversService } from "../solvers/solvers.service";
+
+function fakeSolversService(): SolversService {
+  return {
+    confirmPenalty: jest.fn().mockResolvedValue(null),
+  } as unknown as SolversService;
+}
 
 function makeIntentFilledEvent(
   overrides: Partial<{ ledger: number; id: string; intentId: string }> = {},
@@ -62,7 +69,7 @@ describe("EventIngestionService", () => {
 
     beforeEach(() => {
       sorobanService = {} as SorobanService;
-      service = new EventIngestionService(sorobanService, makeConfigService());
+      service = new EventIngestionService(sorobanService, makeConfigService(), fakeSolversService());
     });
 
     it("processes a new event exactly once", () => {
