@@ -48,6 +48,7 @@ import { join } from "path";
 import { v4 as uuidv4 } from "uuid";
 import { buildSeedIntents } from "../src/intents/intents.seed";
 import { buildSeedSolvers } from "../src/solvers/solvers.seed";
+import { STELLAR_TOKENS, SUPPORTED_TOKENS } from "../src/tokens/tokens.data";
 
 const OUT_DIR = join(__dirname, "..", ".seed-data");
 
@@ -66,6 +67,29 @@ function main() {
   // ── Solvers ───────────────────────────────────────────────────────────────
   const solverRows = buildSeedSolvers();
 
+  const tokenRows = [
+    ...Object.entries(SUPPORTED_TOKENS).flatMap(([chain, tokens]) =>
+      tokens.map((token) => ({
+        address: token.address,
+        symbol: token.symbol,
+        name: token.name,
+        decimals: token.decimals,
+        chain,
+        priceUsd: token.priceUSD,
+        isStellar: false,
+      })),
+    ),
+    ...STELLAR_TOKENS.map((token) => ({
+      address: token.contract,
+      symbol: token.symbol,
+      name: token.name,
+      decimals: token.decimals,
+      chain: "stellar",
+      priceUsd: token.priceUSD,
+      isStellar: true,
+    })),
+  ];
+
   // ── Persist ───────────────────────────────────────────────────────────────
   mkdirSync(OUT_DIR, { recursive: true });
 
@@ -82,6 +106,13 @@ function main() {
     "utf8",
   );
   console.log(`✔ Wrote ${solverRows.length} solvers  →  .seed-data/solvers.json`);
+
+  writeFileSync(
+    join(OUT_DIR, "tokens.json"),
+    JSON.stringify(tokenRows, null, 2),
+    "utf8",
+  );
+  console.log(`✔ Wrote ${tokenRows.length} tokens  →  .seed-data/tokens.json`);
 
   console.log(
     "\nTo use a real database: replace the writeFileSync calls with your ORM's",

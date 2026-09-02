@@ -50,6 +50,7 @@ export interface AppConfig {
     feePercentile: FeePercentile;
   };
   onchainIntentsEnabled: boolean;
+  onchainWritesDryRun: boolean;
   corsOrigin: string;
   /** Maximum concurrent WebSocket connections (0 = unlimited). */
   wsMaxConnections: number;
