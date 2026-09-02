@@ -35,6 +35,27 @@ jobs:
           cache: npm
       - run: npm audit --audit-level=high
 
+  license-scan:
+    name: Dependency License Compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      # Permissive-only allow-list, reconciled with the project's own
+      # MIT/Apache-2.0 license (issue #107). Fails the build on any
+      # dependency (direct or transitive) carrying a copyleft or
+      # unrecognized/unlicensed license.
+      - name: Check dependency licenses
+        run: |
+          npx license-checker --production \
+            --onlyAllow 'MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;0BSD;CC0-1.0;Unlicense' \
+            --excludePrivatePackages
+
   commitlint:
     name: Commit Message Lint
     runs-on: ubuntu-latest
