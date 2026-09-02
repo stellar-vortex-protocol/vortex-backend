@@ -35,13 +35,22 @@ export interface IntentAuditEntry {
   metadata?: Record<string, unknown>;
 }
 
-export type IntentState =
-  | "open"
-  | "accepted"
-  | "filled"
-  | "cancelled"
-  | "expired"
-  | "slashed";
+/**
+ * Single source of truth for every state an intent can be in.
+ * `IntentState` is derived from this tuple so DTO validators (`@IsIn`),
+ * Swagger `enum:` annotations, and type-checking all stay in sync
+ * automatically — mirrors how `SUPPORTED_CHAINS` is defined above (issue #270).
+ */
+export const INTENT_STATES = [
+  "open",
+  "accepted",
+  "filled",
+  "cancelled",
+  "expired",
+  "slashed",
+] as const;
+
+export type IntentState = (typeof INTENT_STATES)[number];
 
 export interface TokenInfo {
   address: string;
