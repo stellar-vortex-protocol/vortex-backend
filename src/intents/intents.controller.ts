@@ -484,4 +484,106 @@ export class IntentsController {
       priceImpact: best?.priceImpact ?? 0,
     };
   }
+
+  /**
+   * POST /api/v1/intents/:id/requote
+   *
+   * Convenience endpoint for re-quoting an already-created intent without
+   * resupplying srcChain/srcToken/srcAmount/dstToken — they're read straight
+   * off the stored Intent record. Only valid while the intent is "open".
+   */
+  @Post(":id/requote")
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @ApiOperation({ summary: "Re-quote an existing open intent using its stored fields" })
+  @ApiTooManyRequestsResponse({
+    description: "Rate limit exceeded — max 20 quote requests per 60 s per IP",
+  })
+  @ApiOkResponse({ type: QuoteResponseDto })
+  @ApiNotFoundResponse({ description: "Intent not found" })
+  @ApiConflictResponse({ description: "Intent is not in the open state" })
+  async requote(@Param("id") id: string): Promise<QuoteResponseDto> {
+    const intent = await this.intentsService.get(id);
+    if (!intent) throw new NotFoundException("Intent not found");
+    if (intent.state !== "open") {
+      throw new ConflictException(
+        `Cannot requote intent in state "${intent.state}"; only open intents can be requoted`,
+      );
+    }
+
+    const solvers = this.solversService.getAll().filter((s) => s.isActive);
+    const srcToken = intent.srcToken;
+    const dstToken = intent.dstToken;
+    const srcAmountBigInt = BigInt(intent.srcAmount);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dstPriceUSD: number = (dstToken as any)?.priceUSD ?? 1;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const srcPriceUSD: number = (srcToken as any)?.priceUSD ?? dstPriceUSD;
+
+    const quotes = solvers
+      .map((solver) => {
+        const totalFills = solver.fillsCompleted + solver.fillsFailed;
+        const successRate = totalFills > 0 ? solver.fillsCompleted / totalFills : 0.5;
+        const fillCountScore = Math.min(solver.fillsCompleted / 100, 1);
+        const perfScore = successRate * 0.7 + fillCountScore * 0.3;
+        const variancePct = (1 - perfScore) * 0.008;
+        const varianceScaled = Math.round(1000 * (1 - variancePct));
+        const dstAmount = (srcAmountBigInt * BigInt(varianceScaled)) / BigInt(1000);
+        const fee = (dstAmount * BigInt(5)) / BigInt(10000);
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const feeUnits = Number(fee) / Math.pow(10, (dstToken as any)?.decimals ?? 7);
+        const totalFeesUSD = feeUnits * dstPriceUSD;
+        const srcUnits = Number(srcAmountBigInt) / Math.pow(10, srcToken?.decimals ?? 7);
+        const dstUnits = Number(dstAmount) / Math.pow(10, dstToken?.decimals ?? 7);
+        const priceImpact =
+          srcPriceUSD > 0 && dstPriceUSD > 0
+            ? Math.max(0, 1 - (dstUnits * dstPriceUSD) / (srcUnits * srcPriceUSD))
+            : 0;
+
+        const dstTokenInfo = {
+          address: dstToken?.contract ?? "",
+          symbol: dstToken?.symbol ?? "",
+          name: dstToken?.symbol ?? "",
+          decimals: dstToken?.decimals ?? 7,
+          chain: "stellar" as SupportedChain,
+          priceUSD: dstToken?.priceUSD,
+        };
+
+        const route = this.routingService.buildRoute(srcToken, dstTokenInfo, solver.address, {
+          totalFeesUSD,
+          priceImpact,
+          estimatedFillTime: solver.avgFillTime + Math.floor(Math.random() * 30),
+        });
+
+        return {
+          solver: solver.address,
+          solverName: solver.name,
+          dstAmount: dstAmount.toString(),
+          fee: fee.toString(),
+          fillTime: solver.avgFillTime + Math.floor(Math.random() * 30),
+          expiresAt: Math.floor(Date.now() / 1000) + 60,
+          totalFeesUSD,
+          priceImpact,
+          route,
+        };
+      })
+      .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
+
+    if (quotes.length > 0) {
+      await this.intentsService.update(id, { quotedDstAmount: quotes[0].dstAmount });
+    }
+
+    const best = quotes[0] ?? null;
+    return {
+      quotes,
+      bestQuote: best,
+      srcChain: intent.srcChain,
+      srcTokenSymbol: srcToken?.symbol ?? "",
+      srcAmount: intent.srcAmount,
+      dstTokenSymbol: dstToken?.symbol ?? "",
+      estimatedFillTime: best?.fillTime ?? 0,
+      totalFeesUSD: best?.totalFeesUSD ?? 0,
+      priceImpact: best?.priceImpact ?? 0,
+    };
+  }
 }

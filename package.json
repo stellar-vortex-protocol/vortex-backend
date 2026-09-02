@@ -11,6 +11,7 @@
     "test": "jest",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:mutation": "stryker run",
+    "check:env-drift": "tsx scripts/check-env-drift.ts",
     "seed": "tsx scripts/seed.ts",
     "solver:demo": "tsx scripts/solver-bot.ts",
     "db:generate": "prisma generate",
