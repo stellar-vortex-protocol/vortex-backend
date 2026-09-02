@@ -201,8 +201,10 @@ versus **planned** (schema/token data in place, on-chain settlement pending).
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for backend-specific setup, conventions, and
-the PR checklist. It links to the org-wide guide for process and code of conduct.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for backend-specific setup, conventions,
+and the PR checklist. For community expectations and governance, see
+[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) and
+[docs/rfcs/README.md](./docs/rfcs/README.md).
 
 ## License
 
