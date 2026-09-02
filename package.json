@@ -36,7 +36,7 @@
     "@opentelemetry/sdk-trace-node": "^2.10.0",
     "@prisma/client": "5.22.0",
     "@sentry/node": "^10.69.0",
-    "@stellar/stellar-sdk": "^12.0.0",
+    "@stellar/stellar-sdk": "^17.0.1",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "cors": "^2.8.5",
