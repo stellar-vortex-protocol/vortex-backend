@@ -23,6 +23,7 @@ import {
   ApiTooManyRequestsResponse,
   ApiOperation,
 } from "@nestjs/swagger";
+import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
@@ -42,6 +43,13 @@ import {
   buildCancelMessage,
   buildFillMessage,
 } from "../common/stellar-signature";
+import {
+  applyVarianceScale,
+  calculateProtocolFee,
+  parseBaseUnits,
+  toDecimalNumber,
+  varianceScaleFromPerfScore,
+} from "../common/amount";
 import { SupportedChain } from "./intents.types";
 
 @ApiTags("intents")
@@ -261,7 +269,7 @@ export class IntentsController {
     // Verify the solver controls the claimed address
     verifyStellarSignature(dto.solver, buildFillMessage(id, dto.solver), dto.signature);
 
-    const fillAmount = BigInt(dto.fillAmount);
+    const fillAmount = parseBaseUnits(dto.fillAmount);
     let minAmount: bigint;
     try {
       minAmount = BigInt(intent.minDstAmount);
@@ -341,8 +349,8 @@ export class IntentsController {
     description: "Rate limit exceeded — max 20 quote requests per 60 s per IP",
   })
   @ApiOkResponse({ type: QuoteResponseDto })
-  quote(@Body() dto: QuoteRequestDto): QuoteResponseDto {
-    const solvers = this.solversService.getAll().filter((s) => s.isActive);
+  async quote(@Body() dto: QuoteRequestDto): Promise<QuoteResponseDto> {
+    const solvers = (await this.solversService.getAll()).filter((s) => s.isActive);
 
     // #219: use typed resolveSrcToken / resolveDstToken — no more any casts
     const srcToken = this.tokensService.resolveSrcToken(
@@ -351,7 +359,7 @@ export class IntentsController {
     );
     const dstToken = this.tokensService.resolveDstToken(dto.dstTokenContract ?? "");
 
-    const srcAmountBigInt = BigInt(dto.srcAmount);
+    const srcAmountBigInt = parseBaseUnits(dto.srcAmount);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const dstPriceUSD: number = (dstToken as any)?.priceUSD ?? 1;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -364,17 +372,16 @@ export class IntentsController {
         const successRate = totalFills > 0 ? solver.fillsCompleted / totalFills : 0.5;
         const fillCountScore = Math.min(solver.fillsCompleted / 100, 1);
         const perfScore = successRate * 0.7 + fillCountScore * 0.3;
-        const variancePct = (1 - perfScore) * 0.008;
-        const varianceScaled = Math.round(1000 * (1 - variancePct));
-        const dstAmount = (srcAmountBigInt * BigInt(varianceScaled)) / BigInt(1000);
-        const fee = (dstAmount * BigInt(5)) / BigInt(10000); // 0.05%
+        const varianceScaled = varianceScaleFromPerfScore(perfScore);
+        const dstAmount = applyVarianceScale(srcAmountBigInt, varianceScaled);
+        const fee = calculateProtocolFee(dstAmount); // 0.05%
 
         // Issue #126: compute USD fee total and price impact.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const feeUnits = Number(fee) / Math.pow(10, (dstToken as any)?.decimals ?? 7);
+        const feeUnits = toDecimalNumber(fee, (dstToken as any)?.decimals ?? 7);
         const totalFeesUSD = feeUnits * dstPriceUSD;
-        const srcUnits = Number(srcAmountBigInt) / Math.pow(10, srcToken?.decimals ?? 7);
-        const dstUnits = Number(dstAmount) / Math.pow(10, dstToken?.decimals ?? 7);
+        const srcUnits = toDecimalNumber(srcAmountBigInt, srcToken?.decimals ?? 7);
+        const dstUnits = toDecimalNumber(dstAmount, dstToken?.decimals ?? 7);
         const priceImpact =
           srcPriceUSD > 0 && dstPriceUSD > 0
             ? Math.max(0, 1 - (dstUnits * dstPriceUSD) / (srcUnits * srcPriceUSD))

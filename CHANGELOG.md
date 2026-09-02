@@ -31,8 +31,23 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
 - Husky `commit-msg` hook — runs commitlint on every local commit (Closes #137)
 - CI job `commitlint` — validates commit messages on every push/PR in GitHub Actions
   (Closes #137)
+- `src/common/amount.ts` — shared, unit-tested base-units ↔ decimal conversion plus
+  the protocol fee (0.05 %) and quote-variance helpers; `IntentsController.quote()`
+  and `fill()` now use it instead of duplicated inline `BigInt`/decimal math
+  (Closes #272)
+- `PATCH /api/v1/solvers/:address` (`UpdateSolverDto`, `buildUpdateSolverMessage`) —
+  signature-verified partial update of a solver's mutable profile fields
+  (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`); immutable fields
+  are stripped by the DTO whitelist (Closes #273)
+- Typed Swagger response documentation for every `SorobanController` and
+  `TokensController` route, including the account route's 400/429 responses
+  (Closes #271)
 
 ### Fixed
+- `IntentsService.create()` idempotency-key handling is now race-safe — concurrent
+  requests carrying the same key synchronously claim an in-flight slot before any
+  `await`, so exactly one intent is created and the losers replay its result
+  (Closes #274)
 - `TokensModule` was missing `exports: [TokensService]` — `IntentsController`
   could not inject `TokensService` outside the Jest test environment
 - `IntentsModule` was missing `exports: [IntentsGateway]` — `StatsService`
