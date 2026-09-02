@@ -41,6 +41,7 @@ import { BatchLookupDto } from "./dto/batch-lookup.dto";
 import { UserThrottlerGuard } from "./user-throttler.guard";
 import {
   verifyStellarSignature,
+  buildAcceptMessage,
   buildCancelMessage,
   buildFillMessage,
 } from "../common/stellar-signature";
@@ -268,6 +269,9 @@ export class IntentsController {
       throw new ForbiddenException("Solver has insufficient bond");
     }
 
+    // Verify the solver controls the claimed address (mirrors fill()/cancel()).
+    verifyStellarSignature(dto.solver, buildAcceptMessage(id, dto.solver), dto.signature);
+
     const updated = await this.intentsService.acceptIfOpen(id, dto.solver);
     if (!updated) {
       const current = await this.intentsService.get(id);
@@ -463,7 +467,7 @@ export class IntentsController {
       })
       .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
 
-    if (dto.intentId && quotes.length > 0) {
+    if (dto.intentId && targetIntent && quotes.length > 0) {
       await this.intentsService.update(dto.intentId, { quotedDstAmount: quotes[0].dstAmount });
     }
 
