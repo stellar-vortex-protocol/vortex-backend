@@ -19,6 +19,7 @@ export const envValidationSchema = Joi.object({
   SOROBAN_RPC_URL: Joi.string().uri().default("https://soroban-testnet.stellar.org"),
   SETTLEMENT_CONTRACT_ID: Joi.string().allow("").default(""),
   SOLVER_REGISTRY_CONTRACT_ID: Joi.string().allow("").default(""),
+  STELLAR_SIGNER_SECRET_KEY: Joi.string().allow("").default(""),
 
   // Secret key for the backend's own Soroban signer (submits on-chain writes
   // such as settlement and slashing calls). No default is provided anywhere
@@ -39,6 +40,9 @@ export const envValidationSchema = Joi.object({
 
   CORS_ORIGIN: Joi.string().default("*"),
 
+  WS_BACKPLANE: Joi.string().valid("memory", "redis").default("memory"),
+  REDIS_URL: Joi.string().uri({ scheme: ["redis", "rediss"] }).default("redis://localhost:6379"),
+
   // ── Persistence adapter selection ─────────────────────────────────────────
   // Controls which repository adapter is used for intents and solvers.
   // "memory" (default) keeps everything in-process — no database required.
@@ -46,6 +50,7 @@ export const envValidationSchema = Joi.object({
   // to a live database.  Intended for production / staging.
   INTENTS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
   SOLVERS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
+  ONCHAIN_WRITES_DRY_RUN: Joi.boolean().default(true),
 
   // ── Observability ─────────────────────────────────────────────────────────
   // Sentry DSN for error alerting.  Omit (or leave blank) to disable Sentry.

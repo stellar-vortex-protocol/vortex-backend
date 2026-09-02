@@ -23,6 +23,7 @@ import {
   ApiTooManyRequestsResponse,
   ApiOperation,
 } from "@nestjs/swagger";
+import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
@@ -36,6 +37,7 @@ import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
 import { QuoteResponseDto } from "./dto/quote-response.dto";
 import { ListIntentsDto } from "./dto/list-intents.dto";
+import { BatchLookupDto } from "./dto/batch-lookup.dto";
 import { UserThrottlerGuard } from "./user-throttler.guard";
 import {
   verifyStellarSignature,
@@ -43,6 +45,13 @@ import {
   buildCancelMessage,
   buildFillMessage,
 } from "../common/stellar-signature";
+import {
+  applyVarianceScale,
+  calculateProtocolFee,
+  parseBaseUnits,
+  toDecimalNumber,
+  varianceScaleFromPerfScore,
+} from "../common/amount";
 import { SupportedChain } from "./intents.types";
 
 @ApiTags("intents")
@@ -172,12 +181,14 @@ export class IntentsController {
   async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
 
-    // #219: use typed resolveToken instead of ad-hoc duck-typed any casts
-    const srcToken = this.tokensService.resolveSrcToken(
+    // #219: use typed resolveToken instead of ad-hoc duck-typed any casts.
+    // #276: reject unrecognised tokens outright instead of silently creating an
+    // intent whose priceUSD defaults to undefined.
+    const srcToken = this.tokensService.resolveSrcTokenOrThrow(
       dto.srcChain as SupportedChain,
       dto.srcTokenAddress,
     );
-    const dstToken = this.tokensService.resolveDstToken(dto.dstTokenContract);
+    const dstToken = this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract);
 
     const intent = await this.intentsService.create(
       {
@@ -205,6 +216,34 @@ export class IntentsController {
     );
     this.intentsGateway.broadcast({ type: "intent_created", intent });
     return intent;
+  }
+
+  /**
+   * POST /api/v1/intents/batch
+   *
+   * Issue #275 — bounded batch status lookup. Lets a solver bot (or a frontend
+   * showing a full history) reconcile a known set of intent IDs against current
+   * server state in one call instead of N `GET /:id` requests.
+   *
+   * `POST` (not `GET`) because the ID list can exceed a comfortable query-string
+   * length. Subject to the same global rate limits as every other endpoint —
+   * no dedicated tier. Read-only: batch accept/fill/cancel is explicitly out of
+   * scope.
+   */
+  @Post("batch")
+  @ApiOperation({
+    summary: "Batch-fetch current intent records by ID",
+    description:
+      "Returns the current record for each supplied intent ID. IDs with no " +
+      "matching record are omitted (not individually 404'd). Capped at 100 IDs.",
+  })
+  @ApiOkResponse({ description: "Records for the found intent IDs, plus a count" })
+  @ApiBadRequestResponse({
+    description: "intentIds missing, not an array of strings, or exceeds 100 entries",
+  })
+  async batchLookup(@Body() dto: BatchLookupDto) {
+    const intents = await this.intentsService.getMany(dto.intentIds);
+    return { intents, count: intents.length };
   }
 
   @Post(":id/accept")
@@ -265,7 +304,7 @@ export class IntentsController {
     // Verify the solver controls the claimed address
     verifyStellarSignature(dto.solver, buildFillMessage(id, dto.solver), dto.signature);
 
-    const fillAmount = BigInt(dto.fillAmount);
+    const fillAmount = parseBaseUnits(dto.fillAmount);
     let minAmount: bigint;
     try {
       minAmount = BigInt(intent.minDstAmount);
@@ -284,9 +323,12 @@ export class IntentsController {
       });
     }
 
+    const feeAmount = (BigInt(dto.fillAmount) * 5n) / 10000n;
+
     const updated = await this.intentsService.fillIfAccepted(id, dto.solver, {
       filledAt: now,
       fillAmount: dto.fillAmount,
+      feeAmount: feeAmount.toString(),
       txHash: dto.txHash,
     });
     if (!updated) {
@@ -343,46 +385,20 @@ export class IntentsController {
   })
   @ApiOkResponse({ type: QuoteResponseDto })
   async quote(@Body() dto: QuoteRequestDto): Promise<QuoteResponseDto> {
-    // Security fix: quote() is intentionally unauthenticated for price
-    // discovery, but when dto.intentId is supplied we persist quotedDstAmount
-    // onto that intent. Without validation, any caller who knows an intent's
-    // UUID (public — returned from list/create and broadcast over the WS
-    // feed) could overwrite quotedDstAmount with a value computed from an
-    // arbitrary, unrelated token pair/amount. We keep this endpoint
-    // ownership-agnostic (no signature required, matching its public
-    // price-discovery role) but require the request's src/dst token and
-    // amount to strictly match the target intent's stored fields, rejecting
-    // any mismatch. Requiring proof of ownership was considered but rejected:
-    // it would mean adding signature verification to this endpoint, which is
-    // explicitly out of scope and inconsistent with quote() remaining public.
-    let targetIntent: Awaited<ReturnType<typeof this.intentsService.get>> = undefined;
-    if (dto.intentId) {
-      targetIntent = await this.intentsService.get(dto.intentId);
-      if (!targetIntent) {
-        throw new NotFoundException("Intent not found");
-      }
-      const mismatched =
-        targetIntent.srcChain !== dto.srcChain ||
-        targetIntent.srcToken?.address?.toLowerCase() !== (dto.srcTokenAddress ?? "").toLowerCase() ||
-        targetIntent.dstToken?.contract?.toLowerCase() !== (dto.dstTokenContract ?? "").toLowerCase() ||
-        targetIntent.srcAmount !== dto.srcAmount;
-      if (mismatched) {
-        throw new BadRequestException(
-          "Quote request does not match the target intent's srcChain/srcToken/dstToken/srcAmount",
-        );
-      }
-    }
+    const solvers = (await this.solversService.getAll()).filter((s) => s.isActive);
 
-    const solvers = this.solversService.getAll().filter((s) => s.isActive);
+    // #219: use typed resolveSrcToken / resolveDstToken — no more any casts.
+    // #276: a quote may be requested by symbol alone (no contract/address), but
+    // when a token identifier IS supplied it must resolve — otherwise the quote
+    // engine would silently substitute a fake $1 price.
+    const srcToken = dto.srcTokenAddress
+      ? this.tokensService.resolveSrcTokenOrThrow(dto.srcChain as SupportedChain, dto.srcTokenAddress)
+      : undefined;
+    const dstToken = dto.dstTokenContract
+      ? this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract)
+      : undefined;
 
-    // #219: use typed resolveSrcToken / resolveDstToken — no more any casts
-    const srcToken = this.tokensService.resolveSrcToken(
-      dto.srcChain as SupportedChain,
-      dto.srcTokenAddress ?? "",
-    );
-    const dstToken = this.tokensService.resolveDstToken(dto.dstTokenContract ?? "");
-
-    const srcAmountBigInt = BigInt(dto.srcAmount);
+    const srcAmountBigInt = parseBaseUnits(dto.srcAmount);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const dstPriceUSD: number = (dstToken as any)?.priceUSD ?? 1;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -395,17 +411,16 @@ export class IntentsController {
         const successRate = totalFills > 0 ? solver.fillsCompleted / totalFills : 0.5;
         const fillCountScore = Math.min(solver.fillsCompleted / 100, 1);
         const perfScore = successRate * 0.7 + fillCountScore * 0.3;
-        const variancePct = (1 - perfScore) * 0.008;
-        const varianceScaled = Math.round(1000 * (1 - variancePct));
-        const dstAmount = (srcAmountBigInt * BigInt(varianceScaled)) / BigInt(1000);
-        const fee = (dstAmount * BigInt(5)) / BigInt(10000); // 0.05%
+        const varianceScaled = varianceScaleFromPerfScore(perfScore);
+        const dstAmount = applyVarianceScale(srcAmountBigInt, varianceScaled);
+        const fee = calculateProtocolFee(dstAmount); // 0.05%
 
         // Issue #126: compute USD fee total and price impact.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const feeUnits = Number(fee) / Math.pow(10, (dstToken as any)?.decimals ?? 7);
+        const feeUnits = toDecimalNumber(fee, (dstToken as any)?.decimals ?? 7);
         const totalFeesUSD = feeUnits * dstPriceUSD;
-        const srcUnits = Number(srcAmountBigInt) / Math.pow(10, srcToken?.decimals ?? 7);
-        const dstUnits = Number(dstAmount) / Math.pow(10, dstToken?.decimals ?? 7);
+        const srcUnits = toDecimalNumber(srcAmountBigInt, srcToken?.decimals ?? 7);
+        const dstUnits = toDecimalNumber(dstAmount, dstToken?.decimals ?? 7);
         const priceImpact =
           srcPriceUSD > 0 && dstPriceUSD > 0
             ? Math.max(0, 1 - (dstUnits * dstPriceUSD) / (srcUnits * srcPriceUSD))
