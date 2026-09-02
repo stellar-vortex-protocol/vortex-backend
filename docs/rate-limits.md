@@ -62,6 +62,26 @@ Every response (including 429 errors) includes standard rate limiting headers:
 
 ---
 
+## State-mutating endpoint signature audit
+
+This backend is intentionally stateless and does not rely on cookies or CSRF tokens. The security model is therefore based on a real Ed25519 signature over the canonical message for each mutating action. In practice, a malicious cross-origin page cannot forge the user's or solver's private key, so a wildcard `Access-Control-Allow-Origin` does not create a CSRF issue if every mutating route checks a valid signature before changing state.
+
+| Route | Action | Canonical message | Proof required |
+|---|---|---|---|
+| `POST /api/v1/intents/:id/accept` | Accept an open intent | `accept:<intentId>:<solverAddress>` | Valid solver signature |
+| `POST /api/v1/intents/:id/fill` | Fill an accepted intent | `fill:<intentId>:<solverAddress>` | Valid solver signature |
+| `POST /api/v1/intents/:id/cancel` | Cancel an open intent | `cancel:<intentId>` | Valid user signature |
+| `POST /api/v1/solvers` | Register a solver | `register:<solverAddress>` | Valid proof signature |
+| `POST /api/v1/solvers/:address/deactivate` | Deactivate a solver | `deactivate:<solverAddress>` | Valid solver signature |
+| `POST /api/v1/solvers/:address/reactivate` | Reactivate a solver | `reactivate:<solverAddress>` | Valid solver signature |
+| `POST /api/v1/solvers/:address/deregister` | Deregister a solver | `deregister:<solverAddress>` | Valid solver signature |
+
+This audit relies on the same proof-of-control pattern used throughout the API: `verifyStellarSignature(publicKey, message, signature)`. The endpoints above all enforce that check before changing state. Any endpoint lacking a signature requirement is treated as a security bug and is not covered by the CSRF exemption.
+
+Related follow-up work tracked separately: issues #21, #64, and #82 are the concrete dependency points for broader mutating flows; the gateway and REST mutations in this codebase now enforce the same signed-message rule so a wildcard CORS misconfiguration cannot authorize state changes without the user's or solver's private key.
+
+---
+
 ## Bypassing & Custom Limits
 
 For high-throughput institutional solvers or internal services requiring custom rate limits, contact the network operator or configure environment variables in dedicated self-hosted instances.

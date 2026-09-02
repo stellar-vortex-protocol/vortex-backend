@@ -1,12 +1,14 @@
-import { Module } from "@nestjs/common";
+import { Module, forwardRef } from "@nestjs/common";
 import { SolversController } from "./solvers.controller";
 import { SolversService } from "./solvers.service";
 import { SOLVERS_REPOSITORY } from "./solvers.repository";
 import { InMemorySolversRepository } from "./in-memory-solvers.repository";
 import { PrismaSolversRepository } from "./prisma-solvers.repository";
 import { PrismaService } from "../prisma/prisma.service";
+import { IntentsModule } from "../intents/intents.module";
 
 @Module({
+  imports: [forwardRef(() => IntentsModule)],
   controllers: [SolversController],
   providers: [
     // Select the persistence adapter based on SOLVERS_PERSISTENCE env var.
