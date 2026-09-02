@@ -288,9 +288,12 @@ export class IntentsController {
       });
     }
 
+    const feeAmount = (BigInt(dto.fillAmount) * 5n) / 10000n;
+
     const updated = await this.intentsService.fillIfAccepted(id, dto.solver, {
       filledAt: now,
       fillAmount: dto.fillAmount,
+      feeAmount: feeAmount.toString(),
       txHash: dto.txHash,
     });
     if (!updated) {

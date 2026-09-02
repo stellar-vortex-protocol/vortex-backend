@@ -2,6 +2,24 @@ import { Inject, Injectable } from "@nestjs/common";
 import { SOLVERS_REPOSITORY, ISolversRepository } from "./solvers.repository";
 import { SolverRecord } from "./solvers.types";
 
+export type LeaderboardWindow = "24h" | "7d" | "30d" | "all";
+
+export interface SlashDisputeRecord {
+  submittedAt: number;
+  reason: string;
+  evidenceReference?: string;
+}
+
+export interface SlashRecord {
+  slashId: string;
+  solver: string;
+  intentId: string;
+  reason: string;
+  timestamp: number;
+  disputeStatus: "none" | "disputed" | "resolved-upheld" | "resolved-reversed";
+  dispute?: SlashDisputeRecord;
+}
+
 /**
  * Orchestration layer for solver records.
  *
@@ -12,6 +30,9 @@ import { SolverRecord } from "./solvers.types";
  */
 @Injectable()
 export class SolversService {
+  private readonly slashHistory = new Map<string, SlashRecord[]>();
+  private slashSequence = 0;
+
   constructor(
     @Inject(SOLVERS_REPOSITORY)
     private readonly repo: ISolversRepository,
@@ -77,28 +98,6 @@ export class SolversService {
   }
 
   /**
-   * Apply a partial update to a solver's mutable profile fields
-   * (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`) — issue #273.
-   *
-   * `undefined` values in `patch` are ignored so an absent field never clears
-   * existing data. Returns `undefined` when no solver exists for `address`.
-   */
-  async update(
-    address: string,
-    patch: Partial<Pick<SolverRecord, "name" | "supportedChains" | "supportedTokens" | "avgFillTime">>,
-  ): Promise<SolverRecord | undefined> {
-    const solver = await this.repo.findByAddress(address);
-    if (!solver) return undefined;
-
-    const applied = Object.fromEntries(
-      Object.entries(patch).filter(([, value]) => value !== undefined),
-    ) as Partial<SolverRecord>;
-
-    const updated: SolverRecord = { ...solver, ...applied };
-    return this.repo.save(updated);
-  }
-
-  /**
    * Records that a solver accepted an intent and then missed its fill
    * deadline. Bumps the local fillsFailed counter for read paths (e.g. the
    * leaderboard); the authoritative bond reduction happens on-chain via
@@ -110,5 +109,90 @@ export class SolversService {
     if (!solver) return null;
     const updated = { ...solver, fillsFailed: solver.fillsFailed + 1 };
     return this.repo.save(updated);
+  }
+
+  async recordSlash(
+    solverAddress: string,
+    intentId: string,
+    reason: string,
+    timestamp: number,
+  ): Promise<SlashRecord | null> {
+    const solver = await this.repo.findByAddress(solverAddress);
+    if (!solver) return null;
+
+    const record: SlashRecord = {
+      slashId: `slash-${++this.slashSequence}`,
+      solver: solverAddress,
+      intentId,
+      reason,
+      timestamp,
+      disputeStatus: "none",
+    };
+
+    const existing = this.slashHistory.get(solverAddress) ?? [];
+    existing.push(record);
+    this.slashHistory.set(solverAddress, existing);
+    return record;
+  }
+
+  async getSlashHistory(
+    address: string,
+    page = 1,
+    pageSize = 25,
+  ): Promise<{ records: SlashRecord[]; page: number; pageSize: number; total: number }> {
+    const records = this.slashHistory.get(address) ?? [];
+    const sorted = [...records].sort((a, b) => b.timestamp - a.timestamp);
+    const start = (page - 1) * pageSize;
+    const pageRecords = sorted.slice(start, start + pageSize);
+
+    return {
+      records: pageRecords,
+      page,
+      pageSize,
+      total: sorted.length,
+    };
+  }
+
+  async submitDispute(
+    address: string,
+    slashId: string,
+    reason: string,
+    evidenceReference?: string,
+  ): Promise<SlashRecord | null> {
+    const records = this.slashHistory.get(address) ?? [];
+    const record = records.find((entry) => entry.slashId === slashId);
+    if (!record) return null;
+
+    record.disputeStatus = "disputed";
+    record.dispute = {
+      submittedAt: Math.floor(Date.now() / 1000),
+      reason,
+      evidenceReference,
+    };
+
+    return record;
+  }
+
+  async resolveDispute(
+    address: string,
+    slashId: string,
+    resolution: "resolved-upheld" | "resolved-reversed",
+    reviewer?: string,
+    note?: string,
+  ): Promise<SlashRecord | null> {
+    const records = this.slashHistory.get(address) ?? [];
+    const record = records.find((entry) => entry.slashId === slashId);
+    if (!record) return null;
+
+    record.disputeStatus = resolution;
+    if (!record.dispute) {
+      record.dispute = {
+        submittedAt: Math.floor(Date.now() / 1000),
+        reason: note ?? "manual review",
+        evidenceReference: reviewer ? `reviewer:${reviewer}` : undefined,
+      };
+    }
+
+    return record;
   }
 }

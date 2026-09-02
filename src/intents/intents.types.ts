@@ -75,6 +75,7 @@ export interface Intent {
   deadline: number;
   filledAt?: number;
   fillAmount?: string;
+  feeAmount?: string; // realized protocol fee in dst token base units
   txHash?: string; // fill tx on Stellar
   slashedAt?: number;
   slashReason?: string;
