@@ -21,7 +21,32 @@
         "parameters": [],
         "responses": {
           "200": {
-            "description": ""
+            "description": "Soroban RPC node health status (pass-through of the RPC `getHealth` result).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "healthy"
+                    },
+                    "latestLedger": {
+                      "type": "number"
+                    },
+                    "oldestLedger": {
+                      "type": "number"
+                    },
+                    "ledgerRetentionWindow": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              }
+            }
           }
         },
         "tags": [
@@ -35,7 +60,30 @@
         "parameters": [],
         "responses": {
           "200": {
-            "description": ""
+            "description": "Latest closed ledger as reported by the Soroban RPC node.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "sequence": {
+                      "type": "number",
+                      "example": 12345678
+                    },
+                    "protocolVersion": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "sequence"
+                  ]
+                }
+              }
+            }
           }
         },
         "tags": [
@@ -49,7 +97,30 @@
         "parameters": [],
         "responses": {
           "200": {
-            "description": ""
+            "description": "Network passphrase and protocol metadata for the configured RPC node.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "friendbotUrl": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "passphrase": {
+                      "type": "string",
+                      "example": "Test SDF Network ; September 2015"
+                    },
+                    "protocolVersion": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "passphrase"
+                  ]
+                }
+              }
+            }
           }
         },
         "tags": [
@@ -65,14 +136,56 @@
             "name": "publicKey",
             "required": true,
             "in": "path",
+            "description": "Stellar Ed25519 account public key (starts with `G`, 56 characters).",
             "schema": {
+              "example": "GABC1234567890TESTPUBLICKEY000000000000000000000000000000",
               "type": "string"
             }
           }
         ],
         "responses": {
           "200": {
-            "description": ""
+            "description": "On-chain account record (id, sequence number, and balances).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "sequence": {
+                      "type": "string",
+                      "example": "987654321"
+                    },
+                    "balances": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "balance": {
+                            "type": "string"
+                          },
+                          "asset_type": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "sequence"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Stellar public key format"
+          },
+          "429": {
+            "description": "Per-account rate limit exceeded (AccountRateLimitGuard)"
           }
         },
         "tags": [
@@ -86,8 +199,9 @@
         "parameters": [
           {
             "name": "chain",
-            "required": true,
+            "required": false,
             "in": "query",
+            "description": "Restrict the result to a single chain (e.g. `stellar`, `ethereum`, `base`). When omitted, every supported chain plus the Stellar token list is returned.",
             "schema": {
               "type": "string"
             }
@@ -95,7 +209,144 @@
         ],
         "responses": {
           "200": {
-            "description": ""
+            "description": "Supported tokens. With `chain` set, `{ tokens: Token[], chain }`; without it, `tokens` is keyed by chain and `stellarTokens` holds the Stellar list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "tokens": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "address": {
+                                "type": "string"
+                              },
+                              "contract": {
+                                "type": "string"
+                              },
+                              "symbol": {
+                                "type": "string",
+                                "example": "USDC"
+                              },
+                              "name": {
+                                "type": "string",
+                                "example": "USD Coin"
+                              },
+                              "decimals": {
+                                "type": "number",
+                                "example": 6
+                              },
+                              "priceUSD": {
+                                "type": "number",
+                                "example": 1
+                              }
+                            },
+                            "required": [
+                              "symbol",
+                              "name",
+                              "decimals",
+                              "priceUSD"
+                            ]
+                          }
+                        },
+                        "chain": {
+                          "type": "string",
+                          "example": "ethereum"
+                        }
+                      },
+                      "required": [
+                        "tokens",
+                        "chain"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "tokens": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "address": {
+                                  "type": "string"
+                                },
+                                "symbol": {
+                                  "type": "string",
+                                  "example": "USDC"
+                                },
+                                "name": {
+                                  "type": "string",
+                                  "example": "USD Coin"
+                                },
+                                "decimals": {
+                                  "type": "number",
+                                  "example": 6
+                                },
+                                "priceUSD": {
+                                  "type": "number",
+                                  "example": 1
+                                }
+                              },
+                              "required": [
+                                "address",
+                                "symbol",
+                                "name",
+                                "decimals",
+                                "priceUSD"
+                              ]
+                            }
+                          }
+                        },
+                        "stellarTokens": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "contract": {
+                                "type": "string"
+                              },
+                              "symbol": {
+                                "type": "string",
+                                "example": "XLM"
+                              },
+                              "name": {
+                                "type": "string",
+                                "example": "Stellar Lumens"
+                              },
+                              "decimals": {
+                                "type": "number",
+                                "example": 7
+                              },
+                              "priceUSD": {
+                                "type": "number",
+                                "example": 0.1182
+                              }
+                            },
+                            "required": [
+                              "contract",
+                              "symbol",
+                              "name",
+                              "decimals",
+                              "priceUSD"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "tokens",
+                        "stellarTokens"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "tags": [
@@ -109,7 +360,14 @@
         "parameters": [],
         "responses": {
           "200": {
-            "description": ""
+            "description": "The full list of supported Stellar destination tokens.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StellarTokensResponseDto"
+                }
+              }
+            }
           }
         },
         "tags": [
@@ -158,6 +416,15 @@
               "maximum": 100,
               "default": 20,
               "type": "number"
+            }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Cursor for the next page of intents",
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -260,6 +527,97 @@
         "responses": {
           "404": {
             "description": "Intent not found"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/api/v1/intents/{id}/audit": {
+      "get": {
+        "description": "Returns the full state-transition history for an intent ordered oldest-first. Each entry records the state the intent moved into, who triggered it, and why.",
+        "operationId": "IntentsController_getAudit",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit trail for the intent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "intentId": {
+                      "type": "string"
+                    },
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "timestamp": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "toState": {
+                            "type": "string"
+                          },
+                          "actor": {
+                            "type": "string"
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "metadata": {
+                            "type": "object",
+                            "nullable": true
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Intent not found"
+          }
+        },
+        "summary": "Get audit trail for an intent",
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/api/v1/intents/{id}/quote": {
+      "get": {
+        "operationId": "IntentsController_getPersistedQuote",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted quote for the intent"
+          },
+          "404": {
+            "description": "Intent not found or no quote persisted"
           }
         },
         "tags": [
@@ -419,7 +777,7 @@
             }
           },
           "429": {
-            "description": "Rate limit exceeded — max 100 req/min per IP globally"
+            "description": "Rate limit exceeded — max 20 quote requests per 60 s per IP"
           }
         },
         "tags": [
@@ -479,6 +837,46 @@
         "responses": {
           "200": {
             "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      },
+      "patch": {
+        "operationId": "SolversController_updateSolver",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSolverDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated solver record"
+          },
+          "400": {
+            "description": "Invalid update body"
+          },
+          "401": {
+            "description": "Missing or invalid signature"
+          },
+          "404": {
+            "description": "Solver not found"
           }
         },
         "tags": [
@@ -647,6 +1045,52 @@
   ],
   "components": {
     "schemas": {
+      "StellarTokenDto": {
+        "type": "object",
+        "properties": {
+          "contract": {
+            "type": "string",
+            "description": "Stellar contract ID of the token"
+          },
+          "symbol": {
+            "type": "string",
+            "example": "XLM"
+          },
+          "name": {
+            "type": "string",
+            "example": "Stellar Lumens"
+          },
+          "decimals": {
+            "type": "number",
+            "example": 7
+          },
+          "priceUSD": {
+            "type": "number",
+            "example": 0.1182
+          }
+        },
+        "required": [
+          "contract",
+          "symbol",
+          "name",
+          "decimals",
+          "priceUSD"
+        ]
+      },
+      "StellarTokensResponseDto": {
+        "type": "object",
+        "properties": {
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StellarTokenDto"
+            }
+          }
+        },
+        "required": [
+          "tokens"
+        ]
+      },
       "CreateIntentDto": {
         "type": "object",
         "properties": {
@@ -816,6 +1260,14 @@
           "intentId": {
             "type": "string",
             "description": "Intent ID to persist the quote to"
+          },
+          "srcTokenAddress": {
+            "type": "string",
+            "description": "Source token contract address / ID (used for precise token resolution)"
+          },
+          "dstTokenContract": {
+            "type": "string",
+            "description": "Destination Stellar token contract ID (used for precise token resolution)"
           }
         },
         "required": [
@@ -823,6 +1275,85 @@
           "srcTokenSymbol",
           "srcAmount",
           "dstTokenSymbol"
+        ]
+      },
+      "RouteStepDto": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "bridge",
+              "swap",
+              "transfer"
+            ]
+          },
+          "protocol": {
+            "type": "string",
+            "description": "Protocol name, e.g. 'direct-solver', 'uniswap-v3'"
+          },
+          "fromChain": {
+            "type": "string"
+          },
+          "toChain": {
+            "type": "string"
+          },
+          "fromToken": {
+            "type": "object",
+            "description": "Source token info for this hop"
+          },
+          "toToken": {
+            "type": "object",
+            "description": "Destination token info for this hop"
+          },
+          "estimatedTime": {
+            "type": "number",
+            "description": "Estimated execution time in seconds for this step"
+          },
+          "estimatedGas": {
+            "type": "string",
+            "description": "Estimated gas cost in the source token's base unit"
+          }
+        },
+        "required": [
+          "type",
+          "protocol",
+          "fromChain",
+          "toChain",
+          "fromToken",
+          "toToken",
+          "estimatedTime",
+          "estimatedGas"
+        ]
+      },
+      "RouteDto": {
+        "type": "object",
+        "properties": {
+          "steps": {
+            "description": "Ordered list of steps to execute the swap",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouteStepDto"
+            }
+          },
+          "totalTime": {
+            "type": "number",
+            "description": "Total estimated time for all steps in seconds"
+          },
+          "totalFeesUSD": {
+            "type": "number",
+            "description": "Total fees in USD across all steps"
+          },
+          "priceImpact": {
+            "type": "number",
+            "description": "Estimated price impact as a decimal fraction, e.g. 0.003 = 0.3%"
+          }
+        },
+        "required": [
+          "steps",
+          "totalTime",
+          "totalFeesUSD",
+          "priceImpact"
         ]
       },
       "QuoteDto": {
@@ -851,6 +1382,22 @@
           "expiresAt": {
             "type": "number",
             "description": "Unix timestamp when quote expires"
+          },
+          "totalFeesUSD": {
+            "type": "number",
+            "description": "Total fees in USD (protocol fee converted at token price)"
+          },
+          "priceImpact": {
+            "type": "number",
+            "description": "Estimated price impact as a decimal fraction, e.g. 0.003 = 0.3%"
+          },
+          "route": {
+            "description": "Computed execution route (direct single-step or multi-hop via USDC intermediate)",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RouteDto"
+              }
+            ]
           }
         },
         "required": [
@@ -859,7 +1406,10 @@
           "dstAmount",
           "fee",
           "fillTime",
-          "expiresAt"
+          "expiresAt",
+          "totalFeesUSD",
+          "priceImpact",
+          "route"
         ]
       },
       "QuoteResponseDto": {
@@ -901,6 +1451,14 @@
           "estimatedFillTime": {
             "type": "number",
             "description": "Estimated fill time in seconds for the best quote"
+          },
+          "totalFeesUSD": {
+            "type": "number",
+            "description": "Total fees in USD for the best quote (0 when no quote available)"
+          },
+          "priceImpact": {
+            "type": "number",
+            "description": "Price impact for the best quote as a decimal fraction (0 when no quote available)"
           }
         },
         "required": [
@@ -910,7 +1468,9 @@
           "srcTokenSymbol",
           "srcAmount",
           "dstTokenSymbol",
-          "estimatedFillTime"
+          "estimatedFillTime",
+          "totalFeesUSD",
+          "priceImpact"
         ]
       },
       "RegisterSolverDto": {
@@ -954,6 +1514,10 @@
             "items": {
               "type": "array"
             }
+          },
+          "proofSignature": {
+            "type": "string",
+            "description": "Proof-of-control signature for the advertised solver address"
           }
         },
         "required": [
@@ -962,7 +1526,51 @@
           "bondAmount",
           "avgFillTime",
           "supportedChains",
-          "supportedTokens"
+          "supportedTokens",
+          "proofSignature"
+        ]
+      },
+      "UpdateSolverDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "New display name"
+          },
+          "supportedChains": {
+            "type": "array",
+            "description": "Replacement list of chains this solver supports",
+            "items": {
+              "type": "string",
+              "enum": [
+                "stellar",
+                "ethereum",
+                "base",
+                "polygon",
+                "arbitrum",
+                "optimism",
+                "avalanche"
+              ]
+            }
+          },
+          "supportedTokens": {
+            "description": "Replacement list of supported token symbols",
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "avgFillTime": {
+            "type": "number",
+            "description": "Updated average fill time in seconds"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Base64-encoded Ed25519 signature of the message \"update-solver:<address>\" produced by the solver's private key, proving control of :address"
+          }
+        },
+        "required": [
+          "signature"
         ]
       }
     }

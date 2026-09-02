@@ -12,6 +12,7 @@ import { AppConfig } from "./config/configuration";
 import { LoggingInterceptor } from "./common/logging.interceptor";
 import { HttpExceptionFilter } from "./common/http-exception.filter";
 import { initSentry } from "./common/sentry";
+import { IntentsSweeperService } from "./intents/intents-sweeper.service";
 
 // Initialise Sentry before the NestJS app boots so that any startup errors
 // are also captured.  No-op when SENTRY_DSN is not set.
@@ -111,6 +112,17 @@ async function bootstrap() {
   const configService = app.get(ConfigService<AppConfig, true>);
 
   checkContractIdEnvVars(configService);
+
+  // Issue #269 — operator-only manual sweep trigger (break-glass).
+  // Send SIGUSR2 to the process (`kill -USR2 <pid>`) to run exactly one sweep
+  // cycle on demand. This replaces the old "attach a Node.js REPL" procedure:
+  // it needs shell access to the host, is not exposed over HTTP, and every
+  // invocation is logged loudly by IntentsSweeperService. See
+  // docs/runbooks/on-call.md → "Manual sweep trigger (emergency)".
+  const sweeper = app.get(IntentsSweeperService);
+  process.on("SIGUSR2", () => {
+    void sweeper.triggerManualSweep("SIGUSR2");
+  });
 
   const port = configService.get("port", { infer: true });
   const corsOrigin = configService.get("corsOrigin", { infer: true });

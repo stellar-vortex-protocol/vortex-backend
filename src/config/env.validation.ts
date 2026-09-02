@@ -19,6 +19,7 @@ export const envValidationSchema = Joi.object({
   SOROBAN_RPC_URL: Joi.string().uri().default("https://soroban-testnet.stellar.org"),
   SETTLEMENT_CONTRACT_ID: Joi.string().allow("").default(""),
   SOLVER_REGISTRY_CONTRACT_ID: Joi.string().allow("").default(""),
+  STELLAR_SIGNER_SECRET_KEY: Joi.string().allow("").default(""),
 
   // Secret key for the backend's own Soroban signer (submits on-chain writes
   // such as settlement and slashing calls). No default is provided anywhere
@@ -39,6 +40,9 @@ export const envValidationSchema = Joi.object({
 
   CORS_ORIGIN: Joi.string().default("*"),
 
+  WS_BACKPLANE: Joi.string().valid("memory", "redis").default("memory"),
+  REDIS_URL: Joi.string().uri({ scheme: ["redis", "rediss"] }).default("redis://localhost:6379"),
+
   // ── Persistence adapter selection ─────────────────────────────────────────
   // Controls which repository adapter is used for intents and solvers.
   // "memory" (default) keeps everything in-process — no database required.
@@ -46,6 +50,7 @@ export const envValidationSchema = Joi.object({
   // to a live database.  Intended for production / staging.
   INTENTS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
   SOLVERS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
+  ONCHAIN_WRITES_DRY_RUN: Joi.boolean().default(true),
 
   // ── Observability ─────────────────────────────────────────────────────────
   // Sentry DSN for error alerting.  Omit (or leave blank) to disable Sentry.
@@ -60,4 +65,21 @@ export const envValidationSchema = Joi.object({
       // as a documentation hint and config validation guard only.
       "debug",
     ),
+
+  // Log shipping — off by default so local dev/CI remain stdout-only. When
+  // enabled, structured logs are also shipped to LOG_SHIPPING_HOST:PORT.
+  LOG_SHIPPING_ENABLED: Joi.boolean().default(false),
+  LOG_SHIPPING_HOST: Joi.string().when("LOG_SHIPPING_ENABLED", {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.string().allow("").default(""),
+  }),
+  LOG_SHIPPING_PORT: Joi.number().port().when("LOG_SHIPPING_ENABLED", {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.number().optional(),
+  }),
+  LOG_SHIPPING_PATH: Joi.string().default("/"),
+  LOG_SHIPPING_SSL: Joi.boolean().default(false),
+  LOG_SERVICE_NAME: Joi.string().default("vortex-backend"),
 });

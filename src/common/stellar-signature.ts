@@ -80,3 +80,10 @@ export function buildRegisterMessage(address: string): string {
 export function buildSolverStatusMessage(action: "deactivate" | "reactivate" | "deregister", address: string): string {
   return `${action}:${address}`;
 }
+
+/**
+ * Build the canonical message that a solver must sign to submit a slash dispute.
+ */
+export function buildDisputeMessage(slashId: string, address: string, reason: string): string {
+  return `dispute:${slashId}:${address}:${reason}`;
+}
