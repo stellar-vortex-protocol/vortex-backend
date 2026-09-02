@@ -24,10 +24,16 @@ const sdk = new NodeSDK({
       "@opentelemetry/instrumentation-http": {
         enabled: true,
       },
+      "@opentelemetry/instrumentation-undici": {
+        enabled: true,
+      },
       "@opentelemetry/instrumentation-express": {
         enabled: true,
       },
       "@opentelemetry/instrumentation-nestjs-core": {
+        enabled: true,
+      },
+      "@opentelemetry/instrumentation-pg": {
         enabled: true,
       },
     }),

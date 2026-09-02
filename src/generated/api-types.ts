@@ -188,6 +188,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/intents/{id}/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get audit trail for an intent
+         * @description Returns the full state-transition history for an intent ordered oldest-first. Each entry records the state the intent moved into, who triggered it, and why.
+         */
+        get: operations["IntentsController_getAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/intents/{id}/quote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["IntentsController_getPersistedQuote"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/intents/{id}/accept": {
         parameters: {
             query?: never;
@@ -281,7 +317,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        patch: operations["SolversController_updateSolver"];
         trace?: never;
     };
     "/api/v1/solvers/{address}/stats": {
@@ -384,6 +420,21 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        StellarTokenDto: {
+            /** @description Stellar contract ID of the token */
+            contract: string;
+            /** @example XLM */
+            symbol: string;
+            /** @example Stellar Lumens */
+            name: string;
+            /** @example 7 */
+            decimals: number;
+            /** @example 0.1182 */
+            priceUSD: number;
+        };
+        StellarTokensResponseDto: {
+            tokens: components["schemas"]["StellarTokenDto"][];
+        };
         CreateIntentDto: {
             /** @description Stellar address of the user creating the intent */
             user: string;
@@ -449,6 +500,36 @@ export interface components {
             dstTokenSymbol: string;
             /** @description Intent ID to persist the quote to */
             intentId?: string;
+            /** @description Source token contract address / ID (used for precise token resolution) */
+            srcTokenAddress?: string;
+            /** @description Destination Stellar token contract ID (used for precise token resolution) */
+            dstTokenContract?: string;
+        };
+        RouteStepDto: {
+            /** @enum {string} */
+            type: "bridge" | "swap" | "transfer";
+            /** @description Protocol name, e.g. 'direct-solver', 'uniswap-v3' */
+            protocol: string;
+            fromChain: string;
+            toChain: string;
+            /** @description Source token info for this hop */
+            fromToken: Record<string, never>;
+            /** @description Destination token info for this hop */
+            toToken: Record<string, never>;
+            /** @description Estimated execution time in seconds for this step */
+            estimatedTime: number;
+            /** @description Estimated gas cost in the source token's base unit */
+            estimatedGas: string;
+        };
+        RouteDto: {
+            /** @description Ordered list of steps to execute the swap */
+            steps: components["schemas"]["RouteStepDto"][];
+            /** @description Total estimated time for all steps in seconds */
+            totalTime: number;
+            /** @description Total fees in USD across all steps */
+            totalFeesUSD: number;
+            /** @description Estimated price impact as a decimal fraction, e.g. 0.003 = 0.3% */
+            priceImpact: number;
         };
         QuoteDto: {
             /** @description Solver address */
@@ -463,6 +544,12 @@ export interface components {
             fillTime: number;
             /** @description Unix timestamp when quote expires */
             expiresAt: number;
+            /** @description Total fees in USD (protocol fee converted at token price) */
+            totalFeesUSD: number;
+            /** @description Estimated price impact as a decimal fraction, e.g. 0.003 = 0.3% */
+            priceImpact: number;
+            /** @description Computed execution route (direct single-step or multi-hop via USDC intermediate) */
+            route: components["schemas"]["RouteDto"];
         };
         QuoteResponseDto: {
             /** @description Array of quotes sorted by best dstAmount first */
@@ -479,6 +566,10 @@ export interface components {
             dstTokenSymbol: string;
             /** @description Estimated fill time in seconds for the best quote */
             estimatedFillTime: number;
+            /** @description Total fees in USD for the best quote (0 when no quote available) */
+            totalFeesUSD: number;
+            /** @description Price impact for the best quote as a decimal fraction (0 when no quote available) */
+            priceImpact: number;
         };
         RegisterSolverDto: {
             /** @description Solver's Stellar address */
@@ -493,6 +584,20 @@ export interface components {
             supportedChains: ("stellar" | "ethereum" | "base" | "polygon" | "arbitrum" | "optimism" | "avalanche")[];
             /** @description Token symbols this solver supports */
             supportedTokens: unknown[][];
+            /** @description Proof-of-control signature for the advertised solver address */
+            proofSignature: string;
+        };
+        UpdateSolverDto: {
+            /** @description New display name */
+            name?: string;
+            /** @description Replacement list of chains this solver supports */
+            supportedChains?: ("stellar" | "ethereum" | "base" | "polygon" | "arbitrum" | "optimism" | "avalanche")[];
+            /** @description Replacement list of supported token symbols */
+            supportedTokens?: unknown[][];
+            /** @description Updated average fill time in seconds */
+            avgFillTime?: number;
+            /** @description Base64-encoded Ed25519 signature of the message "update-solver:<address>" produced by the solver's private key, proving control of :address */
+            signature: string;
         };
     };
     responses: never;
@@ -529,11 +634,20 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Soroban RPC node health status (pass-through of the RPC `getHealth` result). */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": {
+                        /** @example healthy */
+                        status: string;
+                        latestLedger?: number;
+                        oldestLedger?: number;
+                        ledgerRetentionWindow?: number;
+                    };
+                };
             };
         };
     };
@@ -546,11 +660,19 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Latest closed ledger as reported by the Soroban RPC node. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": {
+                        id: string;
+                        /** @example 12345678 */
+                        sequence: number;
+                        protocolVersion?: number;
+                    };
+                };
             };
         };
     };
@@ -563,11 +685,19 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Network passphrase and protocol metadata for the configured RPC node. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": {
+                        friendbotUrl?: string | null;
+                        /** @example Test SDF Network ; September 2015 */
+                        passphrase: string;
+                        protocolVersion?: number;
+                    };
+                };
             };
         };
     };
@@ -576,13 +706,39 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description Stellar Ed25519 account public key (starts with `G`, 56 characters). */
                 publicKey: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
+            /** @description On-chain account record (id, sequence number, and balances). */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        id: string;
+                        /** @example 987654321 */
+                        sequence: string;
+                        balances?: {
+                            balance?: string;
+                            asset_type?: string;
+                        }[];
+                    };
+                };
+            };
+            /** @description Invalid Stellar public key format */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Per-account rate limit exceeded (AccountRateLimitGuard) */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -592,8 +748,9 @@ export interface operations {
     };
     TokensController_getTokens: {
         parameters: {
-            query: {
-                chain: string;
+            query?: {
+                /** @description Restrict the result to a single chain (e.g. `stellar`, `ethereum`, `base`). When omitted, every supported chain plus the Stellar token list is returned. */
+                chain?: string;
             };
             header?: never;
             path?: never;
@@ -601,11 +758,54 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Supported tokens. With `chain` set, `{ tokens: Token[], chain }`; without it, `tokens` is keyed by chain and `stellarTokens` holds the Stellar list. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": {
+                        tokens: {
+                            address?: string;
+                            contract?: string;
+                            /** @example USDC */
+                            symbol: string;
+                            /** @example USD Coin */
+                            name: string;
+                            /** @example 6 */
+                            decimals: number;
+                            /** @example 1 */
+                            priceUSD: number;
+                        }[];
+                        /** @example ethereum */
+                        chain: string;
+                    } | {
+                        tokens: {
+                            [key: string]: {
+                                address: string;
+                                /** @example USDC */
+                                symbol: string;
+                                /** @example USD Coin */
+                                name: string;
+                                /** @example 6 */
+                                decimals: number;
+                                /** @example 1 */
+                                priceUSD: number;
+                            }[];
+                        };
+                        stellarTokens: {
+                            contract: string;
+                            /** @example XLM */
+                            symbol: string;
+                            /** @example Stellar Lumens */
+                            name: string;
+                            /** @example 7 */
+                            decimals: number;
+                            /** @example 0.1182 */
+                            priceUSD: number;
+                        }[];
+                    };
+                };
             };
         };
     };
@@ -618,11 +818,14 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description The full list of supported Stellar destination tokens. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["StellarTokensResponseDto"];
+                };
             };
         };
     };
@@ -637,6 +840,8 @@ export interface operations {
                 chain?: string;
                 /** @description Number of results per page */
                 limit: number;
+                /** @description Cursor for the next page of intents */
+                cursor?: string;
                 /** @description Number of results to skip */
                 offset: number;
             };
@@ -732,6 +937,72 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Intent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    IntentsController_getAudit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Audit trail for the intent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        intentId?: string;
+                        entries?: {
+                            /** Format: date-time */
+                            timestamp?: string;
+                            toState?: string;
+                            actor?: string;
+                            reason?: string;
+                            metadata?: Record<string, never> | null;
+                        }[];
+                    };
+                };
+            };
+            /** @description Intent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    IntentsController_getPersistedQuote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Persisted quote for the intent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Intent not found or no quote persisted */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -896,7 +1167,7 @@ export interface operations {
                     "application/json": components["schemas"]["QuoteResponseDto"];
                 };
             };
-            /** @description Rate limit exceeded — max 100 req/min per IP globally */
+            /** @description Rate limit exceeded — max 20 quote requests per 60 s per IP */
             429: {
                 headers: {
                     [name: string]: unknown;
@@ -955,6 +1226,51 @@ export interface operations {
         requestBody?: never;
         responses: {
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    SolversController_updateSolver: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                address: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateSolverDto"];
+            };
+        };
+        responses: {
+            /** @description Updated solver record */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid update body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid signature */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Solver not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

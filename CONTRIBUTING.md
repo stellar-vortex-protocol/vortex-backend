@@ -80,12 +80,18 @@ npm run dev
 # → http://localhost:4000
 # → Swagger UI: http://localhost:4000/docs
 # → WebSocket: ws://localhost:4000/ws
+
+# 4. If you need a local Postgres-backed app, use the bundled compose stack
+#    (one command; matches the CI service container config)
+docker compose up --build
 ```
 
 > Most feature work does not require Postgres — the service uses an in-memory
 > store by default. `DATABASE_URL` has a sensible default so the app boots
 > without a live database. You only need Postgres if you are working on
-> Prisma migrations or the database-backed health check.
+> Prisma migrations or the database-backed health check. The repo now includes a
+> root-level `docker-compose.yml` so that workflow is one command instead of a
+> hand-rolled local setup.
 
 ---
 

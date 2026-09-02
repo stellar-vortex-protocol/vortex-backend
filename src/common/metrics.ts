@@ -78,6 +78,10 @@ export class Histogram {
 
 /** Singleton registry — import and use from any module. */
 export const MetricsRegistry = {
+  health: {
+    databaseChecksTotal: new Counter(),
+    sorobanRpcChecksTotal: new Counter(),
+  },
   sweeper: {
     /** Total number of intents expired across all sweeps. */
     expiredTotal: new Counter(),

@@ -66,6 +66,8 @@ model Intent {
   filledAt       Int?        @map("filled_at")
   /// Actual amount received by the user (base unit string).
   fillAmount     String?     @map("fill_amount")
+  /// Realized protocol fee charged on this fill (destination-token base units).
+  feeAmount      String?     @map("fee_amount")
   /// On-chain transaction hash of the Stellar fill transaction.
   txHash         String?     @map("tx_hash")
 

@@ -1,4 +1,4 @@
-import { Module } from "@nestjs/common";
+import { Module, forwardRef } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { IntentsService } from "./intents.service";
 import { IntentsController } from "./intents.controller";
@@ -15,7 +15,7 @@ import { AppConfig } from "../config/configuration";
 import { PrismaService } from "../prisma/prisma.service";
 
 @Module({
-  imports: [SolversModule, RoutingModule, TokensModule, SorobanModule],
+  imports: [forwardRef(() => SolversModule), RoutingModule, TokensModule, SorobanModule],
   controllers: [IntentsController],
   providers: [
     // Select the persistence adapter based on INTENTS_PERSISTENCE env var.
