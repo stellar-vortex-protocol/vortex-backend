@@ -104,6 +104,55 @@ describe("Validation Negative Paths (e2e)", () => {
     });
   });
 
+  describe("List filter enum validation (#270)", () => {
+    it("should return 400 for an unknown state filter", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ state: "bogus", limit: 20, offset: 0 })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it("should return 400 for an unknown chain filter", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ chain: "notachain", limit: 20, offset: 0 })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it("should still accept a valid state filter", async () => {
+      await request(app.getHttpServer())
+        .get("/api/v1/intents")
+        .query({ state: "open", limit: 20, offset: 0 })
+        .expect(200);
+    });
+  });
+
+  describe("Unknown destination/source token rejection (#276)", () => {
+    it("should return 400 for a well-formed but unregistered dstTokenContract", async () => {
+      const res = await request(app.getHttpServer())
+        .post("/api/v1/intents")
+        .send({
+          ...validCreateBody,
+          dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMZZZZZZ",
+        })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+
+    it("should return 400 for a well-formed but unregistered srcTokenAddress on a known chain", async () => {
+      const res = await request(app.getHttpServer())
+        .post("/api/v1/intents")
+        .send({
+          ...validCreateBody,
+          srcTokenAddress: "0x1111111111111111111111111111111111111111",
+        })
+        .expect(400);
+      expect(res.body.error).toBeDefined();
+    });
+  });
+
   describe("Deadline validation", () => {
     it("should return 400 for deadline in the past", async () => {
       const pastTimestamp = Math.floor(Date.now() / 1000) - 3600; // 1 hour ago

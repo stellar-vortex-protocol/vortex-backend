@@ -1,21 +1,33 @@
-import { IsInt, IsOptional, IsString, Max, Min } from "class-validator";
-import { ApiPropertyOptional } from "@nestjs/swagger";
+import { IsIn, IsInt, IsOptional, IsString, Max, Min } from "class-validator";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import {
+  INTENT_STATES,
+  IntentState,
+  SUPPORTED_CHAINS,
+  SupportedChain,
+} from "../intents.types";
 
 export class ListIntentsDto {
-  @ApiPropertyOptional({ description: "Filter by intent state" })
+  @ApiPropertyOptional({
+    description: "Filter by intent state",
+    enum: INTENT_STATES,
+  })
   @IsOptional()
-  @IsString()
-  state?: string;
+  @IsIn(INTENT_STATES)
+  state?: IntentState;
 
   @ApiPropertyOptional({ description: "Filter by user address" })
   @IsOptional()
   @IsString()
   user?: string;
 
-  @ApiPropertyOptional({ description: "Filter by source chain" })
+  @ApiPropertyOptional({
+    description: "Filter by source chain",
+    enum: SUPPORTED_CHAINS,
+  })
   @IsOptional()
-  @IsString()
-  chain?: string;
+  @IsIn(SUPPORTED_CHAINS)
+  chain?: SupportedChain;
 
   @ApiPropertyOptional({ minimum: 1, maximum: 100, default: 20, description: "Number of results per page" })
   @IsOptional()

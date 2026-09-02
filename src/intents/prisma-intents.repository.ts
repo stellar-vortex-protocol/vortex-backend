@@ -140,13 +140,64 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     return row ? this.fromRow(row) : null;
   }
 
+  /**
+   * Atomically cancel an intent only when it is currently `open`. Guards
+   * against a concurrent solver accept() or sweeper expiry on the same intent.
+   */
+  async cancelIfOpen(id: string): Promise<Intent | null> {
+    const result = await this.prisma.intent.updateMany({
+      where: { intentId: id, state: PrismaIntentState.open },
+      data: { state: PrismaIntentState.cancelled },
+    });
+
+    if (result.count === 0) return null;
+
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
+  }
+
+  /**
+   * Atomically expire an intent only when it is currently `open`. Used by the
+   * sweeper so a concurrent user cancel() or solver accept() always wins the race.
+   */
+  async expireIfOpen(id: string): Promise<Intent | null> {
+    const result = await this.prisma.intent.updateMany({
+      where: { intentId: id, state: PrismaIntentState.open },
+      data: { state: PrismaIntentState.expired },
+    });
+
+    if (result.count === 0) return null;
+
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
+  }
+
+  /**
+   * Atomically slash an intent only when it is currently `accepted`. Used by
+   * the sweeper so a concurrent solver fill() always wins the race.
+   */
+  async slashIfAccepted(
+    id: string,
+    patch: { slashedAt: number; slashReason: string },
+  ): Promise<Intent | null> {
+    const result = await this.prisma.intent.updateMany({
+      where: { intentId: id, state: PrismaIntentState.accepted },
+      data: { state: PrismaIntentState.slashed },
+    });
+
+    if (result.count === 0) return null;
+
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
+  }
+
   // ── Private helpers ────────────────────────────────────────────────────────
 
   /** Map Intent → Prisma create/update data (omits intentId which is the key). */
   private toDbData(
     intent: Intent,
   ): Omit<Prisma.IntentCreateInput, "intentId"> {
-    return {
+    const data: Omit<Prisma.IntentCreateInput, "intentId"> & { feeAmount?: string | null } = {
       user: intent.user,
       srcChain: intent.srcChain as Prisma.IntentCreateInput["srcChain"],
       srcToken: intent.srcToken as unknown as Prisma.InputJsonValue,
@@ -162,16 +213,23 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       fillAmount: intent.fillAmount ?? null,
       txHash: intent.txHash ?? null,
     };
+
+    if (intent.feeAmount !== undefined) {
+      (data as { feeAmount?: string | null }).feeAmount = intent.feeAmount ?? null;
+    }
+
+    return data;
   }
 
   /** Build an `updateMany`-compatible data object from a partial Intent patch. */
   private toDbPatch(patch: Partial<Intent>): Prisma.IntentUpdateInput {
-    const data: Prisma.IntentUpdateInput = {};
+    const data = {} as Prisma.IntentUpdateInput & { feeAmount?: string | null };
     if (patch.state !== undefined) data.state = this.toPrismaState(patch.state);
     if (patch.solver !== undefined) data.solver = patch.solver;
     if (patch.deadline !== undefined) data.deadline = patch.deadline;
     if (patch.filledAt !== undefined) data.filledAt = patch.filledAt;
     if (patch.fillAmount !== undefined) data.fillAmount = patch.fillAmount;
+    if (patch.feeAmount !== undefined) (data as { feeAmount?: string | null }).feeAmount = patch.feeAmount ?? null;
     if (patch.txHash !== undefined) data.txHash = patch.txHash;
     if (patch.quotedDstAmount !== undefined) data.quotedDstAmount = patch.quotedDstAmount;
     if (patch.srcAmount !== undefined) data.srcAmount = patch.srcAmount;
@@ -199,6 +257,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     deadline: number;
     filledAt: number | null;
     fillAmount: string | null;
+    feeAmount?: string | null;
     txHash: string | null;
   }): Intent {
     return {
@@ -216,6 +275,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       deadline: row.deadline,
       ...(row.filledAt !== null ? { filledAt: row.filledAt } : {}),
       ...(row.fillAmount !== null ? { fillAmount: row.fillAmount } : {}),
+      ...(row.feeAmount !== undefined && row.feeAmount !== null ? { feeAmount: row.feeAmount } : {}),
       ...(row.txHash !== null ? { txHash: row.txHash } : {}),
     };
   }

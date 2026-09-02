@@ -1,26 +1,53 @@
 # Contributing to vortex-backend
 
 > This document covers **backend-specific** setup and conventions.
-> For the process, code of conduct, and org-wide guidelines, see the
-> [org-wide CONTRIBUTING.md](https://github.com/vortex-protocol/.github/blob/main/CONTRIBUTING.md).
-
-Closes #135
+> For the repository's community expectations and RFC workflow, see
+> [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) and
+> [docs/rfcs/README.md](./docs/rfcs/README.md).
 
 ---
 
 ## Table of contents
 
-1. [Prerequisites](#prerequisites)
-2. [Getting started](#getting-started)
-3. [Development workflow](#development-workflow)
-4. [Running the test suite](#running-the-test-suite)
-5. [Code conventions](#code-conventions)
-6. [Module and file structure](#module-and-file-structure)
-7. [Adding a new endpoint](#adding-a-new-endpoint)
-8. [Environment variables](#environment-variables)
-9. [Regenerating the API client SDK](#regenerating-the-api-client-sdk)
-10. [Commit messages](#commit-messages)
-11. [Submitting a pull request](#submitting-a-pull-request)
+1. [Contributor workflow](#contributor-workflow)
+2. [Prerequisites](#prerequisites)
+3. [Getting started](#getting-started)
+4. [Development workflow](#development-workflow)
+5. [Running the test suite](#running-the-test-suite)
+6. [Code conventions](#code-conventions)
+7. [Module and file structure](#module-and-file-structure)
+8. [Adding a new endpoint](#adding-a-new-endpoint)
+9. [Environment variables](#environment-variables)
+10. [Regenerating the API client SDK](#regenerating-the-api-client-sdk)
+11. [Commit messages](#commit-messages)
+12. [Submitting a pull request](#submitting-a-pull-request)
+
+---
+
+## Contributor workflow
+
+Before opening a PR, pick a task from the GitHub issue tracker and keep the work scoped to that issue. The preferred workflow is:
+
+1. Create a small feature branch from `main`.
+2. Keep the implementation focused on the issue at hand.
+3. Validate the affected commands locally (`npm run lint`, `npm run typecheck`, and the relevant test targets).
+4. Open a PR with a clear summary and a link to the issue.
+
+Commit messages follow Conventional Commits and are enforced by the `commitlint` job in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml). The typical format is:
+
+```bash
+<type>(<scope>): <summary>
+```
+
+Examples:
+
+```bash
+docs: add contributor onboarding
+fix: validate soroban config in production
+feat: add quote endpoint cache
+```
+
+If your change affects the protocol contract, persisted schema, or WebSocket semantics, start by reading [docs/rfcs/README.md](./docs/rfcs/README.md) and open an RFC before implementation.
 
 ---
 
@@ -53,12 +80,18 @@ npm run dev
 # → http://localhost:4000
 # → Swagger UI: http://localhost:4000/docs
 # → WebSocket: ws://localhost:4000/ws
+
+# 4. If you need a local Postgres-backed app, use the bundled compose stack
+#    (one command; matches the CI service container config)
+docker compose up --build
 ```
 
 > Most feature work does not require Postgres — the service uses an in-memory
 > store by default. `DATABASE_URL` has a sensible default so the app boots
 > without a live database. You only need Postgres if you are working on
-> Prisma migrations or the database-backed health check.
+> Prisma migrations or the database-backed health check. The repo now includes a
+> root-level `docker-compose.yml` so that workflow is one command instead of a
+> hand-rolled local setup.
 
 ---
 
@@ -292,6 +325,13 @@ The validation schema in `src/config/env.validation.ts` documents every
 variable with Joi — run `npm run dev` and check the startup error if any
 variable fails validation.
 
+### License and file headers
+
+This repository is licensed under the [MIT License](./LICENSE). Because the
+project is permissive by default, source files do not require a per-file SPDX or
+copyright banner; just keep the repo-level license in place and avoid adding
+custom header text that conflicts with it.
+
 ---
 
 ## Regenerating the API client SDK
@@ -310,7 +350,10 @@ to collect Swagger metadata, and writes three files to `src/generated/`:
 - `api-types.ts` — TypeScript types for all paths, operations, and schemas
 - `index.ts` — re-export entry point
 
-Commit these files as part of the same PR that changes the API surface.
+The generated SDK follows the backend's release tags (`vX.Y.Z`) for versioning,
+so the publish workflow uses the Git tag as the SDK version when the package is
+published to npm. Commit these files as part of the same PR that changes the API
+surface.
 
 ---
 

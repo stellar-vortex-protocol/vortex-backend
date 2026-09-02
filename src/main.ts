@@ -12,6 +12,7 @@ import { AppConfig } from "./config/configuration";
 import { LoggingInterceptor } from "./common/logging.interceptor";
 import { HttpExceptionFilter } from "./common/http-exception.filter";
 import { initSentry } from "./common/sentry";
+import { IntentsSweeperService } from "./intents/intents-sweeper.service";
 
 // Initialise Sentry before the NestJS app boots so that any startup errors
 // are also captured.  No-op when SENTRY_DSN is not set.
@@ -62,12 +63,17 @@ function checkContractIdEnvVars(
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Issue #20 — trust the first proxy hop so Helmet/HSTS sees the real
+  // forwarded protocol when TLS terminates upstream behind nginx/ALB.
+  app.set("trust proxy", 1);
+
   // Issue #46 — explicit, tight body-size cap (DTOs are tiny)
   app.use(json({ limit: "10kb" }));
 
-  // Issue #43 — baseline HTTP security headers via helmet.
-  // Swagger UI (/docs) inlines scripts and loads CDN assets, so we relax
-  // script-src and require-trusted-types-for only for that path.
+  // Issue #43 / #302 — verify the security headers we rely on in production.
+  // HSTS is explicitly configured so it is not silently skipped when a TLS
+  // terminator sits in front of Express and `req.secure` is false unless the
+  // proxy chain is trusted.
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -79,6 +85,11 @@ async function bootstrap() {
           imgSrc: ["'self'", "data:", "cdn.jsdelivr.net"],
           connectSrc: ["'self'"],
         },
+      },
+      hsts: {
+        maxAge: 31536000,
+        includeSubDomains: true,
+        preload: true,
       },
       // Swagger UI uses inline event handlers; this policy would block it
       crossOriginEmbedderPolicy: false,
@@ -101,6 +112,17 @@ async function bootstrap() {
   const configService = app.get(ConfigService<AppConfig, true>);
 
   checkContractIdEnvVars(configService);
+
+  // Issue #269 — operator-only manual sweep trigger (break-glass).
+  // Send SIGUSR2 to the process (`kill -USR2 <pid>`) to run exactly one sweep
+  // cycle on demand. This replaces the old "attach a Node.js REPL" procedure:
+  // it needs shell access to the host, is not exposed over HTTP, and every
+  // invocation is logged loudly by IntentsSweeperService. See
+  // docs/runbooks/on-call.md → "Manual sweep trigger (emergency)".
+  const sweeper = app.get(IntentsSweeperService);
+  process.on("SIGUSR2", () => {
+    void sweeper.triggerManualSweep("SIGUSR2");
+  });
 
   const port = configService.get("port", { infer: true });
   const corsOrigin = configService.get("corsOrigin", { infer: true });

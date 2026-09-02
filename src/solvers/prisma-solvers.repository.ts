@@ -58,6 +58,7 @@ export class PrismaSolversRepository implements ISolversRepository {
       avgFillTime: solver.avgFillTime,
       isActive: solver.isActive,
       registeredAt: solver.registeredAt,
+      lastActiveAt: solver.lastActiveAt,
       supportedChains: solver.supportedChains as unknown as Prisma.InputJsonValue,
       supportedTokens: solver.supportedTokens as unknown as Prisma.InputJsonValue,
     };
@@ -73,6 +74,7 @@ export class PrismaSolversRepository implements ISolversRepository {
     avgFillTime: number;
     isActive: boolean;
     registeredAt: number;
+    lastActiveAt: number;
     supportedChains: Prisma.JsonValue;
     supportedTokens: Prisma.JsonValue;
   }): SolverRecord {
@@ -86,6 +88,7 @@ export class PrismaSolversRepository implements ISolversRepository {
       avgFillTime: row.avgFillTime,
       isActive: row.isActive,
       registeredAt: row.registeredAt,
+      lastActiveAt: row.lastActiveAt,
       supportedChains: row.supportedChains as SolverRecord["supportedChains"],
       supportedTokens: row.supportedTokens as SolverRecord["supportedTokens"],
     };

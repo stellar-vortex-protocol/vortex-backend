@@ -1,3 +1,4 @@
+import { BadRequestException } from "@nestjs/common";
 import { TokensService } from "./tokens.service";
 import { SUPPORTED_TOKENS, STELLAR_TOKENS } from "./tokens.data";
 
@@ -121,6 +122,45 @@ describe("TokensService", () => {
 
     it("returns undefined for an empty string", () => {
       expect(service.resolveDstToken("")).toBeUndefined();
+    });
+  });
+
+  // ── #276: OrThrow variants reject unrecognised tokens ─────────────────────
+
+  describe("resolveSrcTokenOrThrow", () => {
+    it("returns the resolved token for a known chain + address", () => {
+      const usdcAddr = SUPPORTED_TOKENS["ethereum"][0].address;
+      const result = service.resolveSrcTokenOrThrow("ethereum", usdcAddr);
+      expect(result.symbol).toBe("USDC");
+      expect(result.priceUSD).toBe(1.0);
+    });
+
+    it("throws BadRequestException for an unknown address on a known chain", () => {
+      expect(() =>
+        service.resolveSrcTokenOrThrow("ethereum", "0x1111111111111111111111111111111111111111"),
+      ).toThrow(BadRequestException);
+    });
+
+    it("throws BadRequestException for an unknown Stellar source contract", () => {
+      expect(() => service.resolveSrcTokenOrThrow("stellar", "CUNKNOWN")).toThrow(
+        BadRequestException,
+      );
+    });
+  });
+
+  describe("resolveDstTokenOrThrow", () => {
+    it("returns the resolved token for a known Stellar contract", () => {
+      const contract = STELLAR_TOKENS[0].contract;
+      const result = service.resolveDstTokenOrThrow(contract);
+      expect(result.contract).toBe(contract);
+    });
+
+    it("throws BadRequestException for an unknown contract", () => {
+      expect(() => service.resolveDstTokenOrThrow("CNOTEXIST")).toThrow(BadRequestException);
+    });
+
+    it("throws BadRequestException for an empty contract", () => {
+      expect(() => service.resolveDstTokenOrThrow("")).toThrow(BadRequestException);
     });
   });
 });

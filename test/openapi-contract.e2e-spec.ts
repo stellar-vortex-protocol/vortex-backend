@@ -88,4 +88,42 @@ describe("OpenAPI contract (e2e)", () => {
     const paths: Record<string, unknown> = res.body.paths;
     expect(paths["/api/v1/solvers"]).toBeDefined();
   });
+
+  // -------------------------------------------------------------------------
+  // Issue #271 — SorobanController and TokensController must document their
+  // response shapes just like every other controller.
+  // -------------------------------------------------------------------------
+
+  const okSchema = (op: { responses?: Record<string, { content?: Record<string, { schema?: unknown }> }> }) =>
+    op.responses?.["200"]?.content?.["application/json"]?.schema;
+
+  it("documents a 200 response schema for every chain (Soroban) route", async () => {
+    const res = await request(app.getHttpServer()).get("/docs-json").expect(200);
+    const paths = res.body.paths;
+    for (const route of [
+      "/api/v1/chain/health",
+      "/api/v1/chain/ledger",
+      "/api/v1/chain/network",
+      "/api/v1/chain/account/{publicKey}",
+    ]) {
+      expect(paths[route]).toBeDefined();
+      expect(okSchema(paths[route].get)).toBeDefined();
+    }
+  });
+
+  it("documents the 400 and 429 responses on the account route", async () => {
+    const res = await request(app.getHttpServer()).get("/docs-json").expect(200);
+    const op = res.body.paths["/api/v1/chain/account/{publicKey}"].get;
+    expect(op.responses["400"]).toBeDefined();
+    expect(op.responses["429"]).toBeDefined();
+  });
+
+  it("documents a 200 response schema for every tokens route", async () => {
+    const res = await request(app.getHttpServer()).get("/docs-json").expect(200);
+    const paths = res.body.paths;
+    for (const route of ["/api/v1/tokens", "/api/v1/tokens/stellar"]) {
+      expect(paths[route]).toBeDefined();
+      expect(okSchema(paths[route].get)).toBeDefined();
+    }
+  });
 });

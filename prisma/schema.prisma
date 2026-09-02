@@ -66,6 +66,8 @@ model Intent {
   filledAt       Int?        @map("filled_at")
   /// Actual amount received by the user (base unit string).
   fillAmount     String?     @map("fill_amount")
+  /// Realized protocol fee charged on this fill (destination-token base units).
+  feeAmount      String?     @map("fee_amount")
   /// On-chain transaction hash of the Stellar fill transaction.
   txHash         String?     @map("tx_hash")
 
@@ -94,6 +96,8 @@ model Solver {
   isActive         Boolean  @default(true) @map("is_active")
   /// Unix epoch seconds.
   registeredAt     Int      @map("registered_at")
+  /// Unix epoch seconds of the solver's most recent activity (registration, fill, or status change).
+  lastActiveAt     Int      @map("last_active_at")
   /// Chains this solver supports (stored as JSON array of SupportedChain values).
   supportedChains  Json     @map("supported_chains")
   /// Token symbols this solver can handle.
