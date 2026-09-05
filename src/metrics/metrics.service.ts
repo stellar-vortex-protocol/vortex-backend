@@ -12,6 +12,16 @@ export class MetricsService implements OnModuleInit {
   public readonly intentStateTransitions: client.Counter<string>;
   public readonly wsConnections: client.Gauge<string>;
 
+  /**
+   * Sweeper metrics — these replace the retired src/common/metrics.ts
+   * MetricsRegistry.sweeper namespace (see issue #259).
+   *
+   * The on-call runbook (docs/runbooks/on-call.md) references these names
+   * directly. Any change here must be reflected there.
+   */
+  public readonly sweeperExpiredTotal: client.Counter<string>;
+  public readonly sweeperSweepDurationMs: client.Histogram<string>;
+
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.register = new client.Registry();
     const prefix = "vortex_";
@@ -50,6 +60,25 @@ export class MetricsService implements OnModuleInit {
       help: "Number of active WebSocket connections",
       registers: [this.register],
     });
+
+    // ── Sweeper metrics (issue #259) ─────────────────────────────────────────
+    // These replace the retired MetricsRegistry.sweeper namespace from
+    // src/common/metrics.ts. They are Prometheus-backed so they appear in
+    // GET /metrics and in any Prometheus/Grafana dashboards without further
+    // adaptation.
+
+    this.sweeperExpiredTotal = new client.Counter({
+      name: `${prefix}sweeper_expired_total`,
+      help: "Total number of intents expired across all sweeps",
+      registers: [this.register],
+    });
+
+    this.sweeperSweepDurationMs = new client.Histogram({
+      name: `${prefix}sweeper_sweep_duration_ms`,
+      help: "Duration of each IntentsSweeperService.sweep() execution in milliseconds",
+      buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+      registers: [this.register],
+    });
   }
 
   onModuleInit() {
@@ -75,5 +104,14 @@ export class MetricsService implements OnModuleInit {
 
   decWsConnection() {
     this.wsConnections.dec();
+  }
+
+  /**
+   * Record one sweeper cycle's expired count and duration.
+   * Called by IntentsSweeperService at the end of every sweep() invocation.
+   */
+  recordSweep(expiredCount: number, durationMs: number): void {
+    this.sweeperExpiredTotal.inc(expiredCount);
+    this.sweeperSweepDurationMs.observe(durationMs);
   }
 }

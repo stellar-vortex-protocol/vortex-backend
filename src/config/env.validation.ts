@@ -70,7 +70,6 @@ export const envValidationSchema = Joi.object({
   // to a live database.  Intended for production / staging.
   INTENTS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
   SOLVERS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
-  ONCHAIN_WRITES_DRY_RUN: Joi.boolean().default(true),
 
   // ── Observability ─────────────────────────────────────────────────────────
   // Sentry DSN for error alerting.  Omit (or leave blank) to disable Sentry.
@@ -102,4 +101,36 @@ export const envValidationSchema = Joi.object({
   LOG_SHIPPING_PATH: Joi.string().default("/"),
   LOG_SHIPPING_SSL: Joi.boolean().default(false),
   LOG_SERVICE_NAME: Joi.string().default("vortex-backend"),
+
+  // ── On-chain write safety flag (issue #35 / issue #260) ──────────────────
+  // When true, every on-chain-write code path (invokeContract, slashSolver)
+  // builds and simulates the transaction, logs what it *would* submit, and
+  // returns without broadcasting — safe by construction.
+  //
+  // Default behaviour:
+  //   - Outside production: defaults to true (simulate-only, fail closed
+  //     toward safety — no real funds moved without an explicit opt-out).
+  //   - In production: *required* to be explicitly set.  Omitting it in a
+  //     production deploy fails validation so the operator must consciously
+  //     decide between dry-run and live mode before traffic reaches
+  //     on-chain write paths.  This matches the fail-closed pattern used
+  //     for SOROBAN_SIGNING_KEY.
+  //
+  // Limitations: the flag is config-driven and takes effect on the next
+  // process start; there is no HTTP endpoint to flip it at runtime without
+  // a restart.  This limitation is documented in onchain-cutover.md and is
+  // intentional for this iteration — a hot-reload mechanism is a separate
+  // concern.  Set ONCHAIN_DRY_RUN=false only after completing the dry-run
+  // soak described in docs/runbooks/onchain-cutover.md.
+  ONCHAIN_DRY_RUN: Joi.boolean()
+    .when("NODE_ENV", {
+      is: "production",
+      then: Joi.required().messages({
+        "any.required":
+          "ONCHAIN_DRY_RUN must be explicitly set in production. " +
+          "Set to true to remain in simulate-only mode, or false to enable live on-chain writes. " +
+          "See docs/runbooks/onchain-cutover.md for the staged rollout procedure.",
+      }),
+      otherwise: Joi.boolean().default(true),
+    }),
 });

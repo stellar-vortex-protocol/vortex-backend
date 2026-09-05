@@ -131,4 +131,57 @@ describe("StellarTxService", () => {
       expect((submittedTx as Transaction).fee).toBe("300");
     });
   });
+
+  describe("invokeContract — dry-run mode (#260)", () => {
+    it("returns dryRun:true without calling any soroban method when dryRun=true", async () => {
+      // configService returns dryRun=true for onchainDryRun
+      const dryRunConfigService = {
+        get: jest.fn((key: string) => {
+          if (key === "stellar.feePercentile") return "p50";
+          if (key === "onchainDryRun") return true;
+          return undefined;
+        }),
+      } as unknown as ConfigService<AppConfig, true>;
+
+      const dryRunService = new StellarTxService(
+        sorobanService as unknown as SorobanService,
+        dryRunConfigService,
+      );
+
+      const result = await dryRunService.invokeContract({
+        contractId: "CTEST",
+        method: "create_intent",
+        args: [],
+      });
+
+      expect(result.dryRun).toBe(true);
+      expect(result.status).toBe("DRY_RUN");
+      // No network calls should be made in dry-run mode
+      expect(sorobanService.simulateTransaction).not.toHaveBeenCalled();
+      expect(sorobanService.prepareTransaction).not.toHaveBeenCalled();
+    });
+
+    it("throws when dryRun=false (live path not yet implemented)", async () => {
+      const liveConfigService = {
+        get: jest.fn((key: string) => {
+          if (key === "stellar.feePercentile") return "p50";
+          if (key === "onchainDryRun") return false;
+          return undefined;
+        }),
+      } as unknown as ConfigService<AppConfig, true>;
+
+      const liveService = new StellarTxService(
+        sorobanService as unknown as SorobanService,
+        liveConfigService,
+      );
+
+      await expect(
+        liveService.invokeContract({
+          contractId: "CTEST",
+          method: "create_intent",
+          args: [],
+        }),
+      ).rejects.toThrow(/not yet implemented/);
+    });
+  });
 });

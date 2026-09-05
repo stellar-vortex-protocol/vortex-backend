@@ -19,7 +19,7 @@ should be reviewed/updated as each lands:
 | On-chain intent registration (issue #22) | Replaces in-memory `create()` with a real Soroban tx | Open |
 | Solver-registry wiring (issue #23) | `accept()` calls the solver-registry contract | Open |
 | On-chain fill settlement (issue #24) | `fill()` submits + confirms a settlement tx | Open |
-| Dry-run mode (issue #35) | Config flag to simulate on-chain writes without submitting | Open |
+| Dry-run mode (issue #35) | Config flag to simulate on-chain writes without submitting | **Done** (issue #260) |
 | Intent audit trail (issue #62) | Append-only log of every state transition, independent of the state store | Open |
 
 Treat the checklist below as the gate for actually running this procedure:
@@ -86,32 +86,45 @@ immediately before flipping traffic:
 
 ## Dry-run flag and the cutover
 
-The dry-run flag (issue #35) is the primary safety mechanism this runbook
-leans on. It's a config-level switch (default **on** outside production,
-per that issue's requirements) that makes every on-chain-write code path
-build and simulate a Soroban transaction, log what *would* be submitted,
-and return without broadcasting it.
+The dry-run flag (`ONCHAIN_DRY_RUN`, issue #260 / #35) is the primary safety
+mechanism this runbook leans on. It's a config-level switch (default **true**
+outside production, per that issue's requirements) that makes every on-chain-write
+code path (`StellarTxService.invokeContract`, `SolverRegistryService.slashSolver`)
+build and simulate a Soroban transaction, log what *would* be submitted, and
+return without broadcasting it.
+
+**Runtime-toggleable limitation:** The flag is loaded from environment config at
+process start. Changing it requires a process restart — there is no hot-reload
+HTTP endpoint for this iteration. This is an intentional simplification: the
+staged rollout procedure below is designed around restart windows (not hot flips),
+and the cost of a restart in staging is negligible compared to the risk of a
+silent live-mode activation. A live-toggle mechanism is a separate future concern.
+
+**Production requirement:** `ONCHAIN_DRY_RUN` must be explicitly set in any
+`NODE_ENV=production` environment — the process refuses to start without it
+(validated by `src/config/env.validation.ts`). This prevents a misconfigured
+production deploy from silently defaulting to either mode.
 
 How it factors into cutover staging:
 
 1. **Stage 1 — dry-run in target environment.** Deploy the on-chain code
-   paths with the dry-run flag forced on, traffic unchanged (reads/writes
+   paths with `ONCHAIN_DRY_RUN=true` forced on, traffic unchanged (reads/writes
    still served from the in-memory store). This validates that transaction
    construction, contract ID wiring, and the signing key all work, with
    zero funds-moving risk. This is pre-check #2 above.
-2. **Stage 2 — shadow writes.** Flip dry-run off for a canary slice (or a
+2. **Stage 2 — shadow writes.** Flip `ONCHAIN_DRY_RUN=false` for a canary slice (or a
    single non-critical path, e.g. solver-registry reads before slashing
    writes) while the in-memory store remains authoritative for reads. Watch
    for transaction failures, unexpected fees, or confirmation-latency
    surprises.
 3. **Stage 3 — cutover.** Flip the in-memory store from authoritative to
    cache (or remove it, per how #22/#24 implement this) for the full
-   read/write path. Dry-run stays off. This is the point of no return for
-   this procedure — from here, rollback means the explicit procedure below,
-   not just re-flipping a flag.
+   read/write path. `ONCHAIN_DRY_RUN=false` stays set. This is the point of
+   no return for this procedure — from here, rollback means the explicit
+   procedure below, not just re-flipping a flag.
 
-Keep the dry-run flag itself deployed (not ripped out) after cutover — it's
-the fastest lever if a related on-chain code path needs to be redeployed or
+Keep `ONCHAIN_DRY_RUN` deployed (not ripped out) after cutover — it's the
+fastest lever if a related on-chain code path needs to be redeployed or
 patched later without another full staged rollout.
 
 ## Rollback plan

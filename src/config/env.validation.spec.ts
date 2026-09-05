@@ -33,6 +33,9 @@ describe("envValidationSchema — SOROBAN_SIGNING_KEY", () => {
   it("is required in production", () => {
     const { error } = envValidationSchema.validate({
       NODE_ENV: "production",
+      // ONCHAIN_DRY_RUN is also required in production; include it so this
+      // test stays focused on SOROBAN_SIGNING_KEY validation only.
+      ONCHAIN_DRY_RUN: true,
     });
     expect(error).toBeDefined();
     expect(error?.message).toContain("SOROBAN_SIGNING_KEY");
@@ -42,6 +45,7 @@ describe("envValidationSchema — SOROBAN_SIGNING_KEY", () => {
     const { error } = envValidationSchema.validate({
       NODE_ENV: "production",
       SOROBAN_SIGNING_KEY: "",
+      ONCHAIN_DRY_RUN: true,
     });
     expect(error).toBeDefined();
   });
@@ -50,6 +54,9 @@ describe("envValidationSchema — SOROBAN_SIGNING_KEY", () => {
     const { error, value } = envValidationSchema.validate({
       NODE_ENV: "production",
       SOROBAN_SIGNING_KEY: VALID_KEY,
+      // ONCHAIN_DRY_RUN is required in production (issue #260) — include it here
+      // so this test stays focused on SOROBAN_SIGNING_KEY validation only.
+      ONCHAIN_DRY_RUN: true,
     });
     expect(error).toBeUndefined();
     expect(value.SOROBAN_SIGNING_KEY).toBe(VALID_KEY);
@@ -99,5 +106,61 @@ describe("envValidationSchema — runtime config flags", () => {
 
     expect(error).toBeDefined();
     expect(error?.message).toContain("SOROBAN_FEE_PERCENTILE");
+  });
+});
+
+describe("envValidationSchema — ONCHAIN_DRY_RUN (#260)", () => {
+  it("defaults to true outside production when unset", () => {
+    const { error, value } = envValidationSchema.validate(BASE_ENV);
+    expect(error).toBeUndefined();
+    expect(value.ONCHAIN_DRY_RUN).toBe(true);
+  });
+
+  it("accepts true outside production", () => {
+    const { error, value } = envValidationSchema.validate({
+      ...BASE_ENV,
+      ONCHAIN_DRY_RUN: true,
+    });
+    expect(error).toBeUndefined();
+    expect(value.ONCHAIN_DRY_RUN).toBe(true);
+  });
+
+  it("accepts false outside production (explicit opt-out)", () => {
+    const { error, value } = envValidationSchema.validate({
+      ...BASE_ENV,
+      ONCHAIN_DRY_RUN: false,
+    });
+    expect(error).toBeUndefined();
+    expect(value.ONCHAIN_DRY_RUN).toBe(false);
+  });
+
+  it("is required in production — missing value fails validation", () => {
+    const { error } = envValidationSchema.validate({
+      NODE_ENV: "production",
+      SOROBAN_SIGNING_KEY: VALID_KEY,
+      // ONCHAIN_DRY_RUN deliberately omitted
+    });
+    expect(error).toBeDefined();
+    expect(error?.message).toContain("ONCHAIN_DRY_RUN");
+  });
+
+  it("accepts true in production (keep simulate-only after cutover)", () => {
+    const { error, value } = envValidationSchema.validate({
+      NODE_ENV: "production",
+      SOROBAN_SIGNING_KEY: VALID_KEY,
+      ONCHAIN_DRY_RUN: true,
+    });
+    expect(error).toBeUndefined();
+    expect(value.ONCHAIN_DRY_RUN).toBe(true);
+  });
+
+  it("accepts false in production (live on-chain writes enabled)", () => {
+    const { error, value } = envValidationSchema.validate({
+      NODE_ENV: "production",
+      SOROBAN_SIGNING_KEY: VALID_KEY,
+      ONCHAIN_DRY_RUN: false,
+    });
+    expect(error).toBeUndefined();
+    expect(value.ONCHAIN_DRY_RUN).toBe(false);
   });
 });

@@ -4,6 +4,7 @@ import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { logger } from "../common/logger";
+import { MetricsService } from "../metrics/metrics.service";
 
 const SWEEP_INTERVAL_MS = 30_000;
 
@@ -24,6 +25,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     private readonly intentsGateway: IntentsGateway,
     private readonly solversService: SolversService,
     private readonly solverRegistryService: SolverRegistryService,
+    private readonly metricsService: MetricsService,
   ) {}
 
   onModuleInit() {
@@ -59,11 +61,15 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
           { deadline: intent.deadline, sweepedAt: now },
         );
         expiredCount++;
-        this.intentsGateway.broadcast({ type: "intent_expired", intentId: intent.intentId });
+        await this.intentsGateway.broadcast({ type: "intent_expired", intentId: intent.intentId });
       }
     }
 
     const durationMs = Date.now() - startMs;
+
+    // Record sweep metrics into the Prometheus-backed MetricsService (issue #259).
+    // This replaces the retired MetricsRegistry from src/common/metrics.ts.
+    this.metricsService.recordSweep(expiredCount, durationMs);
 
     this.logger.debug(`sweep complete: expired=${expiredCount} duration=${durationMs}ms`);
 
@@ -127,7 +133,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       slashReason: reason,
     });
     if (!slashed) return;
-    this.intentsGateway.broadcast({ type: "intent_slashed", intentId, solver, reason });
+    await this.intentsGateway.broadcast({ type: "intent_slashed", intentId, solver, reason });
 
     if (!solver) {
       // Shouldn't happen in practice — an "accepted" intent always has a
@@ -136,7 +142,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    await this.solversService.recordFailedFill(solver);
+    await this.solversService.recordFailedFill(solver, intentId);
     const slashRecord = await this.solversService.recordSlash(solver, intentId, reason, now);
 
     const result = await this.solverRegistryService.slashSolver({

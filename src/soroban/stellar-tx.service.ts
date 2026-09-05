@@ -31,18 +31,25 @@ export interface InvokeContractParams {
 export interface InvokeContractResult {
   hash: string;
   status: string;
+  /**
+   * True when the invocation was simulated only (dry-run mode).
+   * The hash field contains a placeholder — no transaction was broadcast.
+   */
+  dryRun: boolean;
 }
 
 @Injectable()
 export class StellarTxService {
   private readonly logger = new Logger(StellarTxService.name);
   private readonly feePercentile: FeePercentile;
+  private readonly dryRun: boolean;
 
   constructor(
     private readonly sorobanService: SorobanService,
     configService: ConfigService<AppConfig, true>,
   ) {
     this.feePercentile = configService.get("stellar.feePercentile", { infer: true });
+    this.dryRun = configService.get("onchainDryRun", { infer: true });
   }
 
   /**
@@ -108,11 +115,34 @@ export class StellarTxService {
 
   /**
    * Invokes a Soroban contract method.
+   *
+   * When ONCHAIN_DRY_RUN is true (the default outside production), the
+   * call is simulated and logged but never submitted — no funds move and no
+   * ledger state changes. The returned result carries dryRun: true so callers
+   * can distinguish simulate-only from live submissions.
+   *
+   * When ONCHAIN_DRY_RUN is false, the call builds, signs, and submits the
+   * actual Soroban transaction. This path requires SOROBAN_SIGNING_KEY and
+   * the relevant contract IDs to be configured (see env.validation.ts).
+   *
    * Used by IntentsService when ONCHAIN_INTENTS_ENABLED is true.
-   * This is a stub that will be expanded once the on-chain settlement
+   * Full submit implementation is pending once the on-chain settlement
    * contract interface is finalised (see docs/architecture/onchain-settlement.md).
    */
   async invokeContract(params: InvokeContractParams): Promise<InvokeContractResult> {
+    if (this.dryRun) {
+      this.logger.log(
+        `[dry-run] invokeContract contractId=${params.contractId} method=${params.method} ` +
+        `— simulating only, ONCHAIN_DRY_RUN=true (no transaction submitted)`,
+      );
+      // Dry-run: return a placeholder result without touching the network.
+      return {
+        hash: "dry-run-no-hash",
+        status: "DRY_RUN",
+        dryRun: true,
+      };
+    }
+
     this.logger.log(
       `invokeContract contractId=${params.contractId} method=${params.method}`,
     );

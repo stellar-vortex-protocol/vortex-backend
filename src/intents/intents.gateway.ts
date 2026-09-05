@@ -5,16 +5,34 @@ import { IntentsService } from "./intents.service";
 import { SolversService } from "../solvers/solvers.service";
 import { logger } from "../common/logger";
 import { SUPPORTED_CHAINS, SupportedChain } from "./intents.types";
+import { verifyStellarSignature, buildWsAuthMessage } from "../common/stellar-signature";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
-/** How many sequenced events to keep in the replay buffer. */
+/**
+ * How many sequenced events to keep in the replay buffer.
+ *
+ * At typical broadcast volume (a few dozen events/minute in production),
+ * 500 events covers many minutes of missed events — more than enough to
+ * bridge a transient network blip or container restart without forcing a
+ * full snapshot re-fetch. Increasing this beyond ~1 000 starts to add
+ * non-trivial heap pressure for large event payloads; the current bound
+ * is a deliberate memory vs. reconnect-gap tradeoff.
+ */
 const REPLAY_BUFFER_SIZE = 500;
 
 export interface SequencedEvent {
   seq: number;
   type: string;
   [key: string]: unknown;
+}
+
+/**
+ * Per-subscriber chain filter. `chains: null` means "no filter set" — the
+ * client receives the full unfiltered feed (backward-compatible default).
+ */
+interface SubscriberFilter {
+  chains: Set<SupportedChain> | null;
 }
 
 /**
@@ -70,12 +88,15 @@ export class EventRingBuffer {
  * REST API. The WS gateway never accepts writes, so there is no privileged
  * action to protect here.
  */
-type SubscriberFilter = Set<SupportedChain> | null;
-
 @WebSocketGateway({ path: "/ws" })
 export class IntentsGateway
   implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
+  /**
+   * Map from WebSocket client to its per-connection subscription filter.
+   * A filter with `chains: null` means the client receives all events
+   * (the default when no `subscribe` message has been sent).
+   */
   private readonly subscribers = new Map<WebSocket, SubscriberFilter>();
   private readonly alive = new WeakMap<WebSocket, boolean>();
   private readonly authenticatedSolver = new WeakMap<WebSocket, string>();
@@ -86,6 +107,9 @@ export class IntentsGateway
     publish: (event: Record<string, unknown>) => void;
     subscribe: (handler: (event: Record<string, unknown>) => void) => void;
   } = null;
+
+  /** Ring buffer storing the last REPLAY_BUFFER_SIZE broadcast events. */
+  private readonly ringBuffer = new EventRingBuffer(REPLAY_BUFFER_SIZE);
 
   constructor(
     private readonly intentsService: IntentsService,
@@ -160,43 +184,20 @@ export class IntentsGateway
     return typeof value === "string" && (SUPPORTED_CHAINS as readonly string[]).includes(value);
   }
 
-  private static resolveFilter(chains: unknown): SubscriberFilter {
-    if (!Array.isArray(chains) || chains.length === 0) {
-      return null;
-    }
+  private dispatchRemoteEvent(event: Record<string, unknown>) {
+    const type = typeof event.type === "string" ? event.type : "";
+    if (!type || type === "connected" || type === "snapshot" || type === "subscribed") return;
 
-    const normalized = new Set<SupportedChain>();
-    for (const chain of chains) {
-      if (IntentsGateway.isSupportedChain(chain)) {
-        normalized.add(chain);
-      }
-    }
-
-    return normalized.size > 0 ? normalized : null;
+    const payload = JSON.stringify(event);
+    const chain = this.getEventChainSync(event as { type: string; [key: string]: unknown });
+    this.deliverToMatchingSubscribers(payload, chain);
   }
 
-  private handleMessage(client: WebSocket, raw: unknown) {
-    try {
-      const text = typeof raw === "string" ? raw : raw instanceof Buffer ? raw.toString() : String(raw);
-      const message = JSON.parse(text) as { type?: string; chains?: unknown };
-      if (message.type !== "subscribe") return;
-
-      const filter = IntentsGateway.resolveFilter(message.chains);
-      this.subscribers.set(client, filter);
-
-      client.send(
-        JSON.stringify({
-          type: "subscribed",
-          filter: { chains: filter ? [...filter] : [...SUPPORTED_CHAINS] },
-          seq: this.nextSeq - 1,
-        }),
-      );
-    } catch {
-      // Ignore malformed WS frames; the client can reconnect or retry.
-    }
-  }
-
-  private getEventChain(event: { type: string; [key: string]: unknown }): SupportedChain | null {
+  /**
+   * Synchronous chain resolution for simple cases (used by dispatchRemoteEvent).
+   * Reads srcChain directly from the event or its inlined intent object.
+   */
+  private getEventChainSync(event: { type: string; [key: string]: unknown }): SupportedChain | null {
     const intent = (event as { intent?: { srcChain?: unknown } }).intent;
     if (intent && typeof intent.srcChain === "string" && IntentsGateway.isSupportedChain(intent.srcChain)) {
       return intent.srcChain;
@@ -211,34 +212,38 @@ export class IntentsGateway
   }
 
   private deliverToMatchingSubscribers(payload: string, chain: SupportedChain | null) {
-    for (const [client, filter] of this.subscribers.entries()) {
+    for (const [client, filter] of this.subscribers) {
       if (client.readyState !== WebSocket.OPEN) continue;
-      if (chain !== null && filter && !filter.has(chain)) continue;
-      client.send(payload);
+
+      // No filter set → full unfiltered feed (backward-compatible default).
+      if (filter.chains === null) {
+        client.send(payload);
+        continue;
+      }
+
+      // Chain couldn't be resolved → deliver to everyone (safe default).
+      if (chain === null) {
+        client.send(payload);
+        continue;
+      }
+
+      // Only send if the event's chain is in this subscriber's filter.
+      if (filter.chains.has(chain)) {
+        client.send(payload);
+      }
     }
   }
 
-  private dispatchRemoteEvent(event: Record<string, unknown>) {
-    const type = typeof event.type === "string" ? event.type : "";
-    if (!type || type === "connected" || type === "snapshot" || type === "subscribed") return;
-
-    const payload = JSON.stringify(event);
-    const chain = this.getEventChain(event as { type: string; [key: string]: unknown });
-    this.deliverToMatchingSubscribers(payload, chain);
-  }
-
   handleConnection(client: WebSocket) {
-    this.subscribers.set(client, null);
+    this.subscribers.set(client, { chains: null });
     this.alive.set(client, true);
-
-    client.on("message", (raw) => this.handleMessage(client, raw));
-
-    client.on("pong", () => {
-      this.alive.set(client, true);
-    });
 
     client.on("message", (raw) => {
       void this.handleMessage(client, raw);
+    });
+
+    client.on("pong", () => {
+      this.alive.set(client, true);
     });
 
     client.on("error", () => {
@@ -277,27 +282,142 @@ export class IntentsGateway
     logger.info(`ws client disconnected (subscribers=${this.subscribers.size})`);
   }
 
-  private async handleMessage(client: WebSocket, raw: unknown) {
+  /**
+   * Handle a single incoming WebSocket message from a client.
+   *
+   * Supported message types:
+   * - `{ type: "subscribe", chains: string[] }` — set a per-connection chain
+   *   filter and respond with `{ type: "subscribed", filter: { chains } }`.
+   * - `{ type: "replay", fromSeq: number }` — replay buffered events since
+   *   `fromSeq`, wrapped in replay_start / replay_end frames.
+   * - `{ type: "auth", solver, timestamp, signature }` — authenticate as a
+   *   registered solver.
+   *
+   * Unknown types and malformed messages are silently ignored; they never
+   * crash the connection.
+   */
+  private async handleMessage(client: WebSocket, raw: import("ws").RawData): Promise<void> {
+    let parsed: unknown;
     try {
-      const serialized = Buffer.isBuffer(raw)
-        ? raw.toString("utf8")
-        : typeof raw === "string"
-          ? raw
-          : String(raw);
-      const payload = JSON.parse(serialized);
-      if (!payload || typeof payload !== "object") return;
-
-      switch (payload.type) {
-        case "auth": {
-          await this.handleAuth(client, payload);
-          return;
-        }
-        default:
-          return;
-      }
+      parsed = JSON.parse(raw.toString());
     } catch {
-      client.send(JSON.stringify({ type: "auth_error", reason: "Invalid WS message" }));
+      // Malformed JSON — ignore silently.
+      return;
     }
+
+    if (typeof parsed !== "object" || parsed === null) return;
+
+    const msg = parsed as Record<string, unknown>;
+
+    switch (msg.type) {
+      case "subscribe":
+        this.handleSubscribe(client, msg);
+        break;
+      case "replay":
+        this.handleReplay(client, msg);
+        break;
+      case "auth":
+        await this.handleAuth(client, msg);
+        break;
+      default:
+        // Unknown message type — ignore, do not crash the connection.
+        break;
+    }
+  }
+
+  /**
+   * Process a `{ type: "subscribe", chains: string[] }` message.
+   *
+   * Validates each chain value against `SUPPORTED_CHAINS` and stores only
+   * the valid subset. A subscribe message with no valid chains is treated as
+   * "subscribe to nothing" (the client will receive only chainless events).
+   * An entirely missing or non-array `chains` field is rejected silently
+   * without updating the existing filter.
+   */
+  private handleSubscribe(client: WebSocket, msg: Record<string, unknown>): void {
+    if (!Array.isArray(msg.chains)) {
+      logger.debug("ws subscribe ignored: chains field missing or not an array");
+      return;
+    }
+
+    const validChains = (msg.chains as unknown[]).filter(
+      (c): c is SupportedChain =>
+        typeof c === "string" && (SUPPORTED_CHAINS as readonly string[]).includes(c),
+    );
+
+    this.subscribers.set(client, { chains: new Set(validChains) });
+
+    logger.debug(`ws client subscribed to chains: ${validChains.join(", ") || "(none)"}`);
+
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(
+        JSON.stringify({
+          type: "subscribed",
+          filter: { chains: validChains },
+        }),
+      );
+    }
+  }
+
+  /**
+   * Process a `{ type: "replay", fromSeq: number }` message.
+   *
+   * If `fromSeq` falls within the buffer (i.e. `fromSeq >= oldestSeq - 1`),
+   * the missed events are streamed back wrapped in `replay_start` /
+   * `replay_end` frames. Otherwise, `replay_too_old` is returned so the
+   * client knows it must fall back to a fresh snapshot via REST.
+   */
+  private handleReplay(client: WebSocket, msg: Record<string, unknown>): void {
+    const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : null;
+    if (fromSeq === null || !Number.isInteger(fromSeq) || fromSeq < 0) {
+      logger.debug("ws replay ignored: fromSeq missing or invalid");
+      return;
+    }
+
+    if (client.readyState !== WebSocket.OPEN) return;
+
+    const oldest = this.ringBuffer.oldestSeq();
+
+    // oldest === -1 means the buffer is empty — nothing to replay.
+    // The check `fromSeq < oldest - 1` catches the case where the requested
+    // seq has already been evicted from the ring buffer.
+    if (oldest !== -1 && fromSeq < oldest - 1) {
+      client.send(
+        JSON.stringify({
+          type: "replay_too_old",
+          fromSeq,
+          oldestAvailableSeq: oldest,
+        }),
+      );
+      logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
+      return;
+    }
+
+    const events = this.ringBuffer.since(fromSeq);
+
+    client.send(
+      JSON.stringify({
+        type: "replay_start",
+        fromSeq,
+        count: events.length,
+      }),
+    );
+
+    for (const event of events) {
+      if (client.readyState !== WebSocket.OPEN) break;
+      client.send(JSON.stringify(event));
+    }
+
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(
+        JSON.stringify({
+          type: "replay_end",
+          count: events.length,
+        }),
+      );
+    }
+
+    logger.debug(`ws replay complete: fromSeq=${fromSeq} count=${events.length}`);
   }
 
   private async handleAuth(client: WebSocket, payload: Record<string, unknown>) {
@@ -332,39 +452,86 @@ export class IntentsGateway
     }
   }
 
-  broadcast(event: { type: string; [key: string]: unknown }) {
-    const seqEvent = { ...event, seq: this.nextSeq };
-    this.nextSeq += 1;
-    logger.debug(`ws broadcast type=${event.type} subscribers=${this.subscribers.size}`);
-    const payload = JSON.stringify(seqEvent);
-    const chain = this.getEventChain(seqEvent);
+  /**
+   * Resolve the source chain for an event payload.
+   *
+   * - `intent_created`: the intent object is inlined in the event, so
+   *   `srcChain` can be read directly without a service lookup.
+   * - State-transition events (`intent_accepted`, `intent_filled`,
+   *   `intent_cancelled`, `intent_expired`, `intent_slashed`): only the
+   *   `intentId` is available, so the intent must be looked up to get its
+   *   `srcChain`. This is async and returns `null` on any lookup failure.
+   * - Everything else: returns `null` (event is delivered to all subscribers).
+   */
+  private async getEventChain(
+    event: { type: string; [key: string]: unknown },
+  ): Promise<SupportedChain | null> {
+    if (event.type === "intent_created") {
+      const intent = event.intent as { srcChain?: string } | undefined;
+      const chain = intent?.srcChain;
+      if (chain && (SUPPORTED_CHAINS as readonly string[]).includes(chain)) {
+        return chain as SupportedChain;
+      }
+      return null;
+    }
+
+    const lookupTypes = new Set([
+      "intent_accepted",
+      "intent_filled",
+      "intent_cancelled",
+      "intent_expired",
+      "intent_slashed",
+    ]);
+
+    if (lookupTypes.has(event.type)) {
+      const intentId = typeof event.intentId === "string" ? event.intentId : null;
+      if (!intentId) return null;
+
+      try {
+        const intent = await this.intentsService.get(intentId);
+        if (intent && (SUPPORTED_CHAINS as readonly string[]).includes(intent.srcChain)) {
+          return intent.srcChain as SupportedChain;
+        }
+      } catch {
+        // Lookup failure is non-fatal — deliver to all subscribers.
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Assign a monotonically increasing sequence number, push the event into
+   * the ring buffer, then deliver it to every subscriber whose chain filter
+   * matches.
+   *
+   * Filter semantics:
+   * - A subscriber with `chains === null` (never sent a subscribe message)
+   *   receives all events — backward-compatible with read-only consumers.
+   * - A subscriber with a non-null chain set receives the event only if the
+   *   event's chain is in their set, or if the chain could not be resolved
+   *   (null) — unchained events are always delivered to everyone.
+   */
+  async broadcast(event: { type: string; [key: string]: unknown }): Promise<void> {
+    const seq = this.nextSeq++;
+    const sequencedEvent: SequencedEvent = { ...event, seq };
+
+    // Push into replay buffer before sending so a racing replay request
+    // issued immediately after this broadcast still finds the event.
+    this.ringBuffer.push(sequencedEvent);
+
+    logger.debug(`ws broadcast type=${event.type} seq=${seq} subscribers=${this.subscribers.size}`);
 
     if (this.backplane) {
-      this.backplane.publish(seqEvent as Record<string, unknown>);
+      this.backplane.publish(sequencedEvent as Record<string, unknown>);
     }
 
-    if (chain) {
-      this.deliverToMatchingSubscribers(payload, chain);
-      return;
-    }
+    // Resolve the chain once — shared across all subscriber checks.
+    const eventChain = await this.getEventChain(event);
 
-    if (typeof event.intentId === "string") {
-      void this.intentsService
-        .get(event.intentId)
-        .then((intent) => {
-          if (!intent) {
-            this.deliverToMatchingSubscribers(payload, null);
-            return;
-          }
-          this.deliverToMatchingSubscribers(payload, intent.srcChain);
-        })
-        .catch(() => {
-          this.deliverToMatchingSubscribers(payload, null);
-        });
-      return;
-    }
-
-    this.deliverToMatchingSubscribers(payload, null);
+    const payload = JSON.stringify(sequencedEvent);
+    this.deliverToMatchingSubscribers(payload, eventChain);
   }
 
   getAliveCount(): number {
@@ -385,7 +552,7 @@ export class IntentsGateway
   }
 
   private heartbeat() {
-    for (const [client] of this.subscribers.entries()) {
+    for (const [client] of this.subscribers) {
       if (this.alive.get(client) === false) {
         client.terminate();
         this.subscribers.delete(client);
@@ -404,7 +571,7 @@ export class IntentsGateway
 
   onModuleDestroy() {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    for (const client of this.subscribers.keys()) {
+    for (const [client] of this.subscribers) {
       client.close(1001, "Server shutting down");
     }
     this.subscribers.clear();

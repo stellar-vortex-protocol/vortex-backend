@@ -34,7 +34,7 @@ function redactSensitiveFields(info: Record<string, unknown>): Record<string, un
   return redacted;
 }
 
-const redactFormat = format((info) => redactSensitiveFields(info) as ReturnType<typeof format>)();
+const redactFormat = format((info) => redactSensitiveFields(info) as unknown as boolean)();
 
 /**
  * Log-shipping transport, gated behind LOG_SHIPPING_ENABLED so local dev/CI
