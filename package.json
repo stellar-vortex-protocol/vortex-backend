@@ -51,7 +51,7 @@
     "uuid": "^10.0.0",
     "winston": "^3.13.0",
     "ws": "^8.18.0",
-    "zod": "^3.23.8"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.8.1",
