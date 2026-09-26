@@ -7,7 +7,7 @@ import { logger } from "./logger";
 function makeContext(method = "GET", originalUrl = "/api/v1/intents", statusCode = 200) {
   return {
     switchToHttp: () => ({
-      getRequest: () => ({ method, originalUrl }),
+      getRequest: () => ({ method, originalUrl, headers: {} }),
       getResponse: () => ({ statusCode }),
     }),
   } as any;
@@ -79,7 +79,8 @@ describe("LoggingInterceptor", () => {
     interceptor.intercept(ctx, handler).subscribe({
       complete: () => {
         const msg: string = logSpy.mock.calls[0][0];
-        expect(msg).toMatch(/^GET \/health 200 \d+ms$/);
+        // Format is now: [<requestId>] <METHOD> <URL> <STATUS> <N>ms
+        expect(msg).toMatch(/^\[.+\] GET \/health 200 \d+ms$/);
         done();
       },
     });
@@ -131,7 +132,7 @@ describe("LoggingInterceptor", () => {
     const response = { statusCode: 200 };
     const ctx = {
       switchToHttp: () => ({
-        getRequest: () => ({ method: "PATCH", originalUrl: "/api/v1/intents/x" }),
+        getRequest: () => ({ method: "PATCH", originalUrl: "/api/v1/intents/x", headers: {} }),
         getResponse: () => response,
       }),
     } as any;

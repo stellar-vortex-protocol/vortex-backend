@@ -1,6 +1,7 @@
 import { IsIn, IsInt, IsNotEmpty, IsString, MinLength, Min, IsArray, ArrayMaxSize, MaxLength } from "class-validator";
 import { ApiProperty } from "@nestjs/swagger";
 import { SupportedChain } from "../../intents/intents.types";
+import { IsValidAddress } from "../../common/validators/is-valid-address.validator";
 
 const SUPPORTED_CHAINS: SupportedChain[] = [
   "stellar",
@@ -14,9 +15,7 @@ const SUPPORTED_CHAINS: SupportedChain[] = [
 
 export class RegisterSolverDto {
   @ApiProperty({ description: "Solver's Stellar address", maxLength: 56 })
-  @IsString()
-  @MinLength(10)
-  @MaxLength(56)
+  @IsValidAddress({ chain: "stellar", message: "address must be a valid Stellar address (56-char G…)" })
   address!: string;
 
   @ApiProperty({ description: "Solver's display name", maxLength: 64 })

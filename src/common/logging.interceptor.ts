@@ -33,20 +33,24 @@ export class LoggingInterceptor implements NestInterceptor {
     const response = context.switchToHttp().getResponse<LoggableResponse>();
     const start = Date.now();
 
+    // Validate and bound X-Request-Id before trusting it (#296).
+    // Accept only safe alphanumeric/hyphen/underscore IDs up to 64 chars;
+    // fall back to a generated UUID for anything that doesn't conform.
+    const rawRequestId = Array.isArray(request.headers["x-request-id"])
+      ? request.headers["x-request-id"][0]
+      : request.headers["x-request-id"];
+    const REQUEST_ID_RE = /^[A-Za-z0-9\-_]{1,64}$/;
     request.requestId =
-      (Array.isArray(request.headers["x-request-id"])
-        ? request.headers["x-request-id"][0]
-        : request.headers["x-request-id"]) ?? uuidv4();
+      rawRequestId !== undefined && REQUEST_ID_RE.test(rawRequestId) ? rawRequestId : uuidv4();
 
     return next.handle().pipe(
       tap(() => {
         const duration = Date.now() - start;
-        logger.info(
-          `[${request.requestId}] ${request.method} ${request.originalUrl} ${response.statusCode} ${duration}ms`,
-        );
-        // Sanitize the URL before logging to prevent log-injection via crafted paths.
+        // Sanitize both the request ID and URL before logging to prevent
+        // log-injection via crafted headers or paths (#293, #296).
+        const safeId = sanitizeForLog(request.requestId ?? "");
         const safeUrl = sanitizeForLog(request.originalUrl);
-        logger.info(`${request.method} ${safeUrl} ${response.statusCode} ${duration}ms`);
+        logger.info(`[${safeId}] ${request.method} ${safeUrl} ${response.statusCode} ${duration}ms`);
       }),
     );
   }

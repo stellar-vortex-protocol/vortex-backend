@@ -110,7 +110,7 @@ describe("SorobanController", () => {
   // -------------------------------------------------------------------------
 
   describe("getAccount", () => {
-    const PUBLIC_KEY = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+    const PUBLIC_KEY = "GBNKNVCZ5N7VZVXMYOM3USZ566T2BAG5FYWQIBFRFWCZ23OEB23GPSPY";
 
     it("passes the publicKey path param through to sorobanService.getAccount", async () => {
       const mockAccount = { id: PUBLIC_KEY, sequence: "98765" };
@@ -124,7 +124,7 @@ describe("SorobanController", () => {
     });
 
     it("passes a different publicKey correctly", async () => {
-      const anotherKey = "GBVVJJLE2VF7VKUQM7FXKCOQMHJZYJFXBSRH3DPHQHVJQCLJTPB65CG";
+      const anotherKey = "GCOZKCP5ZBUETBFJD7J6EYNETB5AJ65HEVAKCHDJ4BYXHFN4UQ6XABX7";
       mockSorobanService.getAccount.mockResolvedValueOnce({ id: anotherKey });
 
       await controller.getAccount(anotherKey);
