@@ -1,19 +1,17 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { scValToNative, SorobanRpc } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
-import { logger } from "../common/logger";
+import { PrismaService } from "../prisma/prisma.service";
+import { MetricsService } from "../metrics/metrics.service";
 import { SorobanService } from "./soroban.service";
 import { SolversService } from "../solvers/solvers.service";
+import { logger as rootLogger } from "../common/logger";
 
 const POLL_INTERVAL_MS = 10_000;
 const RECONCILE_INTERVAL_MS = 60_000;
 const STALE_INTENT_THRESHOLD_SECONDS = 300;
-
-// Bound the in-memory dedupe set so long-lived processes don't leak memory.
-// Once we've tracked this many keys we drop the oldest (lowest-ledger) ones,
-// which is safe because we never re-poll ledgers that far behind the cursor.
-const MAX_TRACKED_KEYS = 10_000;
+const MAX_DEAD_LETTER_ATTEMPTS = 3;
 
 export interface DedupeKeyParts {
   ledgerSequence: number;
@@ -35,11 +33,10 @@ export function buildDedupeKey({ ledgerSequence, eventIndex }: DedupeKeyParts): 
 
 @Injectable()
 export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(EventIngestionService.name);
   private interval?: NodeJS.Timeout;
   private reconcileInterval?: NodeJS.Timeout;
-  private readonly seenKeys = new Set<string>();
   private readonly lastIntentUpdateById = new Map<string, number>();
-  private nextStartLedger?: number;
   processedCount = 0;
   duplicateCount = 0;
 
@@ -47,35 +44,62 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     private readonly sorobanService: SorobanService,
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly solversService: SolversService,
+    private readonly prisma: PrismaService,
+    private readonly metrics: MetricsService,
   ) {}
 
-  onModuleInit() {
+  async onModuleInit(): Promise<void> {
+    // Run the first poll immediately on startup (don't wait for the interval)
+    this.poll().catch((err) =>
+      this.logger.error(
+        `[event-ingestion] initial poll failed: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    );
+
     this.interval = setInterval(() => {
-      this.poll().catch((err) => logger.error(`[event-ingestion] poll failed: ${err instanceof Error ? err.message : String(err)}`));
+      this.poll().catch((err) =>
+        this.logger.error(
+          `[event-ingestion] poll failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
     }, POLL_INTERVAL_MS);
 
     this.reconcileInterval = setInterval(() => {
       this.reconcileStaleIntents().catch((err) => {
-        logger.error(
+        this.logger.error(
           `[event-ingestion] stale-intent reconciliation failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
     }, RECONCILE_INTERVAL_MS);
   }
 
-  onModuleDestroy() {
+  onModuleDestroy(): void {
     if (this.interval) clearInterval(this.interval);
     if (this.reconcileInterval) clearInterval(this.reconcileInterval);
   }
 
   async poll(): Promise<void> {
-    const settlementContractId = this.configService.get("stellar.settlementContractId", { infer: true });
+    const network = this.configService.get("stellar.network", { infer: true });
+    const settlementContractId = this.configService.get(
+      "stellar.settlementContractId",
+      { infer: true },
+    );
     if (!settlementContractId) return;
 
-    let startLedger = this.nextStartLedger;
-    if (startLedger === undefined) {
+    // Load the persisted cursor, fall back to latest ledger on first run
+    const cursor = await this.prisma.ingestionCursor.findFirst({
+      where: { network, contractId: settlementContractId },
+    });
+
+    let startLedger: number;
+    if (cursor) {
+      startLedger = cursor.lastLedger + 1;
+    } else {
       const latest = await this.sorobanService.getLatestLedger();
       startLedger = latest.sequence;
+      this.logger.log(
+        `[event-ingestion] no cursor found; starting from latest ledger ${startLedger}`,
+      );
     }
 
     const response = await this.sorobanService.getEvents({
@@ -83,38 +107,144 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
       filters: [{ type: "contract", contractIds: [settlementContractId] }],
     });
 
+    // Track cursor-lag metric
+    const lastEventLedger =
+      response.events.length > 0
+        ? response.events[response.events.length - 1].ledger
+        : startLedger;
+    const lag = Math.max(0, response.latestLedger - lastEventLedger);
+    this.metrics.ingestionCursorLag.set(lag);
+
     for (const event of response.events) {
-      this.ingest(event);
+      await this.ingestWithPersistence(event, network, settlementContractId);
     }
 
-    this.nextStartLedger = response.latestLedger + 1;
+    // Advance the cursor to the latest polled ledger
+    await this.prisma.ingestionCursor.upsert({
+      where: { ingestion_cursor_uniq: { network, contractId: settlementContractId } },
+      create: {
+        network,
+        contractId: settlementContractId,
+        lastLedger: response.latestLedger,
+        lastEventIdx: 0,
+      },
+      update: { lastLedger: response.latestLedger },
+    });
   }
 
-  // Skips events already seen at this ledger+index, which protects against
-  // redelivery after a restart (cursor rewinds) or overlapping poll windows.
+  /**
+   * Ingests a single event with full DB persistence:
+   * - Checks processed_events for deduplication
+   * - Applies the event and records processed_events in one DB transaction
+   * - Dead-letters after MAX_DEAD_LETTER_ATTEMPTS failures
+   */
+  async ingestWithPersistence(
+    event: SorobanRpc.Api.EventResponse,
+    network: string,
+    contractId: string,
+  ): Promise<boolean> {
+    const ledger = event.ledger;
+    const eventIndex = parseEventIndex(event.id);
+
+    // Quick dedup check before entering the transaction
+    const existing = await this.prisma.processedEvent.findFirst({
+      where: { ledger, eventIndex, contractId, network },
+    });
+    if (existing) {
+      this.duplicateCount++;
+      return false;
+    }
+
+    let attempts = 0;
+    while (attempts < MAX_DEAD_LETTER_ATTEMPTS) {
+      attempts++;
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          // Double-check inside the transaction (concurrent-replica guard)
+          const alreadyDone = await tx.processedEvent.findFirst({
+            where: { ledger, eventIndex, contractId, network },
+          });
+          if (alreadyDone) return;
+
+          // Apply the event (synchronous processing)
+          this.processEvent(event);
+
+          // Record dedup entry atomically with the event application
+          await tx.processedEvent.create({
+            data: { ledger, eventIndex, contractId, network },
+          });
+        });
+
+        this.processedCount++;
+        return true;
+      } catch (err) {
+        this.logger.warn(
+          `[event-ingestion] event ${ledger}:${eventIndex} apply attempt ${attempts} failed: ${(err as Error).message}`,
+        );
+        if (attempts >= MAX_DEAD_LETTER_ATTEMPTS) {
+          await this.deadLetter(
+            event,
+            network,
+            contractId,
+            attempts,
+            (err as Error).message,
+          );
+          return false;
+        }
+        // Brief pause before retry
+        await new Promise((resolve) => setTimeout(resolve, 200 * attempts));
+      }
+    }
+
+    return false;
+  }
+
+  private readonly seenKeys = new Set<string>();
+
+  /**
+   * Legacy synchronous ingest path — kept for backward compatibility with
+   * existing unit tests that don't inject PrismaService. Uses the in-memory
+   * seenKeys set for deduplication (bounded, loses state on restart).
+   */
   ingest(event: SorobanRpc.Api.EventResponse): boolean {
     const dedupeKey = buildDedupeKey({
       ledgerSequence: event.ledger,
       eventIndex: parseEventIndex(event.id),
     });
-
     if (this.seenKeys.has(dedupeKey)) {
       this.duplicateCount++;
       return false;
     }
-
-    this.markSeen(dedupeKey);
+    this.seenKeys.add(dedupeKey);
     this.processEvent(event);
     this.processedCount++;
     return true;
   }
 
-  private markSeen(dedupeKey: string) {
-    this.seenKeys.add(dedupeKey);
-    if (this.seenKeys.size > MAX_TRACKED_KEYS) {
-      const oldest = this.seenKeys.values().next().value;
-      if (oldest !== undefined) this.seenKeys.delete(oldest);
-    }
+  private async deadLetter(
+    event: SorobanRpc.Api.EventResponse,
+    network: string,
+    contractId: string,
+    attempts: number,
+    lastError: string,
+  ): Promise<void> {
+    const ledger = event.ledger;
+    const eventIndex = parseEventIndex(event.id);
+    await this.prisma.deadLetterEvent.create({
+      data: {
+        ledger,
+        eventIndex,
+        contractId,
+        network,
+        eventPayload: event as unknown as Parameters<typeof this.prisma.deadLetterEvent.create>[0]["data"]["eventPayload"],
+        lastError,
+        attempts,
+      },
+    });
+    this.metrics.ingestionDeadLetterTotal.inc();
+    this.logger.error(
+      `[event-ingestion] event ${ledger}:${eventIndex} dead-lettered after ${attempts} attempts: ${lastError}`,
+    );
   }
 
   private processEvent(event: SorobanRpc.Api.EventResponse): void {
@@ -134,7 +264,7 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
       // ingestion — a reconciliation failure is logged but never stalls the
       // poll loop.
       this.handleSolverSlashed(event, topic).catch((err) =>
-        console.error(
+        this.logger.error(
           `[event-ingestion] solver_slashed reconciliation failed at ledger=${event.ledger}: ${(err as Error).message}`,
         ),
       );
@@ -146,8 +276,11 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private handleIntentFilled(event: SorobanRpc.Api.EventResponse, topic: unknown[]): void {
-    logger.info(
+  private handleIntentFilled(
+    event: SorobanRpc.Api.EventResponse,
+    topic: unknown[],
+  ): void {
+    this.logger.log(
       `[event-ingestion] intent_filled event at ledger=${event.ledger} txHash=${event.txHash} topic=${JSON.stringify(topic)}`,
     );
   }
@@ -157,11 +290,14 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     for (const [intentId, lastUpdated] of this.lastIntentUpdateById.entries()) {
       if (now - lastUpdated <= STALE_INTENT_THRESHOLD_SECONDS) continue;
 
-      logger.warn(
+      this.logger.warn(
         `[event-ingestion] stale intent state detected for intent=${intentId} lastUpdatedSecondsAgo=${now - lastUpdated}; polling chain for reconciliation`,
       );
 
-      const settlementContractId = this.configService.get("stellar.settlementContractId", { infer: true });
+      const settlementContractId = this.configService.get(
+        "stellar.settlementContractId",
+        { infer: true },
+      );
       if (!settlementContractId) continue;
 
       const latestLedger = await this.sorobanService.getLatestLedger();
@@ -182,13 +318,6 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
    *   topic[1] — solver address (string)
    *   topic[2] — intentId (string)
    *   topic[3] — slash amount (string or bigint)
-   *
-   * Calls SolversService.confirmPenalty() which reconciles bondAmount and
-   * marks the penalty as "confirmed" in the in-memory pendingPenalties map.
-   *
-   * If topic values cannot be extracted (malformed event), a warning is logged
-   * and the event is silently skipped — this protects against a bad contract
-   * event bringing down the ingestion loop.
    */
   private async handleSolverSlashed(
     event: SorobanRpc.Api.EventResponse,
@@ -205,14 +334,14 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
           : undefined;
 
     if (!solverAddress || !intentId || !slashAmount) {
-      console.warn(
+      rootLogger.warn(
         `[event-ingestion] solver_slashed event at ledger=${event.ledger} has unexpected topic shape; skipping reconciliation`,
         { solverAddress, intentId, slashAmount, rawTopic: topic },
       );
       return;
     }
 
-    console.log(
+    rootLogger.info(
       `[event-ingestion] solver_slashed confirmed: solver=${solverAddress} intentId=${intentId} slashAmount=${slashAmount} ledger=${event.ledger}`,
     );
 

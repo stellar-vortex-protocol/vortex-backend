@@ -60,6 +60,19 @@ export const envValidationSchema = Joi.object({
     )
     .default("p50"),
 
+  // ── Fee-bump ceiling (#388) ────────────────────────────────────────────────
+  // Maximum fee in stroops for fee-bump escalation. Default is 1_000_000
+  // stroops (0.1 XLM). Raise for busy mainnet periods.
+  SOROBAN_MAX_FEE_STROOPS: Joi.number().integer().min(100).default(1000000),
+
+  // ── Channel account pool (#387) ───────────────────────────────────────────
+  // Number of channel accounts to manage in the pool.
+  CHANNEL_POOL_SIZE: Joi.number().integer().min(1).max(100).default(8),
+  // Comma-separated Stellar secret keys for channel accounts.
+  // Generate with: tsx scripts/create-channels.ts
+  // NEVER commit real keys. Leave blank in dev — pool is simply disabled.
+  CHANNEL_SECRET_KEYS: Joi.string().allow("").default(""),
+
   WS_BACKPLANE: Joi.string().valid("memory", "redis").default("memory"),
   REDIS_URL: Joi.string().uri({ scheme: ["redis", "rediss"] }).default("redis://localhost:6379"),
 

@@ -8,6 +8,8 @@ import {
 } from "./event-ingestion.service";
 import { SorobanService } from "./soroban.service";
 import { SolversService } from "../solvers/solvers.service";
+import { PrismaService } from "../prisma/prisma.service";
+import { MetricsService } from "../metrics/metrics.service";
 
 function fakeSolversService(): SolversService {
   return {
@@ -69,7 +71,21 @@ describe("EventIngestionService", () => {
 
     beforeEach(() => {
       sorobanService = {} as SorobanService;
-      service = new EventIngestionService(sorobanService, makeConfigService(), fakeSolversService());
+      const prisma = {
+        ingestionCursor: { findFirst: jest.fn(), upsert: jest.fn() },
+        processedEvent: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn() },
+        deadLetterEvent: { create: jest.fn() },
+        $transaction: jest.fn().mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
+          fn({
+            processedEvent: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn() },
+          }),
+        ),
+      } as unknown as PrismaService;
+      const metrics = {
+        ingestionDeadLetterTotal: { inc: jest.fn() },
+        ingestionCursorLag: { set: jest.fn() },
+      } as unknown as MetricsService;
+      service = new EventIngestionService(sorobanService, makeConfigService(), fakeSolversService(), prisma, metrics);
     });
 
     it("processes a new event exactly once", () => {

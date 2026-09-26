@@ -130,6 +130,100 @@ model IntentAuditLog {
   @@map("intent_audit_log")
 }
 
+// ─── PendingTransaction (#386) ────────────────────────────────────────────────
+// Tracks Soroban transactions that have been submitted but not yet confirmed.
+// Claimed by a single poller replica via SELECT ... FOR UPDATE SKIP LOCKED.
+
+enum PendingTxStatus {
+  pending
+  confirmed
+  failed
+  expired
+}
+
+model PendingTransaction {
+  id            BigInt          @id @default(autoincrement()) @map("id")
+  /// The Stellar transaction hash.
+  txHash        String          @unique @map("tx_hash")
+  /// XDR-encoded signed transaction envelope (base64), kept for fee-bump resubmission.
+  txXdr         String          @map("tx_xdr")
+  /// Associated intent identifier (nullable — not every tx is tied to one intent).
+  intentId      String?         @map("intent_id")
+  /// Channel account public key used for submission (nullable for main-key txs).
+  channelKey    String?         @map("channel_key")
+  status        PendingTxStatus @default(pending) @map("status")
+  /// Unix epoch seconds after which tracking is abandoned and the tx is marked expired.
+  maxTrackUntil Int             @map("max_track_until")
+  /// Number of poll attempts so far.
+  attempts      Int             @default(0) @map("attempts")
+  /// Unix epoch seconds of the next scheduled poll.
+  nextPollAt    Int             @default(0) @map("next_poll_at")
+  /// Fee in stroops of the most recent submission.
+  lastFeeStroops String?        @map("last_fee_stroops")
+  /// Number of fee-bump escalations applied so far.
+  feeBumpCount  Int             @default(0) @map("fee_bump_count")
+  createdAt     DateTime        @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime        @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([status, nextPollAt], name: "pending_tx_poll_idx")
+  @@index([intentId], name: "pending_tx_intent_idx")
+  @@map("pending_transactions")
+}
+
+// ─── IngestionCursor (#389) ───────────────────────────────────────────────────
+// Persists the last fully-processed Soroban ledger per (network, contract_id).
+
+model IngestionCursor {
+  id           BigInt   @id @default(autoincrement()) @map("id")
+  network      String   @map("network")
+  contractId   String   @map("contract_id")
+  /// Last ledger sequence whose events have been fully applied.
+  lastLedger   Int      @map("last_ledger")
+  /// Index of the last applied event within lastLedger (for sub-ledger resume).
+  lastEventIdx Int      @default(0) @map("last_event_idx")
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@unique([network, contractId], name: "ingestion_cursor_uniq")
+  @@map("ingestion_cursor")
+}
+
+// ─── ProcessedEvent (#389) ────────────────────────────────────────────────────
+// Deduplication table replacing the in-memory seenKeys set.
+
+model ProcessedEvent {
+  id          BigInt   @id @default(autoincrement()) @map("id")
+  ledger      Int      @map("ledger")
+  eventIndex  Int      @map("event_index")
+  contractId  String   @map("contract_id")
+  network     String   @map("network")
+  processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz
+
+  @@unique([ledger, eventIndex, contractId, network], name: "processed_event_uniq")
+  @@index([ledger, eventIndex], name: "processed_event_lookup_idx")
+  @@map("processed_events")
+}
+
+// ─── DeadLetterEvent (#389) ───────────────────────────────────────────────────
+// Events that failed processing N times and were moved here for manual inspection.
+
+model DeadLetterEvent {
+  id           BigInt   @id @default(autoincrement()) @map("id")
+  ledger       Int      @map("ledger")
+  eventIndex   Int      @map("event_index")
+  contractId   String   @map("contract_id")
+  network      String   @map("network")
+  /// Raw event payload stored as JSON for later replay.
+  eventPayload Json     @map("event_payload")
+  /// Error message from the last failed attempt.
+  lastError    String   @map("last_error")
+  /// Number of processing attempts before dead-lettering.
+  attempts     Int      @map("attempts")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([ledger, eventIndex], name: "dead_letter_event_idx")
+  @@map("dead_letter_events")
+}
+
 // ─── Token ───────────────────────────────────────────────────────────────────
 // Static registry of tokens the protocol supports.
 // Kept separate so it can be updated without migrations when the token list changes.

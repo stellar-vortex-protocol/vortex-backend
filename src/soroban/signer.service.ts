@@ -56,6 +56,14 @@ export class SignerService {
     return this.secretKey.length > 0;
   }
 
+  /**
+   * Returns the raw secret key for use in fee-bump construction.
+   * Only call this when constructing keypairs for signing; never log the value.
+   */
+  getSecretKey(): string {
+    return this.secretKey;
+  }
+
   getNetworkPassphrase(): string {
     return this.networkPassphrase;
   }

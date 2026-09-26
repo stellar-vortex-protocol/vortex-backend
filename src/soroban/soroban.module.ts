@@ -5,10 +5,13 @@ import { SorobanService } from "./soroban.service";
 import { SolverRegistryService } from "./solver-registry.service";
 import { SignerService } from "./signer.service";
 import { StellarTxService } from "./stellar-tx.service";
+import { TxConfirmationService } from "./tx-confirmation.service";
+import { FeeEscalationPolicy } from "./fee-escalation-policy";
+import { ChannelPoolService } from "./channel-pool.service";
 import { SolversModule } from "../solvers/solvers.module";
 
 @Module({
-  imports: [forwardRef(() => IntentsModule)],
+  imports: [SolversModule],
   controllers: [SorobanController],
   providers: [
     SorobanService,
@@ -16,6 +19,9 @@ import { SolversModule } from "../solvers/solvers.module";
     SignerService,
     StellarTxService,
     EventIngestionService,
+    TxConfirmationService,
+    FeeEscalationPolicy,
+    ChannelPoolService,
   ],
   exports: [
     SorobanService,
@@ -23,6 +29,9 @@ import { SolversModule } from "../solvers/solvers.module";
     SignerService,
     StellarTxService,
     EventIngestionService,
+    TxConfirmationService,
+    FeeEscalationPolicy,
+    ChannelPoolService,
   ],
 })
 export class SorobanModule {}

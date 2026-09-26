@@ -91,6 +91,12 @@ export interface AppConfig {
     signingKey: string;
     /** Fee percentile to use when estimating Soroban inclusion fees. */
     feePercentile: FeePercentile;
+    /** Maximum fee in stroops for fee-bump escalation (#388). */
+    maxFeeStroops: number;
+    /** Number of channel accounts in the pool (#387). */
+    channelPoolSize: number;
+    /** Comma-separated list of channel account secret keys (#387). */
+    channelSecretKeys: string;
   };
   onchainIntentsEnabled: boolean;
   intentRetentionDays: number;
@@ -129,6 +135,9 @@ export default (): AppConfig => ({
     signerSecretKey: process.env.STELLAR_SIGNER_SECRET_KEY ?? "",
     signingKey: process.env.SOROBAN_SIGNING_KEY ?? "",
     feePercentile: (process.env.SOROBAN_FEE_PERCENTILE ?? "p50") as FeePercentile,
+    maxFeeStroops: parseInt(process.env.SOROBAN_MAX_FEE_STROOPS ?? "1000000", 10),
+    channelPoolSize: parseInt(process.env.CHANNEL_POOL_SIZE ?? "8", 10),
+    channelSecretKeys: process.env.CHANNEL_SECRET_KEYS ?? "",
   },
   onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
   intentRetentionDays: parseInt(process.env.INTENT_RETENTION_DAYS ?? "30", 10),

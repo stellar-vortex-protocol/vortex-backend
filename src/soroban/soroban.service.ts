@@ -51,4 +51,8 @@ export class SorobanService {
   submitTransaction(transaction: Transaction): Promise<SorobanRpc.Api.SendTransactionResponse> {
     return this.server.sendTransaction(transaction);
   }
+
+  getTransaction(hash: string): Promise<SorobanRpc.Api.GetTransactionResponse> {
+    return this.server.getTransaction(hash);
+  }
 }

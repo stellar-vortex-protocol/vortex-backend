@@ -14,6 +14,9 @@ function makeConfigService(
     signerSecretKey: "",
     signingKey: "",
     feePercentile: "p50",
+    maxFeeStroops: 1000000,
+    channelPoolSize: 8,
+    channelSecretKeys: "",
     ...overrides,
   };
   const config: AppConfig = {

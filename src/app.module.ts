@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
 import { ThrottlerModule, ThrottlerGuard } from "@nestjs/throttler";
+import { EventEmitterModule } from "@nestjs/event-emitter";
 import { ConfigModule } from "./config/config.module";
 import { HealthModule } from "./health/health.module";
 import { TokensModule } from "./tokens/tokens.module";
@@ -10,6 +11,7 @@ import { StatsModule } from "./stats/stats.module";
 import { SorobanModule } from "./soroban/soroban.module";
 import { RoutingModule } from "./routing/routing.module";
 import { PrismaModule } from "./prisma/prisma.module";
+import { MetricsModule } from "./metrics/metrics.module";
 
 @Module({
   imports: [
@@ -21,8 +23,11 @@ import { PrismaModule } from "./prisma/prisma.module";
         limit: 100,
       },
     ]),
+    // Global event bus for domain events (TxConfirmed, TxFailed, TxExpired, etc.)
+    EventEmitterModule.forRoot({ wildcard: false, delimiter: ".", global: true }),
     ConfigModule,
     PrismaModule,
+    MetricsModule,
     HealthModule,
     TokensModule,
     IntentsModule,

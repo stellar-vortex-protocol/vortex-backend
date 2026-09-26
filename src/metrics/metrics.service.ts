@@ -22,6 +22,23 @@ export class MetricsService implements OnModuleInit {
   public readonly sweeperExpiredTotal: client.Counter<string>;
   public readonly sweeperSweepDurationMs: client.Histogram<string>;
 
+  // ── TxConfirmationService metrics (#386) ──────────────────────────────────
+  public readonly txConfirmationLatency: client.Histogram<string>;
+  public readonly txConfirmationOutcomes: client.Counter<string>;
+
+  // ── FeeEscalationPolicy metrics (#388) ────────────────────────────────────
+  public readonly txFeeBumpTotal: client.Counter<string>;
+  public readonly txFeeBumpCeilingHits: client.Counter<string>;
+
+  // ── ChannelPoolService metrics (#387) ─────────────────────────────────────
+  public readonly channelPoolUtilisation: client.Gauge<string>;
+  public readonly channelLeaseWaitTime: client.Histogram<string>;
+  public readonly channelBadSeqResyncs: client.Counter<string>;
+
+  // ── EventIngestionService metrics (#389) ──────────────────────────────────
+  public readonly ingestionDeadLetterTotal: client.Counter<string>;
+  public readonly ingestionCursorLag: client.Gauge<string>;
+
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.register = new client.Registry();
     const prefix = "vortex_";
@@ -77,6 +94,68 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}sweeper_sweep_duration_ms`,
       help: "Duration of each IntentsSweeperService.sweep() execution in milliseconds",
       buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+      registers: [this.register],
+    });
+
+    // ── TxConfirmationService metrics (#386) ──────────────────────────────────
+    this.txConfirmationLatency = new client.Histogram({
+      name: `${prefix}tx_confirmation_latency_seconds`,
+      help: "Time from tx submission to final confirmation/failure/expiry",
+      buckets: [1, 5, 10, 30, 60, 120, 300, 600],
+      registers: [this.register],
+    });
+
+    this.txConfirmationOutcomes = new client.Counter({
+      name: `${prefix}tx_confirmation_outcomes_total`,
+      help: "Count of transaction confirmation outcomes by status",
+      labelNames: ["status"],
+      registers: [this.register],
+    });
+
+    // ── FeeEscalationPolicy metrics (#388) ────────────────────────────────────
+    this.txFeeBumpTotal = new client.Counter({
+      name: `${prefix}tx_fee_bump_total`,
+      help: "Total fee-bump escalations applied, by percentile tier",
+      labelNames: ["percentile"],
+      registers: [this.register],
+    });
+
+    this.txFeeBumpCeilingHits = new client.Counter({
+      name: `${prefix}tx_fee_bump_ceiling_hits_total`,
+      help: "Times fee-bump was refused because the ceiling would be exceeded",
+      registers: [this.register],
+    });
+
+    // ── ChannelPoolService metrics (#387) ─────────────────────────────────────
+    this.channelPoolUtilisation = new client.Gauge({
+      name: `${prefix}channel_pool_utilisation`,
+      help: "Fraction of channel accounts currently leased (0–1)",
+      registers: [this.register],
+    });
+
+    this.channelLeaseWaitTime = new client.Histogram({
+      name: `${prefix}channel_lease_wait_seconds`,
+      help: "Time waiting for a free channel account",
+      buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+      registers: [this.register],
+    });
+
+    this.channelBadSeqResyncs = new client.Counter({
+      name: `${prefix}channel_bad_seq_resyncs_total`,
+      help: "Number of sequence number re-syncs triggered by tx_bad_seq or lease timeout",
+      registers: [this.register],
+    });
+
+    // ── EventIngestionService metrics (#389) ──────────────────────────────────
+    this.ingestionDeadLetterTotal = new client.Counter({
+      name: `${prefix}ingestion_dead_letter_total`,
+      help: "Events moved to dead-letter table after repeated failures",
+      registers: [this.register],
+    });
+
+    this.ingestionCursorLag = new client.Gauge({
+      name: `${prefix}ingestion_cursor_lag_ledgers`,
+      help: "Gap between latest on-chain ledger and last processed ledger",
       registers: [this.register],
     });
   }
