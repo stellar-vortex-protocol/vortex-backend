@@ -69,27 +69,38 @@ describe("EventIngestionService", () => {
 
     beforeEach(() => {
       sorobanService = {} as SorobanService;
-      service = new EventIngestionService(sorobanService, makeConfigService(), fakeSolversService());
+      const prisma = {
+        processedEvent: {
+          findUnique: jest.fn().mockResolvedValue(null),
+          create: jest.fn().mockResolvedValue({}),
+        },
+        deadLetterEvent: { create: jest.fn().mockResolvedValue({}) },
+      } as unknown as import("../prisma/prisma.service").PrismaService;
+      const reconcilerService = {
+        markIntentUpdated: jest.fn(),
+        reconcile: jest.fn().mockResolvedValue({}),
+      } as unknown as import("./reconciler.service").ReconcilerService;
+      service = new EventIngestionService(sorobanService, makeConfigService(), fakeSolversService(), prisma, reconcilerService);
     });
 
-    it("processes a new event exactly once", () => {
+    it("processes a new event exactly once", async () => {
       const event = makeIntentFilledEvent();
 
-      const result = service.ingest(event);
+      const result = await service.ingest(event);
 
       expect(result).toBe(true);
       expect(service.processedCount).toBe(1);
       expect(service.duplicateCount).toBe(0);
     });
 
-    it("dedupes a replayed event delivered twice (same ledger + event index)", () => {
+    it("dedupes a replayed event delivered twice (same ledger + event index)", async () => {
       // Simulates the same on-chain event being redelivered, e.g. because a
       // poll window overlapped the previous one after a restart.
       const first = makeIntentFilledEvent({ ledger: 1000 });
       const replay = makeIntentFilledEvent({ ledger: 1000 });
 
-      const firstResult = service.ingest(first);
-      const replayResult = service.ingest(replay);
+      const firstResult = await service.ingest(first);
+      const replayResult = await service.ingest(replay);
 
       expect(firstResult).toBe(true);
       expect(replayResult).toBe(false);
@@ -97,16 +108,16 @@ describe("EventIngestionService", () => {
       expect(service.duplicateCount).toBe(1);
     });
 
-    it("does not dedupe two distinct events for the same intent (different ledgers)", () => {
+    it("does not dedupe two distinct events for the same intent (different ledgers)", async () => {
       const eventA = makeIntentFilledEvent({ ledger: 1000, intentId: "intent-abc" });
       const eventB = makeIntentFilledEvent({ ledger: 1001, intentId: "intent-abc" });
 
-      expect(service.ingest(eventA)).toBe(true);
-      expect(service.ingest(eventB)).toBe(true);
+      expect(await service.ingest(eventA)).toBe(true);
+      expect(await service.ingest(eventB)).toBe(true);
       expect(service.processedCount).toBe(2);
     });
 
-    it("treats events with the same intent id but different event indices as distinct", () => {
+    it("treats events with the same intent id but different event indices as distinct", async () => {
       const eventA = makeIntentFilledEvent({
         ledger: 1000,
         id: "0000001000-0000000001",
@@ -116,8 +127,8 @@ describe("EventIngestionService", () => {
         id: "0000001000-0000000002",
       });
 
-      expect(service.ingest(eventA)).toBe(true);
-      expect(service.ingest(eventB)).toBe(true);
+      expect(await service.ingest(eventA)).toBe(true);
+      expect(await service.ingest(eventB)).toBe(true);
       expect(service.processedCount).toBe(2);
     });
   });

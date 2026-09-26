@@ -17,20 +17,35 @@ export class SorobanController {
 
   @Get("health")
   @ApiOkResponse({
-    description: "Soroban RPC node health status (pass-through of the RPC `getHealth` result).",
+    description:
+      "Per-endpoint health status for the Soroban RPC pool. In single-endpoint mode a " +
+      "synthetic entry is returned. Includes circuit-breaker state, error rate, p95 latency, " +
+      "and ledger lag vs. the median peer ledger.",
     schema: {
       type: "object",
       properties: {
-        status: { type: "string", example: "healthy" },
-        latestLedger: { type: "number" },
-        oldestLedger: { type: "number" },
-        ledgerRetentionWindow: { type: "number" },
+        endpoints: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              url: { type: "string" },
+              state: { type: "string", enum: ["closed", "open", "half-open"] },
+              score: { type: "number" },
+              errorRate: { type: "number" },
+              p95LatencyMs: { type: "number" },
+              ledgerLag: { type: "number" },
+              lastSuccessAt: { type: "string", nullable: true },
+              lastErrorAt: { type: "string", nullable: true },
+              consecutiveErrors: { type: "number" },
+            },
+          },
+        },
       },
-      required: ["status"],
     },
   })
-  getHealth() {
-    return this.sorobanService.getHealth();
+  getChainHealth() {
+    return { endpoints: this.sorobanService.getEndpointHealthReport() };
   }
 
   @Get("ledger")

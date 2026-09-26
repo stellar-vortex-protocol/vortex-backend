@@ -81,6 +81,12 @@ export interface AppConfig {
   stellar: {
     network: "testnet" | "futurenet" | "mainnet";
     sorobanRpcUrl: string;
+    /**
+     * Comma-separated list of Soroban RPC URLs with optional weights (e.g. "url1,url2@2").
+     * When set, replaces SOROBAN_RPC_URL for the multi-endpoint pool (#393).
+     * Falls back to SOROBAN_RPC_URL for single-endpoint compatibility.
+     */
+    sorobanRpcUrls: string;
     settlementContractId: string;
     solverRegistryContractId: string;
     signerSecretKey: string;
@@ -91,10 +97,20 @@ export interface AppConfig {
     signingKey: string;
     /** Fee percentile to use when estimating Soroban inclusion fees. */
     feePercentile: FeePercentile;
+    /**
+     * Archival RPC URL for deep-history event backfill (#391).
+     * When unset, backfill falls back to the primary SOROBAN_RPC_URL.
+     */
+    archivalRpcUrl: string;
   };
   onchainIntentsEnabled: boolean;
   intentRetentionDays: number;
   intentRetentionSweepMs: number;
+  /**
+   * Seconds a non-terminal intent must be stale before the reconciler checks
+   * it against the chain. Defaults to 300 (5 min). (#392)
+   */
+  reconcileStaleSeconds: number;
   /**
    * Dry-run flag for on-chain write paths (issue #260).
    *
@@ -124,15 +140,18 @@ export default (): AppConfig => ({
   stellar: {
     network: (process.env.STELLAR_NETWORK ?? "testnet") as AppConfig["stellar"]["network"],
     sorobanRpcUrl: process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org",
+    sorobanRpcUrls: process.env.SOROBAN_RPC_URLS ?? "",
     settlementContractId: process.env.SETTLEMENT_CONTRACT_ID ?? "",
     solverRegistryContractId: process.env.SOLVER_REGISTRY_CONTRACT_ID ?? "",
     signerSecretKey: process.env.STELLAR_SIGNER_SECRET_KEY ?? "",
     signingKey: process.env.SOROBAN_SIGNING_KEY ?? "",
     feePercentile: (process.env.SOROBAN_FEE_PERCENTILE ?? "p50") as FeePercentile,
+    archivalRpcUrl: process.env.ARCHIVAL_RPC_URL ?? "",
   },
   onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
   intentRetentionDays: parseInt(process.env.INTENT_RETENTION_DAYS ?? "30", 10),
   intentRetentionSweepMs: parseInt(process.env.INTENT_RETENTION_SWEEP_MS ?? "60000", 10),
+  reconcileStaleSeconds: parseInt(process.env.RECONCILE_STALE_SECONDS ?? "300", 10),
   // Default to dry-run (true) outside production; in production the value must
   // be explicitly set (validated by envValidationSchema).
   onchainDryRun: process.env.ONCHAIN_DRY_RUN !== undefined

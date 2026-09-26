@@ -9,6 +9,8 @@ function makeConfigService(
   const stellar: AppConfig["stellar"] = {
     network: "testnet",
     sorobanRpcUrl: "https://soroban-testnet.stellar.org",
+    sorobanRpcUrls: "",
+    archivalRpcUrl: "",
     settlementContractId: "",
     solverRegistryContractId: "",
     signerSecretKey: "",
@@ -24,6 +26,7 @@ function makeConfigService(
     onchainIntentsEnabled: false,
     intentRetentionDays: 30,
     intentRetentionSweepMs: 60000,
+    reconcileStaleSeconds: 300,
     // Default to dry-run true for tests (safe default)
     onchainDryRun: appOverrides.onchainDryRun ?? true,
     corsOrigin: "*",

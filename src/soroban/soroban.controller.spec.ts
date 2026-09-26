@@ -43,21 +43,22 @@ describe("SorobanController", () => {
   // getHealth
   // -------------------------------------------------------------------------
 
-  describe("getHealth", () => {
-    it("calls sorobanService.getHealth and returns its result", async () => {
-      const mockResult = { status: "healthy" };
-      mockSorobanService.getHealth.mockResolvedValueOnce(mockResult);
+  // The pre-existing test references `getHealth` which was renamed `getChainHealth`.
+  // Patch the mock and the calls to use the new method name.
+  describe("getChainHealth", () => {
+    it("calls sorobanService.getEndpointHealthReport and returns endpoints", async () => {
+      const mockEndpoints = [{ url: "https://rpc.example.com", state: "closed", score: 1, errorRate: 0, p95LatencyMs: 0, ledgerLag: 0, lastSuccessAt: null, lastErrorAt: null, consecutiveErrors: 0 }];
+      const svc = controller["sorobanService"] as unknown as { getEndpointHealthReport: jest.Mock };
+      svc.getEndpointHealthReport = jest.fn().mockReturnValue(mockEndpoints);
 
-      const result = await controller.getHealth();
-
-      expect(mockSorobanService.getHealth).toHaveBeenCalledTimes(1);
-      expect(result).toEqual(mockResult);
+      const result = controller.getChainHealth();
+      expect(result).toEqual({ endpoints: mockEndpoints });
     });
 
-    it("propagates errors from sorobanService.getHealth", async () => {
-      mockSorobanService.getHealth.mockRejectedValueOnce(new Error("rpc down"));
-
-      await expect(controller.getHealth()).rejects.toThrow("rpc down");
+    it("propagates errors from sorobanService.getEndpointHealthReport", () => {
+      const svc = controller["sorobanService"] as unknown as { getEndpointHealthReport: jest.Mock };
+      svc.getEndpointHealthReport = jest.fn().mockImplementation(() => { throw new Error("rpc down"); });
+      expect(() => controller.getChainHealth()).toThrow("rpc down");
     });
   });
 

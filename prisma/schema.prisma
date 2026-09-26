@@ -130,6 +130,50 @@ model IntentAuditLog {
   @@map("intent_audit_log")
 }
 
+// ─── ProcessedEvent ──────────────────────────────────────────────────────────
+// Idempotency table for the versioned event decoder pipeline (issue #390 / #391).
+// One row per successfully-processed Soroban event.
+// The unique index on (ledger, eventIndex) enforces at-most-once delivery
+// across both the live ingestion cursor and the backfill runner.
+
+model ProcessedEvent {
+  id          BigInt   @id @default(autoincrement()) @map("id")
+  /// RPC event id string "<ledger>-<index>".
+  eventId     String   @map("event_id")
+  ledger      Int      @map("ledger")
+  eventIndex  Int      @map("event_index")
+  contractId  String   @map("contract_id")
+  /// Decoded topic[0] value (e.g. "intent_filled").
+  topic       String   @map("topic")
+  txHash      String   @map("tx_hash")
+  processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz
+
+  @@unique([ledger, eventIndex], name: "processed_events_ledger_idx_key")
+  @@index([ledger], name: "processed_events_ledger_idx")
+  @@index([contractId], name: "processed_events_contract_idx")
+  @@map("processed_events")
+}
+
+// ─── DeadLetterEvent ─────────────────────────────────────────────────────────
+// Known-topic events that failed Zod schema validation (issue #390).
+// Written here instead of being silently dropped so operators can replay
+// them after a contract upgrade or schema fix.
+
+model DeadLetterEvent {
+  id         BigInt   @id @default(autoincrement()) @map("id")
+  eventId    String   @map("event_id")
+  ledger     Int      @map("ledger")
+  txHash     String   @map("tx_hash")
+  rawTopic   String   @map("raw_topic")
+  error      String   @map("error")
+  /// JSON-encoded base64 XDR topic array for replay.
+  rawXdr     String   @map("raw_xdr")
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz
+
+  @@index([ledger], name: "dead_letter_events_ledger_idx")
+  @@map("dead_letter_events")
+}
+
 // ─── Token ───────────────────────────────────────────────────────────────────
 // Static registry of tokens the protocol supports.
 // Kept separate so it can be updated without migrations when the token list changes.

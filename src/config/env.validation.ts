@@ -17,6 +17,13 @@ export const envValidationSchema = Joi.object({
 
   STELLAR_NETWORK: Joi.string().valid("testnet", "futurenet", "mainnet").default("testnet"),
   SOROBAN_RPC_URL: Joi.string().uri().default("https://soroban-testnet.stellar.org"),
+  // Comma-separated list of RPC URLs with optional weights for the multi-endpoint
+  // pool (#393). When set, takes precedence over SOROBAN_RPC_URL.
+  // Format: "https://url1,https://url2@2" (the @2 suffix sets weight=2).
+  SOROBAN_RPC_URLS: Joi.string().allow("").default(""),
+  // Archival RPC URL for deep-history event backfill (#391).
+  // When unset, backfill falls back to the primary SOROBAN_RPC_URL.
+  ARCHIVAL_RPC_URL: Joi.string().uri().allow("").default(""),
   SETTLEMENT_CONTRACT_ID: Joi.string().allow("").default(""),
   SOLVER_REGISTRY_CONTRACT_ID: Joi.string().allow("").default(""),
   STELLAR_SIGNER_SECRET_KEY: Joi.string().allow("").default(""),
@@ -39,6 +46,11 @@ export const envValidationSchema = Joi.object({
     }),
 
   ONCHAIN_INTENTS_ENABLED: Joi.boolean().default(false),
+
+  // ── Reconciler (#392) ──────────────────────────────────────────────────────
+  // Seconds a non-terminal intent must go without an ingestion update before
+  // the reconciler checks its state against the settlement contract.
+  RECONCILE_STALE_SECONDS: Joi.number().integer().min(30).default(300),
   CORS_ORIGIN: Joi.string().default("*"),
   WS_MAX_CONNECTIONS: Joi.number().integer().min(0).default(1000),
   SOROBAN_FEE_PERCENTILE: Joi.string()
