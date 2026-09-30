@@ -253,6 +253,32 @@ export interface AppConfig {
     storageKind: "local" | "memory";
     localDir: string;
   };
+  /**
+   * Anti-griefing controls for accept-without-fill behaviour (issue #453).
+   *
+   * Read by AntiGriefingService, the policy engine evaluated in the accept
+   * critical section. Every field is a threshold or duration — the behaviour
+   * they drive (rolling unfilled ratio → cooldown → concurrency cap →
+   * suspension) is documented on that service.
+   */
+  antiGriefing: {
+    /** Master switch. When false accepts are never refused by these controls. */
+    enabled: boolean;
+    /** Rolling window over which the unfilled-accept ratio is computed (s). */
+    windowSeconds: number;
+    /** Resolved accepts required before any tier may be applied. */
+    minSamples: number;
+    /** Ratio at/above which the solver escalates one tier, in `[0, 1]`. */
+    thresholdRatio: number;
+    /** Ratio at/below which the solver steps back down one tier, in `[0, 1]`. */
+    recoveryRatio: number;
+    /** How long each cooldown blocks accepts for (s). */
+    cooldownSeconds: number;
+    /** Concurrent accepted intents allowed once tier 2 is reached. */
+    concurrencyCap: number;
+    /** Suspension length (s); `0` means until an operator clears it. */
+    suspensionSeconds: number;
+  };
 }
 
 export default (): AppConfig => ({
@@ -351,6 +377,20 @@ export default (): AppConfig => ({
     storageKind: (process.env.DATASETS_STORAGE ?? "local") as "local" | "memory",
     localDir: process.env.DATASETS_LOCAL_DIR ?? ".datasets",
   },
+
+  // ── Anti-griefing controls (issue #453) ───────────────────────────────────
+  antiGriefing: {
+    enabled: (process.env.ANTIGRIEFING_ENABLED ?? "true") === "true",
+    windowSeconds: clampPositiveInt(process.env.ANTIGRIEFING_WINDOW_SECONDS, 86400),
+    minSamples: clampPositiveInt(process.env.ANTIGRIEFING_MIN_SAMPLES, 10),
+    thresholdRatio: clampRatio(process.env.ANTIGRIEFING_RATIO_THRESHOLD, 0.5),
+    recoveryRatio: clampRatio(process.env.ANTIGRIEFING_RECOVERY_RATIO, 0.2),
+    cooldownSeconds: clampPositiveInt(process.env.ANTIGRIEFING_COOLDOWN_SECONDS, 300),
+    concurrencyCap: clampPositiveInt(process.env.ANTIGRIEFING_CONCURRENCY_CAP, 2),
+    // 0 is meaningful (suspend until an operator clears it), hence a
+    // non-negative parser rather than clampPositiveInt.
+    suspensionSeconds: clampNonNegativeInt(process.env.ANTIGRIEFING_SUSPENSION_SECONDS, 3600),
+  },
 });
 
 /** Parse `SHADOW_SAMPLE_RATE` into a probability, defaulting to full sampling. */
@@ -372,5 +412,30 @@ function clampPositiveInt(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim() === "") return fallback;
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return parsed;
+}
+
+/**
+ * Like {@link clampPositiveInt} but admits `0`, which is a meaningful value
+ * for "no limit" / "until manually cleared" style settings.
+ */
+function clampNonNegativeInt(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+/**
+ * Parse a ratio env var into `[0, 1]`, defaulting to `fallback` for anything
+ * unparseable. Used by the anti-griefing thresholds (issue #453) so a typo
+ * can neither disable the controls nor trip them on every solver.
+ */
+function clampRatio(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed < 0) return 0;
+  if (parsed > 1) return 1;
   return parsed;
 }

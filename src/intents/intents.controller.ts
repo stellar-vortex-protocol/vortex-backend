@@ -28,6 +28,7 @@ import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
+import { AntiGriefingService } from "../solvers/anti-griefing.service";
 import { TokensService } from "../tokens/tokens.service";
 import { RoutingService } from "../routing/routing.service";
 import { MAX_OPEN_INTENTS_PER_USER } from "./intents.service";
@@ -76,6 +77,7 @@ export class IntentsController {
     private readonly tokensService: TokensService,
     private readonly routingService: RoutingService,
     private readonly killSwitch: KillSwitchService,
+    private readonly antiGriefing: AntiGriefingService,
     config: ConfigService<AppConfig, true>,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
@@ -334,7 +336,16 @@ export class IntentsController {
   @ApiNotFoundResponse({ description: "Intent not found" })
   @ApiConflictResponse({ description: "Intent is not in open state" })
   @ApiGoneResponse({ description: "Intent has expired" })
-  @ApiForbiddenResponse({ description: "Solver not registered or inactive" })
+  @ApiForbiddenResponse({
+    description:
+      "Solver not registered, inactive, unbounded, guardian-suspended, or " +
+      "refused with code ANTIGRIEFING_SUSPENDED (issue #453)",
+  })
+  @ApiTooManyRequestsResponse({
+    description:
+      "Anti-griefing control in force (issue #453): 429 with code " +
+      "ANTIGRIEFING_COOLDOWN (+ Retry-After) or ANTIGRIEFING_CONCURRENCY_LIMIT",
+  })
   async accept(@Param("id") id: string, @Body() dto: AcceptIntentDto) {
     // Fast-path snapshot only — guards below are advisory. The atomic
     // decision is the conditional `acceptIfOpen` write (state=open AND
@@ -374,6 +385,17 @@ export class IntentsController {
     if (isCanaryIntent(intent, this.canary) !== this.canary.has(dto.solver)) {
       throw new ForbiddenException("Canary intents may only be accepted by canary solvers, and vice versa");
     }
+
+    // Issue #453 — anti-griefing controls are evaluated here, in the accept
+    // critical section and immediately before the atomic `acceptIfOpen` write.
+    // Placing it last means a refused solver cannot mutate intent state, and
+    // every other guard (404 → pause → expiry → auth → registration) has
+    // already run, so honest solvers get a precise reason for *their* failure
+    // rather than a griefing one.
+    await this.antiGriefing.assertCanAccept(dto.solver, {
+      intentId: id,
+      openAccepts: () => this.intentsService.getAcceptedCountBySolver(dto.solver),
+    });
 
     const updated = await this.intentsService.acceptIfOpen(id, dto.solver, now);
     if (!updated) {
@@ -459,6 +481,14 @@ export class IntentsController {
     }
 
     await this.solversService.recordSuccessfulFill(dto.solver);
+
+    // Issue #453 — this fill resolves one of the solver's rolling-window
+    // accepts, pulling its unfilled ratio back down.
+    this.antiGriefing.recordOutcome(dto.solver, {
+      intentId: id,
+      chain: intent.srcChain,
+      outcome: "filled",
+    });
 
     this.intentsService.appendAuditEntry(id, "filled", dto.solver, "solver filled", {
       fillAmount: dto.fillAmount,

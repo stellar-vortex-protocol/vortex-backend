@@ -26,6 +26,7 @@ import {
   verifyStellarSignature,
 } from "../common/stellar-signature";
 import { SolversService, LeaderboardWindow } from "./solvers.service";
+import { AntiGriefingService } from "./anti-griefing.service";
 import { ListIntentsDto } from "../intents/dto/list-intents.dto";
 import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
@@ -47,6 +48,7 @@ export class SolversController {
     private readonly solversService: SolversService,
     private readonly intentsService: IntentsService,
     private readonly intentIndex: IntentCapabilityIndex,
+    private readonly antiGriefing: AntiGriefingService,
     config: ConfigService<AppConfig, true>,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
@@ -135,8 +137,15 @@ export class SolversController {
         const total = fillsCompleted + fillsFailed;
         const successRate = total > 0 ? fillsCompleted / total : 0;
         const ageDays = Math.max(0, (now - solver.registeredAt) / 86400);
+        // Issue #453 — reputation impact: a solver under an anti-griefing
+        // control is discounted. The multiplier is 1 for every unpunished
+        // solver, so existing rankings are unchanged.
         const reputationScore = Number(
-          (successRate * Math.exp(-ageDays / 180)).toFixed(4),
+          (
+            successRate *
+            Math.exp(-ageDays / 180) *
+            this.antiGriefing.reputationPenalty(solver.address)
+          ).toFixed(4),
         );
 
         return {
@@ -174,6 +183,27 @@ export class SolversController {
       .filter((s) => !this.canary.has(s.address))
       .sort((a, b) => b.fillsCompleted - a.fillsCompleted);
     return { solvers, count: solvers.length };
+  }
+
+  /**
+   * Issue #453 — the anti-griefing controls currently in force for a solver.
+   *
+   * Public, like the rest of the solver record: it exposes only what a solver
+   * needs to know to behave (tier, ratio, when it may accept again), never the
+   * audit trail — that lives behind admin RBAC at
+   * `GET /admin/anti-griefing/audit`.
+   */
+  @Get(":address/anti-griefing")
+  @ApiOperation({
+    summary: "Anti-griefing status for one solver",
+    description:
+      "Reports the solver's rolling unfilled-accept ratio, the control in " +
+      "force (if any) and the reputation multiplier applied to its score.",
+  })
+  async getAntiGriefingStatus(@Param("address") address: string) {
+    const solver = await this.solversService.get(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+    return this.antiGriefing.getStatus(address);
   }
 
   @Get(":address/eligible-intents")
@@ -226,7 +256,14 @@ export class SolversController {
     const total = fillsCompleted + fillsFailed;
     const successRate = total > 0 ? fillsCompleted / total : 0;
     const ageDays = Math.max(0, (now - solver.registeredAt) / 86400);
-    const reputationScore = Number((successRate * Math.exp(-ageDays / 180)).toFixed(4));
+    // Issue #453 — same anti-griefing reputation discount as the leaderboard.
+    const reputationScore = Number(
+      (
+        successRate *
+        Math.exp(-ageDays / 180) *
+        this.antiGriefing.reputationPenalty(address)
+      ).toFixed(4),
+    );
 
     return {
       address: solver.address,

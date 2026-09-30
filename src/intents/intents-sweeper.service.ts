@@ -1,7 +1,8 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/common";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
+import { AntiGriefingService } from "../solvers/anti-griefing.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { logger } from "../common/logger";
 import { MetricsService } from "../metrics/metrics.service";
@@ -38,6 +39,12 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     private readonly metricsService: MetricsService,
     private readonly killSwitch: KillSwitchService,
     private readonly leaderElection: LeaderElectionService,
+    /**
+     * Issue #453 — optional so existing direct constructions of this service
+     * (tests, tooling) keep working; the running app always resolves it from
+     * SolversModule's export.
+     */
+    @Optional() private readonly antiGriefing?: AntiGriefingService,
   ) {}
 
   onModuleInit() {
@@ -136,7 +143,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
         continue;
       }
 
-      const slashed = await this.slashMissedFill(intent.intentId, intent.solver, now);
+      const slashed = await this.slashMissedFill(intent.intentId, intent.solver, now, intent.srcChain);
       if (slashed) slashedCount++;
     }
 
@@ -201,6 +208,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     intentId: string,
     solver: string | undefined,
     now: number,
+    chain: string,
   ): Promise<boolean> {
     const reason = "accepted intent not filled before deadline";
 
@@ -225,6 +233,18 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     }
 
     await this.solversService.recordFailedFill(solver, intentId);
+
+    // Issue #453 — an accepted-but-never-filled intent is exactly what the
+    // rolling unfilled-accept ratio counts. `at` is the slash instant so a
+    // delayed sweep still lands in the right window; failures inside an
+    // admin-declared incident are dropped by the service itself.
+    this.antiGriefing?.recordOutcome(solver, {
+      intentId,
+      chain,
+      outcome: "unfilled",
+      at: now * 1000,
+    });
+
     const slashRecord = await this.solversService.recordSlash(solver, intentId, reason, now);
 
     const result = await this.solverRegistryService.slashSolver({

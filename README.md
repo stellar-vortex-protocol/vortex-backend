@@ -34,6 +34,7 @@ POST /api/v1/intents/:id/cancel   — user cancels
 POST /api/v1/intents/quote        — get best quote from solvers
 GET  /api/v1/solvers              — solver leaderboard
 GET  /api/v1/solvers/:addr/stats  — solver performance stats
+GET  /api/v1/solvers/:addr/anti-griefing — anti-griefing status for a solver
 GET  /api/v1/tokens               — supported tokens (filter by chain)
 GET  /api/v1/stats                — protocol stats
 GET  /health                      — service health
@@ -43,7 +44,18 @@ GET  /api/v1/chain/health         — Soroban RPC health (read-only)
 GET  /api/v1/chain/ledger         — latest Soroban ledger
 GET  /api/v1/chain/network        — Soroban network info
 GET  /api/v1/chain/account/:key   — Stellar account lookup
+GET  /admin/anti-griefing/*       — anti-griefing operator control plane (x-admin-key)
 ```
+
+### Anti-griefing controls
+
+Repeated accept-without-fill behaviour is capped by a rolling unfilled-accept
+ratio per solver: cooldown → reduced concurrency → suspension, all enforced in
+the accept critical section with stable error codes (`ANTIGRIEFING_COOLDOWN`,
+`ANTIGRIEFING_CONCURRENCY_LIMIT`, `ANTIGRIEFING_SUSPENDED`). Thresholds are
+env-configurable, admin-declared chain incidents are excluded from the ratio,
+and every action is audited. See
+[`docs/solver-anti-griefing.md`](docs/solver-anti-griefing.md).
 
 ---
 

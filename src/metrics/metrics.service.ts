@@ -81,6 +81,24 @@ export class MetricsService implements OnModuleInit {
   public readonly sorobanRestoreTotal: client.Counter<string>;
   public readonly sorobanRestoreFeeStroops: client.Histogram<string>;
 
+  // ── Anti-griefing controls (issue #453) ───────────────────────────────────
+  /**
+   * Tiers applied per solver (`action` = cooldown | concurrency_cap |
+   * suspended | recovered | manual_reset). Label `solver` is truncated to 12
+   * chars, matching the capability-filter metrics, to bound cardinality.
+   */
+  public readonly antiGriefingActions: client.Counter<string>;
+  /**
+   * Accept attempts refused by an anti-griefing control, labelled by the
+   * machine-readable error code returned to the client (3 values, so this
+   * counter's cardinality is fixed).
+   */
+  public readonly antiGriefingBlocked: client.Counter<string>;
+  /** Rolling unfilled-accept ratio last observed per solver, in `[0, 1]`. */
+  public readonly antiGriefingUnfilledRatio: client.Gauge<string>;
+  /** Failures excused because they fell inside an admin-declared incident. */
+  public readonly antiGriefingIncidentsExcluded: client.Counter<string>;
+
   // ── Remote signer call latency (issue #400) ───────────────────────────────
   public readonly signerCallDurationSeconds: client.Histogram<string>;
 
@@ -196,6 +214,34 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}soroban_restore_fee_stroops`,
       help: "Fee paid for RestoreFootprint transactions in stroops",
       buckets: [1000, 5000, 10000, 50000, 100000, 500000, 1000000],
+      registers: [this.register],
+    });
+
+    // ── Anti-griefing controls (issue #453) ───────────────────────────────────
+    this.antiGriefingActions = new client.Counter({
+      name: `${prefix}antigriefing_actions_total`,
+      help: "Anti-griefing tiers applied per solver (issue #453)",
+      labelNames: ["solver", "action"],
+      registers: [this.register],
+    });
+
+    this.antiGriefingBlocked = new client.Counter({
+      name: `${prefix}antigriefing_blocked_total`,
+      help: "Accept attempts refused by an anti-griefing control, by error code",
+      labelNames: ["code"],
+      registers: [this.register],
+    });
+
+    this.antiGriefingUnfilledRatio = new client.Gauge({
+      name: `${prefix}antigriefing_unfilled_ratio`,
+      help: "Rolling unfilled-accept ratio per solver (issue #453)",
+      labelNames: ["solver"],
+      registers: [this.register],
+    });
+
+    this.antiGriefingIncidentsExcluded = new client.Counter({
+      name: `${prefix}antigriefing_incidents_excluded_total`,
+      help: "Unfilled accepts excluded from the ratio because they fell in an admin incident",
       registers: [this.register],
     });
 
@@ -458,5 +504,27 @@ export class MetricsService implements OnModuleInit {
   recordLeadershipLost(workerName: string): void {
     this.leaderElectionIsLeader.set({ worker: workerName }, 0);
     this.leaderElectionChangesTotal.inc({ worker: workerName, transition: "lost" });
+  }
+
+  // ── Anti-griefing helpers (issue #453) ─────────────────────────────────────
+
+  /** Record an anti-griefing tier applied to (or lifted from) a solver. */
+  incAntiGriefingAction(solverAddress: string, action: string): void {
+    this.antiGriefingActions.inc({ solver: solverAddress.slice(0, 12), action });
+  }
+
+  /** Record an accept refused by an anti-griefing control. */
+  incAntiGriefingBlocked(code: string): void {
+    this.antiGriefingBlocked.inc({ code });
+  }
+
+  /** Publish a solver's rolling unfilled-accept ratio for dashboards. */
+  setAntiGriefingRatio(solverAddress: string, ratio: number): void {
+    this.antiGriefingUnfilledRatio.set({ solver: solverAddress.slice(0, 12) }, ratio);
+  }
+
+  /** Record a failure excused by an admin-declared incident. */
+  incAntiGriefingIncidentExcluded(): void {
+    this.antiGriefingIncidentsExcluded.inc();
   }
 }

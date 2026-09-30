@@ -370,4 +370,32 @@ export const envValidationSchema = Joi.object({
   DATASETS_PUBLIC_BUCKET: Joi.string().default("vortex-public-datasets"),
   DATASETS_STORAGE: Joi.string().valid("local", "memory").default("local"),
   DATASETS_LOCAL_DIR: Joi.string().default(".datasets"),
+
+  // ── Anti-griefing controls (issue #453) ───────────────────────────────────
+  // Thresholds for the rolling unfilled-accept ratio and the tiers they drive
+  // (cooldown → reduced concurrency → suspension). Read by
+  // src/solvers/anti-griefing.service.ts; the behaviour each one controls is
+  // documented there and in README's Anti-Griefing section.
+  ANTIGRIEFING_ENABLED: Joi.boolean().default(true),
+
+  /** Rolling window the unfilled-accept ratio is computed over (seconds). */
+  ANTIGRIEFING_WINDOW_SECONDS: Joi.number().integer().min(60).default(86400),
+
+  /** Resolved accepts required before any tier may be applied. */
+  ANTIGRIEFING_MIN_SAMPLES: Joi.number().integer().min(1).default(10),
+
+  /** Ratio at/above which a solver escalates one tier (0–1). */
+  ANTIGRIEFING_RATIO_THRESHOLD: Joi.number().min(0).max(1).default(0.5),
+
+  /** Ratio at/below which a solver steps back down one tier (0–1). */
+  ANTIGRIEFING_RECOVERY_RATIO: Joi.number().min(0).max(1).default(0.2),
+
+  /** How long each cooldown blocks accepts for (seconds). */
+  ANTIGRIEFING_COOLDOWN_SECONDS: Joi.number().integer().min(1).default(300),
+
+  /** Concurrent accepted intents allowed once tier 2 is reached. */
+  ANTIGRIEFING_CONCURRENCY_CAP: Joi.number().integer().min(1).default(2),
+
+  /** Suspension length (seconds); 0 means "until an operator clears it". */
+  ANTIGRIEFING_SUSPENSION_SECONDS: Joi.number().integer().min(0).default(3600),
 });

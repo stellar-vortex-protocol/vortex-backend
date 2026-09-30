@@ -6,6 +6,7 @@ import { KillSwitchService } from "../killswitch/killswitch.service";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
+import { AntiGriefingService } from "../solvers/anti-griefing.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { MetricsService } from "../metrics/metrics.service";
 import { InMemorySolversRepository } from "../solvers/in-memory-solvers.repository";
@@ -175,6 +176,35 @@ describe("IntentsSweeperService", () => {
 
     expect((await solversService.get(ALPHA_ADDR))?.fillsFailed).toBe(before + 1);
     expect((await intentsService.get(intentId))?.state).toBe("slashed");
+  });
+
+  // ── #453: anti-griefing outcome wiring ───────────────────────────────────
+
+  it("feeds an unfilled outcome into the anti-griefing rolling window", async () => {
+    const past = Math.floor(Date.now() / 1000) - 10;
+    const antiGriefing = { recordOutcome: jest.fn() };
+    const wired = new IntentsSweeperService(
+      intentsService,
+      gateway,
+      solversService,
+      solverRegistryService,
+      metricsService as unknown as MetricsService,
+      killSwitch as unknown as KillSwitchService,
+      noopLeaderElection(),
+      antiGriefing as unknown as AntiGriefingService,
+    );
+
+    const intentId = await makeAcceptedIntent(past, ALPHA_ADDR);
+    await wired.sweep();
+
+    expect(antiGriefing.recordOutcome).toHaveBeenCalledTimes(1);
+    expect(antiGriefing.recordOutcome).toHaveBeenCalledWith(
+      ALPHA_ADDR,
+      expect.objectContaining({ intentId, chain: "ethereum", outcome: "unfilled" }),
+    );
+    // The slash instant drives the window, not "now".
+    const params = antiGriefing.recordOutcome.mock.calls[0][1] as { at: number };
+    expect(typeof params.at).toBe("number");
   });
 
   it("does not touch accepted intents still within their fill window", async () => {

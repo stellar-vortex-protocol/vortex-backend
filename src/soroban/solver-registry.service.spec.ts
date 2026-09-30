@@ -77,6 +77,17 @@ function makeConfigService(
       storageKind: "local",
       localDir: ".datasets",
     },
+    // Anti-griefing controls (issue #453) — test defaults.
+    antiGriefing: {
+      enabled: true,
+      windowSeconds: 86400,
+      minSamples: 10,
+      thresholdRatio: 0.5,
+      recoveryRatio: 0.2,
+      cooldownSeconds: 300,
+      concurrencyCap: 2,
+      suspensionSeconds: 3600,
+    },
   };
   return {
     get: (key: string) => {
