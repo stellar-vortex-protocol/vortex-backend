@@ -10,6 +10,42 @@ import { logger } from "../common/logger";
 import { buildWsAuthMessage } from "../common/stellar-signature";
 import { ProtocolParamsService } from "../governance/params.service";
 import { IntentCapabilityIndex } from "./solver-intent-matcher";
+import { SolverRecord } from "../solvers/solvers.types";
+
+/**
+ * Full `SolverRecord` stand-in for the WS auth path.
+ *
+ * The gateway compiles a capability predicate from the record, so a bare
+ * `{ address, isActive }` stub would throw on `supportedTokens.map(...)` the
+ * moment auth succeeds and take the whole worker down with it.
+ */
+function makeSolverRecord(address: string, overrides: Partial<SolverRecord> = {}): SolverRecord {
+  return {
+    address,
+    name: "test-solver",
+    bondAmount: "1000",
+    fillsCompleted: 0,
+    fillsFailed: 0,
+    totalVolume: "0",
+    avgFillTime: 0,
+    isActive: true,
+    registeredAt: 0,
+    lastActiveAt: 0,
+    supportedChains: ["ethereum"],
+    supportedTokens: ["USDC"],
+    ...overrides,
+  };
+}
+
+/** Stub capability index: the gateway only reads eligible intents from it. */
+function makeIntentIndex(): IntentCapabilityIndex {
+  return {
+    rebuild: jest.fn().mockResolvedValue(undefined),
+    addIntent: jest.fn(),
+    removeIntent: jest.fn(),
+    getEligibleFor: jest.fn().mockReturnValue([]),
+  } as unknown as IntentCapabilityIndex;
+}
 import { IntentFeedService } from "./feed/intent-feed.service";
 
 jest.mock("../common/logger", () => ({
@@ -46,7 +82,7 @@ function makeIntentsService(): IntentsService {
 
 function makeSolversService() {
   return {
-    get: jest.fn().mockResolvedValue({ address: "GTEST", isActive: true }),
+    get: jest.fn().mockResolvedValue(makeSolverRecord("GTEST")),
   } as any;
 }
 
@@ -156,6 +192,7 @@ describe("IntentsGateway heartbeat", () => {
     jest.clearAllMocks();
     intentsService = makeIntentsService();
     solversService = makeSolversService();
+    gateway = new IntentsGateway(intentsService, solversService, makeIntentIndex());
     const intentIndex = makeIntentIndex(intentsService);
     const feed = makeFeed(intentsService, solversService, intentIndex);
     gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
@@ -247,7 +284,7 @@ describe("IntentsGateway heartbeat", () => {
     const keypair = Keypair.random();
     const client = createMockClient();
     const timestamp = Math.floor(Date.now() / 1000);
-    solversService.get = jest.fn().mockResolvedValue({ address: keypair.publicKey(), isActive: true });
+    solversService.get = jest.fn().mockResolvedValue(makeSolverRecord(keypair.publicKey()));
 
     gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
@@ -281,6 +318,7 @@ describe("IntentsGateway logging", () => {
     jest.clearAllMocks();
     intentsService = makeIntentsService();
     solversService = makeSolversService();
+    gateway = new IntentsGateway(intentsService, solversService, makeIntentIndex());
     const intentIndex = makeIntentIndex(intentsService);
     const feed = makeFeed(intentsService, solversService, intentIndex);
     gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
@@ -331,7 +369,7 @@ describe("IntentsGateway logging", () => {
     jest.advanceTimersByTime(60_000);
 
     expect(logger.debug).toHaveBeenCalledWith(
-      "ws heartbeat terminated dead client (subscribers=0)",
+      "ws heartbeat terminated 1 dead client(s) (subscribers=0)",
     );
   });
 });
@@ -346,6 +384,7 @@ describe("IntentsGateway — chain subscription filtering (#257)", () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = makeIntentsService();
+    gateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
     const solversService = makeSolversService();
     const intentIndex = makeIntentIndex(intentsService);
     const feed = makeFeed(intentsService, solversService, intentIndex);
@@ -506,6 +545,7 @@ describe("IntentsGateway — event replay (#258)", () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = makeIntentsService();
+    gateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
     const solversService = makeSolversService();
     const intentIndex = makeIntentIndex(intentsService);
     const feed = makeFeed(intentsService, solversService, intentIndex);
@@ -546,6 +586,9 @@ describe("IntentsGateway — event replay (#258)", () => {
 
   it("returns replay_too_old when fromSeq has been evicted from the buffer", async () => {
     // Use a tiny ring buffer (capacity 2) to force eviction
+    const tinyGateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
+    // @ts-expect-error – accessing private field for test setup
+    tinyGateway.ringBuffer["capacity"] = 2;
     const solversService = makeSolversService();
     const intentIndex = makeIntentIndex(intentsService);
     const feed = makeFeed(intentsService, solversService, intentIndex, 2);
@@ -628,5 +671,61 @@ describe("IntentsGateway — event replay (#258)", () => {
     // (issue #433); the gateway delegates replay to it.
     // @ts-expect-error – accessing private for assertion
     expect(gateway.feed.replaySince(0, null as never).events).toHaveLength(1);
+  });
+});
+
+// ── #334: Heartbeat observability improvements ────────────────────────────
+
+describe("IntentsGateway — heartbeat observability (#334)", () => {
+  let gateway: IntentsGateway;
+  let intentsService: IntentsService;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    intentsService = makeIntentsService();
+    gateway = new IntentsGateway(intentsService, makeSolversService());
+  });
+
+  afterEach(() => {
+    gateway.onModuleDestroy();
+    jest.useRealTimers();
+  });
+
+  it("heartbeatIntervalMs defaults to 30000", () => {
+    expect(gateway.heartbeatIntervalMs).toBe(30_000);
+  });
+
+  it("getLastTerminatedCount() returns 0 initially", () => {
+    expect(gateway.getLastTerminatedCount()).toBe(0);
+  });
+
+  it("getLastTerminatedCount() reflects terminated clients after heartbeat", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    // First tick: marks alive=false, sends ping
+    jest.advanceTimersByTime(30_000);
+    expect(gateway.getLastTerminatedCount()).toBe(0);
+
+    // Second tick: client didn't pong → terminated
+    jest.advanceTimersByTime(30_000);
+    expect(gateway.getLastTerminatedCount()).toBe(1);
+  });
+
+  it("getZombieCount() returns count of clients that missed a ping but are not yet terminated", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    // Before first heartbeat: all clients are alive (alive=true), no zombies
+    expect(gateway.getZombieCount()).toBe(0);
+
+    // After first heartbeat tick: alive is set to false for clients that didn't pong
+    jest.advanceTimersByTime(30_000);
+    expect(gateway.getZombieCount()).toBe(1);
+
+    // After second tick: zombie is terminated, count back to 0
+    jest.advanceTimersByTime(30_000);
+    expect(gateway.getZombieCount()).toBe(0);
   });
 });

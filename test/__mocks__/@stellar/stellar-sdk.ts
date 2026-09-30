@@ -69,7 +69,7 @@ const mockServerClass = jest.fn().mockImplementation(() => mockServer);
  */
 export const SorobanRpc = {
   ...real.SorobanRpc,
-  Server: jest.fn().mockImplementation(() => mockServer),
+  Server: mockServerClass,
   Api: {
     ...real.SorobanRpc?.Api,
     isSimulationError: (response: unknown): boolean =>
@@ -91,6 +91,8 @@ export const Keypair = real.Keypair;
 export const Networks = real.Networks;
 export const StrKey = real.StrKey;
 export const Address = real.Address;
+export const Asset = real.Asset;
+export const Horizon = real.Horizon;
 export const Contract = real.Contract;
 export const Account = real.Account;
 export const Operation = real.Operation;

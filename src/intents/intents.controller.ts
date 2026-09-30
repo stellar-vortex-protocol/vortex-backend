@@ -7,16 +7,23 @@ import {
   Get,
   GoneException,
   HttpCode,
+  HttpStatus,
   Inject,
+  Res,
   ServiceUnavailableException,
+  UnauthorizedException,
   NotFoundException,
   Optional,
   Param,
   Post,
   Query,
-  UnauthorizedException,
+  HttpStatus,
+  HttpCode,
+  Inject,
+  ServiceUnavailableException,
   UseGuards,
 } from "@nestjs/common";
+import type { Response } from "express";
 import {
   ApiTags,
   ApiOkResponse,
@@ -47,6 +54,8 @@ import { QuoteResponseDto } from "./dto/quote-response.dto";
 import { ListIntentsDto } from "./dto/list-intents.dto";
 import { BatchLookupDto } from "./dto/batch-lookup.dto";
 import { UserThrottlerGuard } from "./user-throttler.guard";
+import { AbuseDetectorGuard } from "../abuse/abuse-detector.guard";
+import { AbuseScoreService } from "../abuse/abuse-score.service";
 import {
   verifyStellarSignature,
   buildAcceptMessage,
@@ -76,6 +85,8 @@ import { KillSwitchOperation } from "../killswitch/killswitch.types";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
+import { captureTraceparent, ATTR } from "../tracing";
+import { trace } from "@opentelemetry/api";
 import { MetricsService } from "../metrics/metrics.service";
 import { dutchAuctionPrice } from "../auctions/dutch";
 
@@ -96,6 +107,7 @@ export class IntentsController {
     private readonly tokensService: TokensService,
     private readonly routingService: RoutingService,
     private readonly killSwitch: KillSwitchService,
+    private readonly abuseScorer: AbuseScoreService,
     private readonly signatureNonces: SignatureNonceService,
     private readonly evmSignatures: EvmSignatureVerifier,
     config: ConfigService<AppConfig, true>,
@@ -383,9 +395,11 @@ export class IntentsController {
   /**
    * Issue #44 — global IP throttle already applied via AppModule guard.
    * Issue #45 — additionally throttle per dto.user: 10 creates / 60 s.
+   * Issue #385 — returns HTTP 202 when the intent is in `pending_open` state
+   *   (on-chain tx submitted, awaiting confirmation) instead of the usual 201.
    */
   @Post()
-  @UseGuards(UserThrottlerGuard, KillSwitchGuard)
+  @UseGuards(AbuseDetectorGuard, UserThrottlerGuard, KillSwitchGuard)
   @KillSwitchGate({ operation: "create" })
   @ApiTooManyRequestsResponse({
     description:
@@ -395,7 +409,7 @@ export class IntentsController {
   @ApiConflictResponse({
     description: `Open-intent cap reached — a single user may not hold more than ${MAX_OPEN_INTENTS_PER_USER} open/accepted intents simultaneously`,
   })
-  async create(@Body() dto: CreateIntentDto) {
+  async create(@Body() dto: CreateIntentDto, @Res({ passthrough: true }) res: Response) {
     const now = Math.floor(Date.now() / 1000);
     const intentDeadline = dto.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[dto.srcChain] ?? DEFAULT_DEADLINE_SECONDS);
     if (dto.auction) {
@@ -498,7 +512,27 @@ export class IntentsController {
       },
       dto.idempotencyKey,
     );
-    this.intentsGateway.broadcast({ type: "intent_created", intent });
+
+    // Issue #385: return 202 Accepted when the on-chain tx has been submitted
+    // but the intent is not yet confirmed (state === "pending_open").
+    if (intent.state === "pending_open") {
+      res.status(HttpStatus.ACCEPTED);
+    } else {
+      res.status(HttpStatus.CREATED);
+    }
+
+    // Attach semantic span attributes and capture traceparent for outbox/job payloads.
+    const activeSpan = trace.getActiveSpan();
+    if (activeSpan) {
+      activeSpan.setAttribute(ATTR.INTENT_ID, intent.intentId);
+      activeSpan.setAttribute(ATTR.INTENT_USER, intent.user);
+      activeSpan.setAttribute(ATTR.INTENT_CHAIN, intent.srcChain);
+      activeSpan.setAttribute(ATTR.INTENT_AMOUNT, intent.srcAmount);
+      activeSpan.setAttribute(ATTR.INTENT_STATE, intent.state);
+    }
+    const traceparent = captureTraceparent();
+
+    this.intentsGateway.broadcast({ type: "intent_created", intent, traceparent });
     return intent;
   }
 
@@ -540,7 +574,7 @@ export class IntentsController {
   @ApiConflictResponse({ description: "Intent is not in open state" })
   @ApiGoneResponse({ description: "Intent has expired" })
   @ApiForbiddenResponse({ description: "Solver not registered or inactive" })
-  async accept(@Param("id") id: string, @Body() dto: AcceptIntentDto) {
+  async accept(@Param("id") id: string, @Body() dto: AcceptIntentDto, @Res({ passthrough: true }) res: Response) {
     // Fast-path snapshot only — guards below are advisory. The atomic
     // decision is the conditional `acceptIfOpen` write (state=open AND
     // deadline > now in SQL), so a concurrent cancel/expiry always wins.
@@ -615,10 +649,17 @@ export class IntentsController {
       throw new ConflictException(`Intent is ${current?.state ?? "unknown"}, cannot accept`);
     }
 
+    // Issue #385: return 202 Accepted when the on-chain tx has been submitted
+    // but the accept is not yet confirmed (state === "pending_accepted").
+    if (updated.state === "pending_accepted") {
+      res.status(HttpStatus.ACCEPTED);
+    }
+
     this.intentsService.appendAuditEntry(id, "accepted", dto.solver, "solver accepted", {
       deadline: updated.deadline,
       ...(updated.acceptedDstAmount ? { acceptedDstAmount: updated.acceptedDstAmount } : {}),
     });
+
     this.intentsGateway.broadcast({
       type: "intent_accepted",
       intentId: id,
@@ -639,7 +680,7 @@ export class IntentsController {
   @ApiForbiddenResponse({ description: "Wrong solver for this intent" })
   @ApiGoneResponse({ description: "Fill window has expired" })
   @ApiBadRequestResponse({ description: "Fill amount below minimum" })
-  async fill(@Param("id") id: string, @Body() dto: FillIntentDto) {
+  async fill(@Param("id") id: string, @Body() dto: FillIntentDto, @Res({ passthrough: true }) res: Response) {
     const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
 
@@ -757,6 +798,13 @@ export class IntentsController {
       fillAmount: verdict.deliveredAmount,
       txHash: dto.txHash,
     });
+
+    // Issue #385: return 202 Accepted when the on-chain tx has been submitted
+    // but the fill is not yet confirmed (state === "pending_filled").
+    if (updated.state === "pending_filled") {
+      res.status(HttpStatus.ACCEPTED);
+    }
+
     this.intentsGateway.broadcast({
       type: "intent_filled",
       intentId: id,
@@ -767,10 +815,11 @@ export class IntentsController {
   }
 
   @Post(":id/cancel")
+  @UseGuards(AbuseDetectorGuard)
   @ApiNotFoundResponse({ description: "Intent not found" })
   @ApiForbiddenResponse({ description: "Unauthorized" })
   @ApiConflictResponse({ description: "Intent is not in open state" })
-  async cancel(@Param("id") id: string, @Body() dto: CancelIntentDto) {
+  async cancel(@Param("id") id: string, @Body() dto: CancelIntentDto, @Res({ passthrough: true }) res: Response) {
     const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
     if (intent.user.toLowerCase() !== dto.user.toLowerCase()) {
@@ -816,6 +865,15 @@ export class IntentsController {
 
     // Audit trail (issue #217 / #62): record who cancelled and when.
     this.intentsService.appendAuditEntry(id, "cancelled", dto.user, "user cancelled");
+
+    // Record cancellation for abuse scoring (create/cancel ratio rule).
+    void this.abuseScorer.recordCancel(dto.user.toLowerCase());
+
+    // Issue #385: return 202 Accepted when the on-chain tx has been submitted
+    // but the cancel is not yet confirmed (state === "pending_cancelled").
+    if (updated.state === "pending_cancelled") {
+      res.status(HttpStatus.ACCEPTED);
+    }
 
     this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
     return updated;

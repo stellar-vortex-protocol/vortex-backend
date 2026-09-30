@@ -7,6 +7,8 @@ import { IntentsService } from "../intents/intents.service";
 import { SUPPORTED_CHAINS } from "../intents/intents.types";
 import { SolversService } from "../solvers/solvers.service";
 import { IntentsGateway } from "../intents/intents.gateway";
+import { AbuseScoreService } from "../abuse/abuse-score.service";
+import { CHALLENGE_THRESHOLD } from "../abuse/abuse.types";
 
 @Injectable()
 export class StatsService {
@@ -14,6 +16,7 @@ export class StatsService {
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
     private readonly intentsGateway: IntentsGateway,
+    @Optional() private readonly abuseScorer?: AbuseScoreService,
     @Optional() config?: ConfigService<AppConfig, true>,
   ) {
     this.canary = new Set(config?.get("canaryAddresses", { infer: true }) ?? []);
@@ -24,6 +27,33 @@ export class StatsService {
 
   private async publicIntents() {
     return (await this.intentsService.getAll()).filter((i) => !isCanaryIntent(i, this.canary));
+  }
+
+  /**
+   * Returns intents for stat computation, optionally excluding flagged (high-abuse-score) actors.
+   *
+   * When `includeFlagged` is false (the default), intents from users whose cached
+   * abuse score is above the challenge threshold are excluded so spam does not
+   * inflate governance and incentive metrics.
+   *
+   * Operators can toggle `includeFlagged=true` on any stats endpoint for a
+   * full-transparency view that shows the raw counts before filtering.
+   */
+  private async publicIntentsFiltered(includeFlagged = false) {
+    const intents = await this.publicIntents();
+    if (includeFlagged || !this.abuseScorer) return intents;
+
+    // Fetch cached scores for all unique users in parallel (best-effort: missing
+    // score = unknown = keep).
+    const uniqueUsers = [...new Set(intents.map((i) => i.user))];
+    const scores = await Promise.all(
+      uniqueUsers.map(async (u) => [u, await this.abuseScorer!.getCachedScore(u)] as const),
+    );
+    const flaggedUsers = new Set(
+      scores.filter(([, score]) => score !== null && score >= CHALLENGE_THRESHOLD).map(([u]) => u),
+    );
+
+    return intents.filter((i) => !flaggedUsers.has(i.user));
   }
 
   private canonicalJson(value: unknown): string {
@@ -76,8 +106,8 @@ export class StatsService {
     };
   }
 
-  async getProtocolStats() {
-    const intents = await this.publicIntents();
+  async getProtocolStats(includeFlagged = false) {
+    const intents = await this.publicIntentsFiltered(includeFlagged);
     const solvers = (await this.solversService.getAll()).filter((s) => !this.canary.has(s.address));
 
     const open = intents.filter((i) => i.state === "open").length;
@@ -99,11 +129,12 @@ export class StatsService {
       activeSolvers: solvers.filter((s) => s.isActive).length,
       avgFillTime: Math.round(avgFillTime),
       fillRate: intents.length ? filled.length / intents.length : 0,
+      flaggedActivityExcluded: !includeFlagged,
     };
   }
 
-  async getPublicStats() {
-    const stats = await this.getProtocolStats();
+  async getPublicStats(includeFlagged = false) {
+    const stats = await this.getProtocolStats(includeFlagged);
     return {
       ...stats,
       provenance: this.getProvenance(stats),
@@ -114,8 +145,8 @@ export class StatsService {
     return [] as Array<Record<string, unknown>>;
   }
 
-  async getTreasuryStats() {
-    const intents = await this.publicIntents();
+  async getTreasuryStats(includeFlagged = false) {
+    const intents = await this.publicIntentsFiltered(includeFlagged);
     const now = Math.floor(Date.now() / 1000);
     const last24hCutoff = now - 86_400;
 

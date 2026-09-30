@@ -11,13 +11,10 @@ import {
   Query,
 } from "@nestjs/common";
 import {
-  ApiBadRequestResponse,
   ApiNotFoundResponse,
-  ApiOkResponse,
   ApiOperation,
   ApiQuery,
   ApiTags,
-  ApiUnauthorizedResponse,
 } from "@nestjs/swagger";
 import { ConfigService } from "@nestjs/config";
 import { IntentsService } from "../intents/intents.service";
@@ -34,7 +31,10 @@ import {
 import { isCanaryIntent } from "../common/canary";
 import { AppConfig } from "../config/configuration";
 import { SolversService, LeaderboardWindow } from "./solvers.service";
-import { SolverRecord } from "./solvers.types";
+import { ListIntentsDto } from "../intents/dto/list-intents.dto";
+import { AppConfig } from "../config/configuration";
+import { isCanaryIntent } from "../common/canary";
+import { IntentCapabilityIndex } from "../intents/solver-intent-matcher";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
 import { UpdateSolverDto } from "./dto/update-solver.dto";
 import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
@@ -45,45 +45,6 @@ const WINDOW_SECONDS: Record<Exclude<LeaderboardWindow, "all">, number> = {
   "7d": 7 * 24 * 60 * 60,
   "30d": 30 * 24 * 60 * 60,
 };
-
-/**
- * Whether `solver` is able to work `chain`/`tokenSymbol` at all.
- *
- * A solver with no declared chains or tokens is treated as unrestricted — that
- * matches registration defaults, where the fields are optional declarations
- * of focus rather than a hard allow-list, and it keeps existing solvers
- * eligible for intents created before the fields existed.
- *
- * Matching is case-insensitive on the token symbol because registries and
- * user-supplied intent payloads disagree on casing (e.g. "USDC" vs "usdc").
- */
-function solverSupports(
-  solver: SolverRecord,
-  chain: string,
-  tokenSymbol: string,
-): boolean {
-  if (solver.supportedChains.length > 0) {
-    const supportsChain = solver.supportedChains.some(
-      (c: SupportedChain) => c.toLowerCase() === String(chain).toLowerCase(),
-    );
-    if (!supportsChain) return false;
-  }
-
-  if (solver.supportedTokens.length > 0) {
-    const needle = String(tokenSymbol).toLowerCase();
-    const supportsToken = solver.supportedTokens.some(
-      (t: string) => String(t).toLowerCase() === needle,
-    );
-    if (!supportsToken) return false;
-  }
-
-  return true;
-}
-
-/** Guard against chain values that are not part of the supported set. */
-function isSupportedChain(value: string): value is SupportedChain {
-  return (SUPPORTED_CHAINS as readonly string[]).includes(value);
-}
 
 @ApiTags("solvers")
 @Controller("api/v1/solvers")
@@ -247,29 +208,6 @@ export class SolversController {
 
   async getSolver(@Param("address") address: string) {
     const solver = await this.solversService.get(address);
-    if (!solver) throw new NotFoundException("Solver not found");
-    return solver;
-  }
-
-  /**
-   * PATCH /api/v1/solvers/:address
-   *
-   * Issue #273 — lets a solver operator edit their mutable profile fields
-   * (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`). Signature
-   * verified per the repo's `verifyStellarSignature` convention: the operator
-   * proves control of `:address` before any write. Immutable fields are
-   * stripped by the DTO whitelist.
-   */
-  @Patch(":address")
-  @ApiOkResponse({ description: "Updated solver record" })
-  @ApiBadRequestResponse({ description: "Invalid update body" })
-  @ApiUnauthorizedResponse({ description: "Missing or invalid signature" })
-  @ApiNotFoundResponse({ description: "Solver not found" })
-  async updateSolver(@Param("address") address: string, @Body() dto: UpdateSolverDto) {
-    verifyStellarSignature(address, buildUpdateSolverMessage(address), dto.signature);
-
-    const { signature: _signature, ...patch } = dto;
-    const solver = await this.solversService.update(address, patch);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
   }

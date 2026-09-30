@@ -800,6 +800,233 @@ jobs:
           fi
           npm run check:migrations -- --base "$base"
 
+  # ── N-1 app against N schema (issue #497) ─────────────────────────────────
+  # The issue's compatibility criterion: "previous app version's e2e smoke
+  # suite runs against the migrated schema in CI". Concretely, this job:
+  #
+  #   1. applies the migrations of THIS revision (schema N) to a fresh Postgres;
+  #   2. checks out the previous revision of the app (N-1) into a second
+  #      directory and installs its own dependencies there;
+  #   3. runs three things from N-1 against schema N:
+  #        a. `prisma migrate deploy` — N-1's migration set must reconcile
+  #           against the N database. This is the exact "misordered migration"
+  #           failure the issue describes: if a migration was rewritten,
+  #           renamed or re-ordered between N-1 and N, this fails here instead
+  #           of in production;
+  #        b. a raw query through N-1's *generated Prisma client* — the e2e
+  #           harness (test/utils/create-test-app.ts) deliberately MOCKS
+  #           PrismaService, so the smoke specs below boot the N-1 app but do
+  #           not touch the database. This probe is what makes the run
+  #           schema-sensitive;
+  #        c. N-1's e2e smoke subset (health + OpenAPI contract), when those
+  #           specs exist at that revision.
+  #
+  # Which revision counts as "previous"? Chosen per event so that N-1 is the
+  # app that is actually running/deployed, not an arbitrary ancestor:
+  #   * push:          `github.event.before` — literally the tip that was on
+  #                    the branch before this push, i.e. what staging runs. On
+  #                    main that is the deployed revision by definition.
+  #                    (`HEAD^1` would be wrong for multi-commit pushes: it
+  #                    points *inside* the pushed range, at something never
+  #                    deployed.)
+  #   * pull_request:  the merge commit's first parent, i.e. the base-branch
+  #                    tip this PR is merged onto — what the branch runs. Only
+  #                    if that is not an ancestor of origin/main (checkout fell
+  #                    back to the head commit because the merge ref was
+  #                    unavailable) do we fall back to the merge-base with
+  #                    origin/main; an older base only makes the test stricter,
+  #                    never weaker.
+  #   * first push / unreachable object: skip gracefully with an explicit
+  #     ::notice:: — there is no N-1 to test, and failing the build for that
+  #     would block the very first commit of a branch.
+  migration-compat:
+    name: Migration compatibility (N-1 app vs N schema)
+    runs-on: ubuntu-latest
+    # Hard budget: the issue asks for "under ~10 minutes". The two installs
+    # (current + N-1 worktree) dominate; everything else is seconds.
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vortex
+          POSTGRES_PASSWORD: vortex
+          POSTGRES_DB: vortex
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U vortex"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      DATABASE_URL: postgresql://vortex:vortex@localhost:5432/vortex?schema=public
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          # Full history: resolving `before`, the merge-base and the worktree
+          # checkout all need commits that a shallow clone would omit.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies (current revision)
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      # ── Step 1: bring the database to schema N ────────────────────────────
+      - name: Apply this revision's migrations (schema N)
+        run: npm run db:migrate:prod
+
+      # ── Step 2: pick the previous revision, or skip with a notice ─────────
+      - name: Resolve the previous revision (N-1)
+        id: prev
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          prev=""
+          case "$EVENT_NAME" in
+            push)
+              # `before` is all-zeros on the first push of a ref and can be
+              # missing after a force-push; both are handled by the guards.
+              if [ -n "${BEFORE_SHA:-}" ] && [ "${BEFORE_SHA//0/}" != "" ] \
+                  && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+                prev="$BEFORE_SHA"
+              fi
+              ;;
+            pull_request)
+              # Merge ref: HEAD has two parents, first one is the base tip.
+              if git rev-parse --verify --quiet HEAD^2 >/dev/null \
+                  && git cat-file -e "HEAD^1^{commit}" 2>/dev/null \
+                  && git merge-base --is-ancestor "HEAD^1" "origin/${BASE_REF}"; then
+                prev=$(git rev-parse "HEAD^1")
+              else
+                # Fallback: the shared ancestor with the integration branch.
+                prev=$(git merge-base HEAD "origin/${BASE_REF}" 2>/dev/null || true)
+              fi
+              ;;
+          esac
+          if [ -z "$prev" ] || ! git cat-file -e "${prev}^{commit}" 2>/dev/null; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No usable previous revision for this event — skipping the N-1 compatibility check (first push of the ref, force-push, or unrelated history). Nothing to compare against, so there is nothing to fail."
+            exit 0
+          fi
+          if [ "$prev" = "$(git rev-parse HEAD)" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Previous revision equals HEAD — skipping the N-1 compatibility check (degenerate history)."
+            exit 0
+          fi
+          echo "sha=$prev" >> "$GITHUB_OUTPUT"
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "N-1 revision: $prev ($(git log -1 --format=%s "$prev" | cut -c1-72))"
+
+      # ── Step 3: materialise N-1 in a second directory ─────────────────────
+      # A `git worktree` shares the object database with the checkout above
+      # (no second clone), while giving N-1 its own package.json, lockfile and
+      # node_modules — the current tree stays untouched for the schema-N side.
+      # It lives under $RUNNER_TEMP so it cannot be mistaken for workspace
+      # content by later steps or by the artifact uploaders.
+      - name: Check out N-1 into a separate worktree
+        if: steps.prev.outputs.available == 'true'
+        id: worktree
+        run: |
+          set -euo pipefail
+          N1_DIR="$RUNNER_TEMP/n1-app"
+          git worktree add --detach "$N1_DIR" "${{ steps.prev.outputs.sha }}"
+          echo "N1_DIR=$N1_DIR" >> "$GITHUB_ENV"
+          echo "Checked out N-1 at $N1_DIR"
+
+      - name: Install N-1 dependencies
+        if: steps.prev.outputs.available == 'true'
+        working-directory: ${{ env.N1_DIR }}
+        run: npm ci --no-audit --no-fund
+
+      # @prisma/client's postinstall normally generates the client, but that is
+      # an implicit behaviour of whatever Prisma version N-1 pinned; make it
+      # explicit (and skip it cleanly on revisions whose package.json has no
+      # such script yet).
+      - name: Generate N-1 Prisma client
+        if: steps.prev.outputs.available == 'true'
+        working-directory: ${{ env.N1_DIR }}
+        run: |
+          if node -e 'process.exit(require("./package.json").scripts?.["db:generate"] ? 0 : 1)'; then
+            npm run db:generate
+          else
+            echo "No db:generate script at this revision; relying on @prisma/client postinstall."
+          fi
+
+      # ── Step 4: the actual compatibility probes ───────────────────────────
+      # (a) N-1's migration set must reconcile with schema N — the ordering /
+      # rewriting guard.
+      - name: N-1 `prisma migrate deploy` against schema N
+        if: steps.prev.outputs.available == 'true'
+        working-directory: ${{ env.N1_DIR }}
+        run: npx prisma migrate deploy
+
+      # (b) The schema-sensitive probe: query through N-1's generated client.
+      # Written as a file (not `node -e`) so quoting cannot eat the SQL, and
+      # placed inside the worktree so `require("@prisma/client")` resolves
+      # N-1's client, not the current revision's.
+      - name: Query schema N through the N-1 Prisma client
+        if: steps.prev.outputs.available == 'true'
+        working-directory: ${{ env.N1_DIR }}
+        run: |
+          set -euo pipefail
+          cat > compat-smoke.js <<'JS'
+          const { PrismaClient } = require("@prisma/client");
+          (async () => {
+            const prisma = new PrismaClient();
+            const tables = await prisma.$queryRawUnsafe(
+              "SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public'",
+            );
+            const n = Number(tables[0].n);
+            if (n < 1) throw new Error("schema N shows no public tables");
+            // The table every released revision since init depends on.
+            await prisma.$queryRawUnsafe('SELECT count(*)::int FROM "intents"');
+            console.log(`N-1 client queried schema N: ${n} public tables, intents readable`);
+            await prisma.$disconnect();
+          })().catch((err) => {
+            console.error("N-1 client cannot use schema N:", err);
+            process.exit(1);
+          });
+          JS
+          node compat-smoke.js
+
+      # (c) N-1's e2e smoke subset. Existence is checked per file because the
+      # two specs may not have existed at every historical revision — missing
+      # coverage at N-1 is a reason to notice, not to fail the build.
+      - name: Run N-1 e2e smoke suite against schema N
+        if: steps.prev.outputs.available == 'true'
+        working-directory: ${{ env.N1_DIR }}
+        run: |
+          set -euo pipefail
+          smoke=()
+          for f in test/health.e2e-spec.ts test/openapi-contract.e2e-spec.ts; do
+            if [ -f "$f" ]; then
+              smoke+=("$f")
+            else
+              echo "::notice::$f does not exist at the N-1 revision — skipping that spec."
+            fi
+          done
+          if [ "${#smoke[@]}" -eq 0 ]; then
+            echo "::notice::No e2e smoke specs exist at the N-1 revision — nothing to run."
+            exit 0
+          fi
+          npx jest --config test/jest-e2e.json --runTestsByPath "${smoke[@]}" --ci
+
+      - name: Provenance for the executed comparison
+        if: always() && steps.prev.outputs.available == 'true'
+        run: |
+          echo "::notice::N-1 compatibility checked: N=${GITHUB_SHA} schema vs N-1=${{ steps.prev.outputs.sha }} app."
+
   # ── Docker build verification (#131) ──────────────────────────────────────
   # Ensures every push that changes application code doesn't silently break
   # the Dockerfile. Image publishing to a registry can be wired up separately

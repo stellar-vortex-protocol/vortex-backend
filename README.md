@@ -284,6 +284,15 @@ section is overwritten automatically by `npm run perf:update-baselines`.
 
 ---
 
+## Preview environments
+
+Every same-repo PR can be deployed to an isolated, seeded preview environment
+(API, Swagger at `/docs`, WebSocket at `/ws`) by adding the **`preview`** label;
+it is torn down on close, on label removal, or after a TTL. See
+[docs/ci/preview-environments.md](./docs/ci/preview-environments.md) for the
+trigger rules, cost cap and required repository configuration. Previews are
+testnet-only with throwaway keys — forked PRs are excluded.
+
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for backend-specific setup, conventions,

@@ -1,5 +1,10 @@
 import type { WebSocket } from "ws";
 
+/**
+ * Encoding format negotiated per WebSocket connection (Activity 1).
+ */
+export type EncodingFormat = "json" | "msgpack";
+
 /** Classic token bucket: `ratePerSec` sustained, up to `burst` at once. */
 export class TokenBucket {
   private tokens: number;
@@ -66,7 +71,9 @@ export class ConnectionState {
   violations = 0;
   /** Authenticated solver address (signature or JWT), if any. */
   identity: string | null = null;
-  private readonly queue: string[] = [];
+  /** Encoding format negotiated during handshake (Activity 1). */
+  encoding: EncodingFormat = "json";
+  private readonly queue: Array<string | Uint8Array> = [];
   private closed = false;
 
   constructor(
@@ -82,7 +89,7 @@ export class ConnectionState {
     return this.queue.length;
   }
 
-  send(payload: string): OutboundResult {
+  send(payload: string | Uint8Array): OutboundResult {
     if (this.closed || this.socket.readyState !== this.socket.OPEN) return "sent";
     if (this.queue.length === 0 && this.socket.bufferedAmount < this.limits.bufferBytes) {
       this.write(payload);
@@ -104,7 +111,7 @@ export class ConnectionState {
     this.queue.length = 0;
   }
 
-  private write(payload: string) {
+  private write(payload: string | Uint8Array) {
     this.socket.send(payload, () => this.flush());
   }
 

@@ -1,0 +1,116 @@
+---
+# Chaos test suite — runs weekly and on manual dispatch.
+# Requires the chaos docker-compose profile to be available on the runner.
+#
+# The job:
+#   1. Starts the full chaos stack (app-chaos + toxiproxy + postgres + redis)
+#   2. Waits for the app to pass its health probe
+#   3. Runs all 12 chaos scenarios via test/chaos/runner.ts
+#   4. Uploads the JSON report as a build artifact
+#   5. Posts a summary comment to the triggering workflow run
+
+name: Chaos Tests
+
+on:
+  schedule:
+    # Weekly on Sunday at 02:00 UTC (outside business hours)
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      scenario_filter:
+        description: "Comma-separated scenario IDs to run (empty = all)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  chaos:
+    name: Chaos Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: Start chaos stack
+        run: |
+          docker compose --profile chaos up -d --wait \
+            --wait-timeout 120
+        env:
+          COMPOSE_FILE: docker-compose.yml
+
+      - name: Wait for app-chaos health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4002/health/ready; then
+              echo "App is healthy after ${i} attempts"
+              exit 0
+            fi
+            echo "Attempt ${i}/30 — waiting 4 s..."
+            sleep 4
+          done
+          echo "App did not become healthy in time"
+          docker compose --profile chaos logs app-chaos
+          exit 1
+
+      - name: Run chaos scenarios
+        id: chaos_run
+        run: |
+          npx ts-node test/chaos/runner.ts
+        env:
+          CHAOS_BASE_URL: http://localhost:4002
+          TOXIPROXY_URL: http://localhost:8474
+          CHAOS_REPORT_PATH: test/chaos/report.json
+          CHAOS_SCENARIO_FILTER: ${{ inputs.scenario_filter }}
+        continue-on-error: true
+
+      - name: Upload chaos report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chaos-report-${{ github.run_id }}
+          path: test/chaos/report.json
+          retention-days: 30
+
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: test/chaos/report.json
+          check_name: Chaos Test Results
+          comment_title: "Chaos Test Results"
+          fail_on: "test failures"
+        continue-on-error: true
+
+      - name: Print report summary
+        if: always()
+        run: |
+          if [ -f test/chaos/report.json ]; then
+            node -e "
+              const r = require('./test/chaos/report.json');
+              console.log('Chaos Results: ' + r.passed + '/' + r.total + ' passed');
+              r.scenarios.filter(s => !s.passed).forEach(s => {
+                console.log('  FAIL: ' + s.id + ' — ' + (s.error || 'assertion failed'));
+              });
+            "
+          fi
+
+      - name: Tear down chaos stack
+        if: always()
+        run: docker compose --profile chaos down -v
+
+      - name: Fail job if scenarios failed
+        if: steps.chaos_run.outcome == 'failure'
+        run: exit 1

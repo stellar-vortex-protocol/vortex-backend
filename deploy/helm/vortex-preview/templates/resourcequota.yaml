@@ -1,0 +1,28 @@
+{{/*
+The cluster half of the cost cap (see the workflow's cap-check step).
+
+The workflow check is best-effort — two deploys running at the same instant can
+both pass it. This ResourceQuota is not: it is admission-controlled, so a
+preview namespace physically cannot exceed the slice below no matter how it was
+created or how many pods someone scales it to.
+
+Only *bounded* resources are listed. `count/secrets` and `count/pods` style
+object quotas are intentionally omitted: a preview needs room for Helm's release
+secrets plus ours without tripping an unrelated limit, and bounding CPU/memory
+is what actually bounds cost.
+*/}}
+{{- if .Values.quota.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "vortex-preview.name" . }}-preview-quota
+  labels:
+    {{- include "vortex-preview.labels" . | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ index .Values.quota.hard "requests.cpu" | quote }}
+    requests.memory: {{ index .Values.quota.hard "requests.memory" | quote }}
+    limits.cpu: {{ index .Values.quota.hard "limits.cpu" | quote }}
+    limits.memory: {{ index .Values.quota.hard "limits.memory" | quote }}
+    pods: {{ index .Values.quota.hard "pods" | quote }}
+{{- end }}

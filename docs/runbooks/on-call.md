@@ -543,3 +543,53 @@ handlers never wait for Redis.
 
 > For production incidents open a severity-1 ticket and page the service owner
 > via the alerting system.
+
+---
+
+## Inspecting Stuck Transactions (#386)
+
+Transactions in `pending_transactions` with `status = 'pending'` and `next_poll_at` in the past are being actively retried by `TxConfirmationService`. Normal retries use exponential backoff up to `max_track_until`.
+
+### Find all stuck transactions
+
+```sql
+SELECT tx_hash, intent_id, attempts, fee_bump_count,
+       to_timestamp(next_poll_at) AS next_poll_at_ts,
+       to_timestamp(max_track_until) AS expires_at,
+       created_at
+FROM   pending_transactions
+WHERE  status = 'pending'
+  AND  next_poll_at < extract(epoch FROM now())
+ORDER  BY next_poll_at ASC
+LIMIT  50;
+```
+
+### Force-expire a stuck transaction
+
+```sql
+UPDATE pending_transactions
+SET    status = 'expired', updated_at = now()
+WHERE  tx_hash = '<hash>';
+```
+
+### Inspect dead-lettered events (#389)
+
+```sql
+SELECT ledger, event_index, contract_id, network, last_error, attempts, created_at
+FROM   dead_letter_events
+ORDER  BY created_at DESC
+LIMIT  20;
+```
+
+### Key Prometheus metrics
+
+| Metric | Alert threshold |
+|--------|----------------|
+| `vortex_tx_confirmation_outcomes_total{status="confirmed\|failed\|expired"}` | — (informational) |
+| `vortex_tx_confirmation_latency_seconds` | p99 > 120 s |
+| `vortex_tx_fee_bump_total{percentile}` | — (informational) |
+| `vortex_tx_fee_bump_ceiling_hits_total` | > 0 (alert) |
+| `vortex_channel_pool_utilisation` | > 0.9 sustained |
+| `vortex_channel_bad_seq_resyncs_total` | spike > 10/min |
+| `vortex_ingestion_cursor_lag_ledgers` | > 200 ledgers |
+| `vortex_ingestion_dead_letter_total` | > 0 (alert) |

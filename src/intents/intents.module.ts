@@ -22,6 +22,7 @@ import { SorobanModule } from "../soroban/soroban.module";
 import { AppConfig } from "../config/configuration";
 import { PrismaService } from "../prisma/prisma.service";
 import { GovernanceModule } from "../governance/governance.module";
+import { AbuseModule } from "../abuse/abuse.module";
 import { SignatureNonceService } from "../common/signature-nonce.service";
 import { EvmSignatureVerifier } from "../common/evm-signature";
 import { AuctionTickerService } from "../auctions/auction-ticker.service";

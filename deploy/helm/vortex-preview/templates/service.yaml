@@ -1,0 +1,22 @@
+{{/*
+Single ClusterIP Service in front of the previewed backend.
+
+One port, because the WS gateway shares the HTTP listener (`/ws` on the same
+port — see src/intents/intents.gateway.ts). That is also why the Ingress needs
+no separate WS rule.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vortex-preview.fullname" . }}
+  labels:
+    {{- include "vortex-preview.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "vortex-preview.selectorLabels" . | nindent 4 }}

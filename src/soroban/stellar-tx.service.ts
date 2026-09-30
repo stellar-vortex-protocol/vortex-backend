@@ -30,13 +30,11 @@ import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Account,
-  Address,
   BASE_FEE,
   Contract,
   FeeBumpTransaction,
   Operation,
   SorobanDataBuilder,
-  nativeToScVal,
   Networks,
   SorobanRpc,
   Transaction,
@@ -601,12 +599,27 @@ export class StellarTxService {
   ): Promise<Transaction> {
     const baseFee = await this.estimateBaseFee();
     const sequence = await this.resolveSimulationSequence(sourceAccount);
-    const contract = Address.fromString(params.contractId);
 
-    return new TransactionBuilder(new Account(sourceAccount, sequence), {
+    // `TransactionBuilder` emits `source.sequenceNumber() + 1` as the envelope's
+    // seqNum, so the account handed to it must sit one *below* the sequence the
+    // envelope should carry; passing `sequence` straight through would shift
+    // every envelope (42 -> 43, 501 -> 502, 0 -> 1).
+    const sourceSequence = (BigInt(sequence) - 1n).toString();
+
+    // Pin both ends of the window: `simulationTimeoutSeconds` sizes the
+    // *width* (worst-case queue drain), not "seconds from now", so the
+    // envelope does not silently stay valid for `now + window` seconds.
+    const now = Math.floor(Date.now() / 1000);
+
+    return new TransactionBuilder(new Account(sourceAccount, sourceSequence), {
       fee: baseFee,
       networkPassphrase: this.networkPassphrase,
     })
+      // Same envelope shape as `invokeContract` builds for the live path —
+      // the monitor is only useful if it simulates the call the chain would
+      // actually receive.
+      .addOperation(new Contract(params.contractId).call(params.method, ...params.args))
+      .setTimebounds(now, now + this.simulationTimeoutSeconds)
       .addOperation(
         // The SDK expects `func` to be a fully-formed xdr.HostFunction that
         // already carries its InvokeContractArgs; a bare enum value (and the

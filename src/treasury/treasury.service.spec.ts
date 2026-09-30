@@ -4,8 +4,21 @@ import { TreasuryService } from "./treasury.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { SorobanService } from "../soroban/soroban.service";
 
+/**
+ * The Prisma delegates this suite stubs. `jest.Mocked<T>` is shallow, so the
+ * model delegates (objects, not methods) would keep their real Prisma types;
+ * this local shape keeps every stub a `jest.Mock` with `mockResolvedValue`.
+ */
+type MockPrisma = {
+  feeLedger: { create: jest.Mock; findMany: jest.Mock };
+  slashLedger: { create: jest.Mock; findMany: jest.Mock };
+  refundLedger: { create: jest.Mock; findMany: jest.Mock };
+  treasurySnapshot: { upsert: jest.Mock; findMany: jest.Mock; findUnique: jest.Mock };
+};
+
 describe("TreasuryService", () => {
   let service: TreasuryService;
+  let prisma: MockPrisma;
   // The mock Prisma only carries the ledger delegates the service touches;
   // type as `any` so the per-method `mockResolvedValue` calls type-check
   // (jest.Mocked does not deep-transform nested Prisma delegates).
@@ -56,6 +69,7 @@ describe("TreasuryService", () => {
     }).compile();
 
     service = module.get<TreasuryService>(TreasuryService);
+    prisma = mockPrisma;
     // The mock Prisma only carries the ledger delegates the service touches;
     // cast to `any` so the per-method `mockResolvedValue` calls type-check
     // (jest.Mocked does not deep-transform nested Prisma delegates).

@@ -372,10 +372,10 @@ describe("IntentsService", () => {
       const stellarTxService = fakeStellarTxService();
       const svc = makeService({ onchainIntentsEnabled: false }, stellarTxService);
 
-      const intent = await service.create(validCreateData());
+      const intent = await svc.create(validCreateData());
 
       expect(stellarTxService.invokeContract).not.toHaveBeenCalled();
-      expect(await service.get(intent.intentId)).toEqual(intent);
+      expect(await svc.get(intent.intentId)).toEqual(intent);
     });
 
     it("invokes the settlement contract and preserves the Intent shape when the flag is on", async () => {

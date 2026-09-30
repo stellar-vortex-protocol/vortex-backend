@@ -1,13 +1,12 @@
 import { IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import { IsValidAddress } from "../../common/validators/is-valid-address.validator";
 
 const ED25519_SIGNATURE_MAX_LENGTH = 88;
 
 export class AcceptIntentDto {
-  @ApiProperty({ description: "Solver address accepting the intent", maxLength: 56 })
-  @IsString()
-  @MinLength(5)
-  @MaxLength(56)
+  @ApiProperty({ description: "Solver Stellar address accepting the intent", maxLength: 56 })
+  @IsValidAddress({ chain: "stellar", message: "solver must be a valid Stellar address (56-char G…)" })
   solver!: string;
 
   @ApiPropertyOptional({ description: "Single-use signing nonce", minLength: 16, maxLength: 128 })

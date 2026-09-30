@@ -1,0 +1,207 @@
+name: Load Tests
+
+on:
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Test scenario'
+        required: true
+        default: 'idle'
+        type: choice
+        options:
+          - idle
+          - filtered
+          - reconnect
+          - replay
+      vus:
+        description: 'Virtual users (connections)'
+        required: true
+        default: '100'
+      duration:
+        description: 'Test duration (e.g., 1m, 5m)'
+        required: true
+        default: '1m'
+
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: vortex
+          POSTGRES_PASSWORD: vortex
+          POSTGRES_DB: vortex
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install k6
+        run: |
+          wget https://github.com/grafana/k6/releases/download/v0.47.0/k6-v0.47.0-linux-amd64.tar.gz
+          tar -xzf k6-v0.47.0-linux-amd64.tar.gz
+          sudo mv k6-v0.47.0-linux-amd64/k6 /usr/local/bin/
+          k6 version
+
+      - name: Run migrations
+        run: npm run db:migrate:prod
+        env:
+          DATABASE_URL: postgresql://vortex:vortex@localhost:5432/vortex
+
+      - name: Build
+        run: npm run build
+
+      - name: Start server
+        run: |
+          npm start &
+          echo $! > server.pid
+          sleep 10
+        env:
+          DATABASE_URL: postgresql://vortex:vortex@localhost:5432/vortex
+          REDIS_URL: redis://localhost:6379
+          WS_BACKPLANE: memory
+          WS_MAX_CONNECTIONS: 1000
+          PORT: 4000
+
+      - name: Wait for server ready
+        run: |
+          timeout 30 bash -c 'until curl -f http://localhost:4000/health/ready; do sleep 2; done'
+
+      - name: Run k6 load test
+        id: k6_test
+        run: |
+          SCENARIO=${{ github.event.inputs.scenario || 'idle' }}
+          VUS=${{ github.event.inputs.vus || '100' }}
+          DURATION=${{ github.event.inputs.duration || '1m' }}
+          
+          k6 run \
+            --vus $VUS \
+            --duration $DURATION \
+            --env SCENARIO=$SCENARIO \
+            --env WS_URL=ws://localhost:4000/ws \
+            --env ENCODING=json \
+            --summary-export=k6-results.json \
+            --out json=k6-metrics.json \
+            test/load/k6/ws-capacity.js
+        continue-on-error: true
+
+      - name: Parse k6 results
+        if: always()
+        run: |
+          if [ -f k6-results.json ]; then
+            echo "## Load Test Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Scenario:** ${{ github.event.inputs.scenario || 'idle' }}" >> $GITHUB_STEP_SUMMARY
+            echo "**VUs:** ${{ github.event.inputs.vus || '100' }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Duration:** ${{ github.event.inputs.duration || '1m' }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            # Extract key metrics
+            jq -r '
+              .metrics | 
+              "| Metric | Value |",
+              "|--------|-------|",
+              "| Connections | \(.ws_connections_active.value // 0) |",
+              "| Messages Received | \(.ws_messages_received.count // 0) |",
+              "| p99 Latency | \(.ws_delivery_latency_ms.values["p(99)"] // 0)ms |",
+              "| HTTP Reqs | \(.http_reqs.count // 0) |"
+            ' k6-results.json >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check SLO compliance
+        if: always()
+        run: |
+          if [ -f k6-results.json ]; then
+            P99=$(jq -r '.metrics.ws_delivery_latency_ms.values["p(99)"] // 0' k6-results.json)
+            echo "p99 latency: ${P99}ms"
+            
+            # SLO: p99 < 250ms
+            if (( $(echo "$P99 > 250" | bc -l) )); then
+              echo "❌ SLO VIOLATION: p99 latency ${P99}ms exceeds 250ms threshold"
+              exit 1
+            else
+              echo "✅ SLO PASSED: p99 latency ${P99}ms within 250ms threshold"
+            fi
+          fi
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f server.pid ]; then
+            kill $(cat server.pid) || true
+          fi
+
+      - name: Upload k6 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-results
+          path: |
+            k6-results.json
+            k6-metrics.json
+          retention-days: 30
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (fs.existsSync('k6-results.json')) {
+              const results = JSON.parse(fs.readFileSync('k6-results.json', 'utf8'));
+              const p99 = results.metrics?.ws_delivery_latency_ms?.values?.['p(99)'] || 0;
+              const connections = results.metrics?.ws_connections_active?.value || 0;
+              const messages = results.metrics?.ws_messages_received?.count || 0;
+              
+              const comment = `## 🚀 Load Test Results
+              
+              **Scenario:** ${{ github.event.inputs.scenario || 'idle' }}
+              **Scale:** ${{ github.event.inputs.vus || '100' }} connections × ${{ github.event.inputs.duration || '1m' }}
+              
+              | Metric | Value | SLO |
+              |--------|-------|-----|
+              | p99 Latency | ${p99.toFixed(0)}ms | < 250ms ${p99 < 250 ? '✅' : '❌'} |
+              | Active Connections | ${connections} | - |
+              | Messages Delivered | ${messages} | - |
+              
+              [Full report](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+              `;
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            }

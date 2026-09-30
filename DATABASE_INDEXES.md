@@ -131,3 +131,22 @@ EXPLAIN ANALYZE
 ```
 
 Alert if `rows_examined / rows_returned > 10` for either query in production.
+
+---
+
+## Issue #386 / #387 / #388 — Transaction Confirmation & Channel Pool
+
+| Table | Index Name | Columns | Purpose |
+|-------|------------|---------|---------|
+| `pending_transactions` | `pending_tx_poll_idx` | `(status, next_poll_at)` | Fast fetch of due-for-poll rows by the confirmation poller |
+| `pending_transactions` | `pending_tx_intent_idx` | `(intent_id)` | Look up all pending txs for a given intent |
+| `pending_transactions` | `pending_transactions_tx_hash_key` | `(tx_hash)` | Unique constraint — prevents duplicate tracking entries |
+
+## Issue #389 — Event Ingestion Cursor
+
+| Table | Index Name | Columns | Purpose |
+|-------|------------|---------|---------|
+| `ingestion_cursor` | `ingestion_cursor_uniq` | `(network, contract_id)` | Unique cursor per (network, contract) — one row per contract |
+| `processed_events` | `processed_event_uniq` | `(ledger, event_index, contract_id, network)` | Deduplication — prevents double-processing after restart |
+| `processed_events` | `processed_event_lookup_idx` | `(ledger, event_index)` | Fast range-scan during gap backfill |
+| `dead_letter_events` | `dead_letter_event_idx` | `(ledger, event_index)` | Ops investigation and replay of dead-lettered events |

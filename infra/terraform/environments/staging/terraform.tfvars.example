@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (gitignored) and fill in your values.
+project_id            = "my-gcp-project"
+region                = "us-central1"
+health_check_host     = "api.staging.vortex.example.com"
+kms_key_id            = "projects/my-gcp-project/locations/us-central1/keyRings/vortex-staging/cryptoKeys/main"
+notification_channels = []

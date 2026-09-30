@@ -115,12 +115,25 @@ const CONTRACT_REVERT_MARKERS: readonly string[] = [
 ];
 
 /**
+ * Markers that identify a *hard* failure: the contract was never executed, so
+ * no verdict about it can be reached.
+ *
+ * Checked before {@link CONTRACT_REVERT_MARKERS} because a host error string
+ * can carry both — `HostError: Error(WasmVm, InvalidAction) missing export`
+ * names a WasmVm error *and* proves the module could not be loaded. The
+ * missing export is the more specific fact: calling it a contract rejection
+ * would blame the contract for a deployment problem.
+ */
+const HARD_FAILURE_MARKERS: readonly string[] = ["missing export"];
+
+/**
  * True when a simulation error string looks like a contract-level guard
  * failure rather than a hard error.
  */
 export function isContractRevert(detail: string | undefined): boolean {
   if (!detail) return false;
   const lower = detail.toLowerCase();
+  if (HARD_FAILURE_MARKERS.some((marker) => lower.includes(marker))) return false;
   return CONTRACT_REVERT_MARKERS.some((marker) => lower.includes(marker));
 }
 

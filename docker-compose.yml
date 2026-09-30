@@ -135,6 +135,67 @@ services:
       - ./ops/observability/tempo.yml:/etc/tempo/tempo.yml:ro
       - tempo-data:/var/tempo
 
+  # ── Chaos test profile ────────────────────────────────────────────────────
+  # Brought up with:  docker compose --profile chaos up -d
+  #
+  # Toxiproxy fronts every external dependency so individual chaos scenarios
+  # can inject latency, packet loss, bandwidth throttling, and TCP resets
+  # without modifying the application or its configuration.
+  #
+  # The app-chaos service overrides dependency URLs to point at Toxiproxy
+  # endpoints instead of the real services.
+  #
+  # Admin API:  http://localhost:8474   (add/remove toxics)
+  # TCP proxies (see test/chaos/toxiproxy.json for full list):
+  #   postgres   → localhost:25432
+  #   redis      → localhost:26379
+  #   soroban    → localhost:28080
+  #   horizon    → localhost:28001
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: vortex-toxiproxy
+    restart: unless-stopped
+    profiles: ["chaos"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8474:8474"   # Toxiproxy HTTP API
+      - "25432:25432" # postgres proxy
+      - "26379:26379" # redis proxy
+      - "28080:28080" # soroban-rpc proxy
+      - "28001:28001" # horizon proxy
+    volumes:
+      - ./test/chaos/toxiproxy.json:/etc/toxiproxy/config.json:ro
+    command: ["-host=0.0.0.0", "-config=/etc/toxiproxy/config.json"]
+
+  app-chaos:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vortex-backend-chaos
+    profiles: ["chaos"]
+    depends_on:
+      toxiproxy:
+        condition: service_started
+    environment:
+      <<: *app-env
+      # Override connection URLs to route through Toxiproxy
+      DATABASE_URL: postgresql://vortex:vortex@toxiproxy:25432/vortex?schema=public
+      REDIS_URL: redis://toxiproxy:26379
+      SOROBAN_RPC_URL: http://toxiproxy:28080
+      HORIZON_URL: http://toxiproxy:28001
+      PORT: 4002
+      # Chaos tests are allowlisted to bypass abuse detection
+      ABUSE_ALLOWLIST: "GCHAOSTEST000000000000000000000000000000000000000000000000"
+    ports:
+      - "4002:4002"
+    volumes:
+      - .:/app
+    command: sh -c "npx prisma migrate deploy && npm run dev -- --host 0.0.0.0"
+
   # Extra horizontally-scaled job worker: `docker compose --profile worker up`.
   worker:
     profiles: ["worker"]
