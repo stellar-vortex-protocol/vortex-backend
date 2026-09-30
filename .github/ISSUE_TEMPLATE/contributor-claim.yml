@@ -1,0 +1,61 @@
+name: Contributor Claim (Drips Wave)
+description: Signal that you are picking up a numbered item from issues.md.
+title: "[Claim]: #<issue-number> — <short title>"
+labels: ["claim", "drips-wave"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to claim a numbered issue from
+        [issues.md](../blob/main/issues.md) so other contributors know it is
+        being worked on.  One claim per person per issue; duplicate claims on
+        the same item will be closed.
+
+  - type: input
+    id: issue_number
+    attributes:
+      label: Issue number (from issues.md)
+      description: The `#NNN` identifier listed in issues.md.
+      placeholder: "e.g. #298"
+    validations:
+      required: true
+
+  - type: input
+    id: issue_title
+    attributes:
+      label: Issue title
+      description: The title as it appears in issues.md.
+      placeholder: "e.g. Restrict access to GET /metrics"
+    validations:
+      required: true
+
+  - type: textarea
+    id: plan
+    attributes:
+      label: Brief implementation plan
+      description: |
+        A 2–5 sentence summary of how you plan to tackle it.
+        This is to surface approach mismatches early, not to gate your work.
+      placeholder: |
+        I'll add a MetricsTokenGuard that reads METRICS_TOKEN from env …
+    validations:
+      required: true
+
+  - type: input
+    id: eta
+    attributes:
+      label: Estimated PR date
+      description: Rough target (week or sprint).  We use this to reclaim stale items.
+      placeholder: "e.g. 2025-11-15 or 'within 2 weeks'"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: The item is not already assigned or claimed in issues.md / open PRs.
+          required: true
+        - label: I have read CONTRIBUTING.md and understand the PR checklist.
+          required: true

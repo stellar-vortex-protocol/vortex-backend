@@ -11,7 +11,8 @@ of the multi-repo Vortex stack — see also
 [`vortex-contract`](https://github.com/vortex-protocol/vortex-contract) and
 [`vortex-frontend`](https://github.com/vortex-protocol/vortex-frontend).
 
-> The relay currently uses an in-memory store and mock data. Read-only
+> Intents persist to Postgres in production (`INTENTS_STORE=postgres`); local
+> development defaults to an in-memory store seeded with mock data. Read-only
 > Soroban RPC access is live (`/api/v1/chain/*`); writing intent state
 > on-chain is still on the roadmap.
 
@@ -27,7 +28,7 @@ GET  /api/v1/intents              — list intents (filter by state, user, chain
 GET  /api/v1/intents/open         — all open intents (solver view)
 GET  /api/v1/intents/:id          — single intent
 GET  /api/v1/intents/user/:addr   — intents for a user
-POST /api/v1/intents              — create intent
+POST /api/v1/intents              — create intent (oracle-checked minDstAmount; 201 includes fairValue + slippageBps)
 POST /api/v1/intents/:id/accept   — solver accepts
 POST /api/v1/intents/:id/fill     — solver fills
 POST /api/v1/intents/:id/cancel   — user cancels
@@ -35,6 +36,9 @@ POST /api/v1/intents/quote        — get best quote from solvers
 GET  /api/v1/solvers              — solver leaderboard
 GET  /api/v1/solvers/:addr/stats  — solver performance stats
 GET  /api/v1/tokens               — supported tokens (filter by chain)
+POST /api/v1/admin/tokens         — register a token (admin key, on-chain metadata check)
+PATCH /api/v1/admin/tokens        — update status or re-verified metadata
+DELETE /api/v1/admin/tokens       — soft-delist a token (existing intents keep working)
 GET  /api/v1/stats                — protocol stats
 GET  /health                      — service health
 WS   /ws                          — real-time intent feed
@@ -152,8 +156,9 @@ from those that are safe to leave at their testnet/dev defaults.
 | `SOLVER_REGISTRY_CONTRACT_ID` | Yes (on-chain path) | No | 56-char Stellar contract ID of the deployed solver-registry contract |
 | `STELLAR_NETWORK` | Yes | No | Set to `mainnet`; default is `testnet` |
 | `SOROBAN_RPC_URL` | Yes | No | A production-grade Soroban RPC endpoint; the default points at the public testnet |
-| `INTENTS_PERSISTENCE` | Recommended | `memory` | Set to `prisma` to persist intents to Postgres across restarts; `memory` loses all state on restart |
+| `INTENTS_STORE` | Yes — set to `postgres` | `memory` | `memory` loses all intents on restart and cannot scale horizontally. Promote via `dual` per [`docs/runbooks/intents-store-migration.md`](./docs/runbooks/intents-store-migration.md). `INTENTS_PERSISTENCE=prisma` is a deprecated alias for `postgres` |
 | `SOLVERS_PERSISTENCE` | Recommended | `memory` | Set to `prisma` to persist solver registry to Postgres; `memory` loses solver state on restart |
+| `EVM_DEPOSIT_VERIFICATION_ENABLED` | Yes — set to `true` | `false` | EVM-source intents are hidden from solvers until the escrow deposit is confirmed; needs `EVM_RPC_URLS` and `EVM_ESCROW_ADDRESSES`. See [`docs/runbooks/evm-deposit-verification.md`](./docs/runbooks/evm-deposit-verification.md) |
 | `SOROBAN_FEE_PERCENTILE` | Recommended | `p50` | Raise to `p90` on mainnet for better confirmation speed under load |
 | `WS_MAX_CONNECTIONS` | Recommended | `1000` | Tune to expected solver + frontend connection count |
 | `SENTRY_DSN` | Recommended | — (Sentry disabled) | Set to your Sentry project DSN for error alerting |
@@ -161,6 +166,10 @@ from those that are safe to leave at their testnet/dev defaults.
 | `LEADER_ELECTION_ENABLED` | Recommended (multi-replica) | `false` | Set to `true` when running N > 1 replicas to ensure singleton workers run on exactly one pod. Requires `DATABASE_URL` to point at a live Postgres instance. **Do not use PgBouncer in transaction-pooling mode** — see [Leader Election runbook](./docs/runbooks/leader-election.md). |
 | `LEADER_ELECTION_HEARTBEAT_MS` | Optional | `5000` | Heartbeat interval in ms. Lower = faster failover, higher DB load. Default gives ≤ 15 s failover. |
 | `PORT` | Optional | `4000` | Change if the container port mapping differs |
+| `MAX_USER_SLIPPAGE_BPS` | Optional | `100` | Max user slippage vs oracle fair `minDstAmount` (1% default). Higher slippage requires a signed `acknowledgeHighSlippage`. |
+| `MAX_PREMIUM_BPS` | Optional | `50` | Max `minDstAmount` premium above oracle fair value; always rejected above this. |
+| `ORACLE_FAIL_OPEN_MAX_USD` | Optional | `100` | When oracle prices are missing/stale, intents with source notional at or below this USD amount are still created. |
+| `ORACLE_MAX_STALENESS_MS` | Optional | `60000` | Price snapshots older than this are treated as unavailable. |
 
 For a production `.env` template, copy `.env.mainnet.example` — every
 `<CHANGE_ME>` value corresponds to a "required for production" row above.
@@ -197,8 +206,10 @@ versus **planned** (schema/token data in place, on-chain settlement pending).
 | Optimism | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
 | Avalanche | 🔲 Planned | Token registry populated; on-chain integration not yet implemented |
 
-> **Contributor note:** EVM chains are accepted in the intent DTO and stored
-> in-memory, but no on-chain settlement or bridging logic is wired up yet.
+> **Contributor note:** EVM chains are accepted in the intent DTO. With
+> `EVM_DEPOSIT_VERIFICATION_ENABLED=true` the backend confirms the user's
+> escrow deposit (`src/chains/evm/`) before the intent is offered to solvers;
+> no settlement or bridging logic is wired up yet.
 > See [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md)
 > for the target design.
 
@@ -207,7 +218,8 @@ versus **planned** (schema/token data in place, on-chain settlement pending).
 ## Roadmap
 
 - [x] **Soroban RPC reads** — health/ledger/network/account lookups via `/api/v1/chain/*`
-- [ ] **On-chain writes** — replace the in-memory intent store with real Soroban transactions (target design: [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md))
+- [x] **Durable intent store** — intents persist to Postgres (`INTENTS_STORE=postgres`) with atomic SQL transitions, optimistic concurrency (`ETag` / `If-Match`) and cross-replica idempotency; migration via a dual-write phase ([runbook](./docs/runbooks/intents-store-migration.md))
+- [ ] **On-chain writes** — back intent state transitions with real Soroban transactions (target design: [`docs/architecture/onchain-settlement.md`](./docs/architecture/onchain-settlement.md))
 - [x] **Solver WS client** — reference implementation for a solver bot (`npm run solver:demo`, see [`scripts/README.md`](./scripts/README.md))
 
 ---

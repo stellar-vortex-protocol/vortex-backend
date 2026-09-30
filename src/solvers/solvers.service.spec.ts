@@ -98,4 +98,29 @@ describe("SolversService", () => {
     expect(solver?.isActive).toBe(false);
     expect((await service.get(ALPHA_ADDR))?.isActive).toBe(false);
   });
+
+  describe("rollbackPenalty durable fallback (#397)", () => {
+    it("reverts fillsFailed from the solver address when the in-memory penalty is gone", async () => {
+      await service.recordFailedFill(ALPHA_ADDR, "intent-x");
+      const bumped = (await service.get(ALPHA_ADDR))!.fillsFailed;
+      (service as unknown as { pendingPenalties: Map<string, unknown> }).pendingPenalties.clear();
+
+      const result = await service.rollbackPenalty("intent-x", ALPHA_ADDR);
+      expect(result?.fillsFailed).toBe(bumped - 1);
+    });
+
+    it("returns null for an unknown solver and keeps the legacy no-record behaviour without an address", async () => {
+      expect(await service.rollbackPenalty("intent-y", "GUNKNOWN")).toBeNull();
+      expect(await service.rollbackPenalty("intent-y")).toBeNull();
+    });
+
+    it("uses the in-memory record when present", async () => {
+      await service.recordFailedFill(ALPHA_ADDR, "intent-z");
+      const bumped = (await service.get(ALPHA_ADDR))!.fillsFailed;
+      await service.rollbackPenalty("intent-z", ALPHA_ADDR);
+      expect((await service.get(ALPHA_ADDR))!.fillsFailed).toBe(bumped - 1);
+      // Second rollback is a no-op: the record is now "failed", not missing.
+      expect(await service.rollbackPenalty("intent-z", ALPHA_ADDR)).toBeNull();
+    });
+  });
 });

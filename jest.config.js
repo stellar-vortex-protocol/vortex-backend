@@ -27,7 +27,7 @@ module.exports = {
       testPathIgnorePatterns: ["/scripts/"],
       collectCoverageFrom: ["**/*.(t|j)s"],
       moduleNameMapper: {
-        "^@nestjs/schedule$": "<rootDir>/../test/__mocks__/@nestjs/schedule.ts",
+        "^@nestjs/schedule$": "<rootDir>/../test/__mocks__/nestjs-schedule.ts",
       },
     },
 
@@ -46,9 +46,6 @@ module.exports = {
             tsconfig: "./tsconfig.scripts.json",
           },
         ],
-      },
-      moduleNameMapper: {
-        "^@nestjs/schedule$": "<rootDir>/test/__mocks__/@nestjs/schedule.ts",
       },
     },
   ],

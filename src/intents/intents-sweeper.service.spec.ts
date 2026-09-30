@@ -6,7 +6,7 @@ import { KillSwitchService } from "../killswitch/killswitch.service";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
-import { SolverRegistryService } from "../soroban/solver-registry.service";
+import { SlashingPipelineService } from "./slashing-pipeline.service";
 import { MetricsService } from "../metrics/metrics.service";
 import { InMemorySolversRepository } from "../solvers/in-memory-solvers.repository";
 import { SOLVERS_REPOSITORY } from "../solvers/solvers.repository";
@@ -51,7 +51,7 @@ function buildIntentsService(): IntentsService {
   const protocolParams = {
     snapshotForChain: jest.fn().mockReturnValue({ version: 0, feeBps: 30, deadlineSeconds: 1800, fillWindowSeconds: 600, capturedAt: new Date().toISOString() }),
   } as unknown as ProtocolParamsService;
-  return new IntentsService(repo, configService, stellarTxService, prismaService, protocolParams);
+  return new IntentsService(repo, configService, stellarTxService, prismaService, undefined, undefined, protocolParams);
 }
 
 async function buildSolversService(): Promise<SolversService> {
@@ -68,7 +68,7 @@ describe("IntentsSweeperService", () => {
   let intentsService: IntentsService;
   let gateway: IntentsGateway;
   let solversService: SolversService;
-  let solverRegistryService: jest.Mocked<SolverRegistryService>;
+  let slashingPipeline: jest.Mocked<Pick<SlashingPipelineService, "detect">>;
   let metricsService: jest.Mocked<Pick<MetricsService, "recordSweep">>;
   let killSwitch: jest.Mocked<Pick<KillSwitchService, "evaluateTarget">>;
   let sweeper: IntentsSweeperService;
@@ -77,13 +77,13 @@ describe("IntentsSweeperService", () => {
     intentsService = buildIntentsService();
     gateway = { broadcast: jest.fn().mockResolvedValue(undefined) } as unknown as IntentsGateway;
     solversService = await buildSolversService();
-    solverRegistryService = {
-      slashSolver: jest.fn().mockResolvedValue({
-        submitted: false,
-        simulated: false,
-        detail: "not configured — no-op",
-      }),
-    } as unknown as jest.Mocked<SolverRegistryService>;
+    slashingPipeline = {
+      detect: jest.fn().mockImplementation(async (input) => ({
+        ...input,
+        state: "challenge_window",
+        challengeEndsAt: new Date((input.detectedAt + 600) * 1000),
+      })),
+    } as unknown as jest.Mocked<Pick<SlashingPipelineService, "detect">>;
     metricsService = { recordSweep: jest.fn() } as unknown as jest.Mocked<Pick<MetricsService, "recordSweep">>;
     // Default: no pause active, so existing sweeper expectations are unchanged.
     killSwitch = {
@@ -94,7 +94,7 @@ describe("IntentsSweeperService", () => {
       intentsService,
       gateway,
       solversService,
-      solverRegistryService,
+      slashingPipeline as unknown as SlashingPipelineService,
       metricsService as unknown as MetricsService,
       killSwitch as unknown as KillSwitchService,
       noopLeaderElection(),
@@ -111,7 +111,7 @@ describe("IntentsSweeperService", () => {
       minDstAmount: "990000",
       deadline: deadline + 10_000, // create as open with a far-future deadline first
     });
-    await intentsService.update(intent.intentId, { state: "accepted", solver, deadline });
+    await intentsService.update(intent.intentId, { state: "accepted", solver, deadline }, (await intentsService.get(intent.intentId))!.version);
     return intent.intentId;
   }
 
@@ -149,8 +149,9 @@ describe("IntentsSweeperService", () => {
     expect(gateway.broadcast).toHaveBeenCalledWith(
       expect.objectContaining({ type: "intent_slashed", intentId, solver: ALPHA_ADDR }),
     );
-    expect(solverRegistryService.slashSolver).toHaveBeenCalledWith(
-      expect.objectContaining({ solverAddress: ALPHA_ADDR, intentId }),
+    // Issue #397: the sweeper only detects — the saga owns the on-chain slash.
+    expect(slashingPipeline.detect).toHaveBeenCalledWith(
+      expect.objectContaining({ solverAddress: ALPHA_ADDR, intentId, fillDeadline: past }),
     );
   });
 
@@ -184,7 +185,7 @@ describe("IntentsSweeperService", () => {
     await sweeper.sweep();
 
     expect((await intentsService.get(intentId))?.state).toBe("accepted");
-    expect(solverRegistryService.slashSolver).not.toHaveBeenCalled();
+    expect(slashingPipeline.detect).not.toHaveBeenCalled();
   });
 
   it("does not throw if an accepted intent somehow has no solver on record", async () => {
@@ -198,11 +199,11 @@ describe("IntentsSweeperService", () => {
       minDstAmount: "990000",
       deadline: past + 10_000,
     });
-    await intentsService.update(intent.intentId, { state: "accepted", deadline: past });
+    await intentsService.update(intent.intentId, { state: "accepted", deadline: past }, (await intentsService.get(intent.intentId))!.version);
 
     await expect(sweeper.sweep()).resolves.not.toThrow();
     expect((await intentsService.get(intent.intentId))?.state).toBe("slashed");
-    expect(solverRegistryService.slashSolver).not.toHaveBeenCalled();
+    expect(slashingPipeline.detect).not.toHaveBeenCalled();
   });
 
   // ── #259: MetricsService integration ────────────────────────────────────
@@ -271,7 +272,7 @@ describe("IntentsSweeperService", () => {
       // Not slashed — the pause, not the solver, caused the missed fill.
       expect(result.slashedCount).toBe(0);
       expect(result.extendedDeadlines).toBe(1);
-      expect(solverRegistryService.slashSolver).not.toHaveBeenCalled();
+      expect(slashingPipeline.detect).not.toHaveBeenCalled();
 
       const updated = await intentsService.get(intentId);
       expect(updated?.state).toBe("accepted");
@@ -342,11 +343,97 @@ describe("IntentsSweeperService", () => {
 
       // Resumed, and the window has since elapsed again.
       killSwitch.evaluateTarget.mockReturnValue({ paused: false, matched: null, matchedChain: [] });
-      await intentsService.update(intentId, { deadline: past });
+      await intentsService.update(intentId, { deadline: past }, (await intentsService.get(intentId))!.version);
 
       const result = await sweeper.sweep();
       expect(result.slashedCount).toBe(1);
       expect((await intentsService.get(intentId))?.state).toBe("slashed");
+    });
+  });
+
+  // ── #405: optimistic concurrency against late sweeper writes ────────────
+
+  describe("optimistic concurrency (issue #405)", () => {
+    /** Make the sweeper act on a snapshot taken *before* a concurrent write. */
+    async function sweepWithStaleSnapshot(intentId: string, concurrentWrite: () => Promise<unknown>) {
+      const stale = (await intentsService.get(intentId))!;
+      await concurrentWrite();
+      const realGetByState = intentsService.getByState.bind(intentsService);
+      jest
+        .spyOn(intentsService, "getByState")
+        .mockImplementation(async (state) =>
+          state === stale.state ? [stale] : realGetByState(state),
+        );
+      return sweeper.sweep();
+    }
+
+    it("never slashes a fill that landed after the sweeper read the intent", async () => {
+      const past = Math.floor(Date.now() / 1000) - 10;
+      const intentId = await makeAcceptedIntent(past);
+
+      const result = await sweepWithStaleSnapshot(intentId, () =>
+        // `now` just before the lapsed deadline: the fill genuinely won the race.
+        intentsService.fillIfAccepted(intentId, ALPHA_ADDR, { fillAmount: "995000", filledAt: past - 5, txHash: "h" }, past - 5),
+      );
+
+      expect((await intentsService.get(intentId))?.state).toBe("filled");
+      expect(result.slashedCount).toBe(0);
+      expect(solverRegistryService.slashSolver).not.toHaveBeenCalled();
+    });
+
+    it("re-reads and still slashes when the concurrent write left it accepted and overdue", async () => {
+      const past = Math.floor(Date.now() / 1000) - 10;
+      const intentId = await makeAcceptedIntent(past);
+
+      const result = await sweepWithStaleSnapshot(intentId, async () => {
+        const current = (await intentsService.get(intentId))!;
+        await intentsService.update(intentId, { quotedDstAmount: "1" }, current.version);
+      });
+
+      const final = (await intentsService.get(intentId))!;
+      expect(final.state).toBe("slashed");
+      expect(final.quotedDstAmount).toBe("1"); // the concurrent write was not lost
+      expect(result.slashedCount).toBe(1);
+    });
+
+    it("never expires an intent a user cancelled after the sweeper read it", async () => {
+      const past = Math.floor(Date.now() / 1000) - 10;
+      const intent = await intentsService.create({
+        user: "GTEST...0003",
+        srcChain: "stellar",
+        srcToken: { address: "native", symbol: "XLM", name: "Stellar Lumens", decimals: 7, chain: "stellar" },
+        srcAmount: "1000000",
+        dstToken: { contract: "CTEST", symbol: "USDC", decimals: 7 },
+        minDstAmount: "990000",
+        deadline: past,
+      });
+
+      const result = await sweepWithStaleSnapshot(intent.intentId, () => intentsService.cancelIfOpen(intent.intentId));
+
+      expect((await intentsService.get(intent.intentId))?.state).toBe("cancelled");
+      expect(result.expiredCount).toBe(0);
+    });
+
+    it("gives up after MAX_VERSION_RETRIES under sustained contention", async () => {
+      const past = Math.floor(Date.now() / 1000) - 10;
+      const intentId = await makeAcceptedIntent(past);
+      const slash = jest.spyOn(intentsService, "slashIfAccepted");
+      // Every attempt races a concurrent writer that bumps the version first.
+      slash.mockImplementation(async (id, patch, expectedVersion) => {
+        const current = (await intentsService.get(id))!;
+        await intentsService.update(id, { quotedDstAmount: String(Math.random()) }, current.version);
+        return (intentsService as unknown as { repo: InMemoryIntentsRepository }).repo.slashIfAccepted(
+          id,
+          patch,
+          expectedVersion,
+        );
+      });
+
+      const result = await sweeper.sweep();
+
+      expect(slash).toHaveBeenCalledTimes(3);
+      expect(result.slashedCount).toBe(0);
+      expect((await intentsService.get(intentId))?.state).toBe("accepted");
     });
   });
 });

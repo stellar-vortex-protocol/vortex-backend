@@ -1,0 +1,71 @@
+{
+  "_comment": "Compiled from MockEscrow.sol with solc 0.8.24 (forge build). Regenerate if the .sol changes.",
+  "abi": [
+    {
+      "type": "function",
+      "name": "deposit",
+      "inputs": [
+        {
+          "name": "intentId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "token",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "user",
+          "type": "string",
+          "internalType": "string"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "event",
+      "name": "Deposited",
+      "inputs": [
+        {
+          "name": "intentId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "token",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "depositor",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "user",
+          "type": "string",
+          "indexed": false,
+          "internalType": "string"
+        }
+      ],
+      "anonymous": false
+    }
+  ],
+  "bytecode": "0x608060405234801561000f575f80fd5b506103368061001d5f395ff3fe608060405234801561000f575f80fd5b5060043610610029575f3560e01c80632232abc41461002d575b5f80fd5b610047600480360381019061004291906101e3565b610049565b005b3373ffffffffffffffffffffffffffffffffffffffff168473ffffffffffffffffffffffffffffffffffffffff16867fddafcb56db57c9d3b48a9aacdd3de7f13dc5a89b23ee1485c5d71f92cffc78458686866040516100ab939291906102d0565b60405180910390a45050505050565b5f80fd5b5f80fd5b5f819050919050565b6100d4816100c2565b81146100de575f80fd5b50565b5f813590506100ef816100cb565b92915050565b5f73ffffffffffffffffffffffffffffffffffffffff82169050919050565b5f61011e826100f5565b9050919050565b61012e81610114565b8114610138575f80fd5b50565b5f8135905061014981610125565b92915050565b5f819050919050565b6101618161014f565b811461016b575f80fd5b50565b5f8135905061017c81610158565b92915050565b5f80fd5b5f80fd5b5f80fd5b5f8083601f8401126101a3576101a2610182565b5b8235905067ffffffffffffffff8111156101c0576101bf610186565b5b6020830191508360018202830111156101dc576101db61018a565b5b9250929050565b5f805f805f608086880312156101fc576101fb6100ba565b5b5f610209888289016100e1565b955050602061021a8882890161013b565b945050604061022b8882890161016e565b935050606086013567ffffffffffffffff81111561024c5761024b6100be565b5b6102588882890161018e565b92509250509295509295909350565b6102708161014f565b82525050565b5f82825260208201905092915050565b828183375f83830152505050565b5f601f19601f8301169050919050565b5f6102af8385610276565b93506102bc838584610286565b6102c583610294565b840190509392505050565b5f6040820190506102e35f830186610267565b81810360208301526102f68184866102a4565b905094935050505056fea2646970667358221220d52872843523434e19d9089d7a886704b01c00fc299ce72bca611ec9d0a1e41664736f6c63430008180033"
+}

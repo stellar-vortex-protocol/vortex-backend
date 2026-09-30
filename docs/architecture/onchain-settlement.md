@@ -1,5 +1,10 @@
 # Architecture: On-Chain Settlement (Target Design)
 
+> **Update (issues #396 / #397):** the write-side plumbing below now exists —
+> see [Transactional outbox](#transactional-outbox) and
+> [Slashing saga](#slashing-saga). Contract method names remain provisional
+> until the ADR (issue #19) fixes the interface.
+>
 > **Status: target architecture, not yet implemented.** As of this writing,
 > `IntentsService` and `SolversService` are in-memory `Map`s
 > (`src/intents/intents.service.ts`, `src/solvers/solvers.service.ts`), and
@@ -166,6 +171,84 @@ transactions.
   above on a narrower surface (sweeper-triggered only, no user-facing HTTP
   write path).
 
+## Transactional outbox
+
+*Implemented — issue #396.* Stage 1 above ("HTTP request → Soroban tx") no
+longer submits inside the request. Submitting a transaction and writing
+Postgres as two separate steps is a dual write: a crash in between leaves the
+database saying "accepted" while the transaction never went out, or the
+reverse. Instead:
+
+```mermaid
+sequenceDiagram
+    participant API as IntentsService
+    participant DB as Postgres
+    participant Relay as OutboxRelayService
+    participant Chain as Soroban
+
+    API->>DB: BEGIN; UPDATE intents …; INSERT onchain_outbox (pending); COMMIT
+    loop every OUTBOX_RELAY_INTERVAL_MS
+        Relay->>DB: claim due head-of-intent rows (FOR UPDATE SKIP LOCKED) → processing
+        Relay->>Relay: build + simulate + sign
+        Relay->>DB: store envelope_hash (fenced on attempts)
+        Relay->>Chain: sendTransaction
+        Relay->>DB: status = submitted, tx_hash
+        Relay->>Chain: getTransaction(tx_hash) (TxConfirmationService)
+        Relay->>DB: status = confirmed
+    end
+```
+
+- **Atomicity.** `IntentsService` runs `create` / `acceptIfOpen` /
+  `fillIfAccepted` / `cancelIfOpen` through `IIntentsUnitOfWork`
+  (`src/intents/intents.unit-of-work.ts`). The Prisma adapter wraps the
+  intent write and the `onchain_outbox` insert in one `$transaction`. A
+  transition whose guard fails (lost race) enqueues nothing. With
+  `ONCHAIN_INTENTS_ENABLED=false` the outbox is bypassed entirely.
+- **Fail fast.** The payload is encoded to contract arguments at enqueue time,
+  so malformed input (bad address, non-integer amount) fails the HTTP request
+  rather than becoming a poison row.
+- **Ordering.** `onchain_outbox.id` is a sequence. A row is only claimable when
+  every earlier row for the same `intent_id` is `confirmed` or `simulated`,
+  so one intent's operations apply in order while different intents run in
+  parallel. `SKIP LOCKED` lets several relay instances share the work.
+- **Crash idempotency.** The signed envelope hash is persisted *before*
+  broadcast. A worker that dies mid-submit leaves the row `processing`; after
+  `OUTBOX_LEASE_SECONDS` it is reclaimed, and the relay first looks the stored
+  hash up: `SUCCESS` → confirm without resubmitting; `FAILED` → retry;
+  `NOT_FOUND` → rebuild. `NOT_FOUND` is conclusive only because the lease
+  (120 s) outlives the transaction's 30 s time bound
+  (`INVOKE_TX_TIMEOUT_SECONDS`). Every post-claim write is fenced on
+  `attempts`, so a worker whose lease expired cannot clobber a reclaimed row.
+- **Retries and poison rows.** Failures back off exponentially (1 s doubling,
+  capped at 5 min). After `OUTBOX_MAX_ATTEMPTS` claims a row becomes `dead`,
+  `vortex_outbox_dead_total` increments (alerted), and it blocks its intent
+  until requeued via `POST /api/v1/admin/outbox/:id/requeue`.
+- **Dry run.** Under `ONCHAIN_DRY_RUN=true` rows end as `simulated` (terminal).
+  They are not replayed when dry-run is later switched off.
+- **Out of scope:** cross-service delivery (Kafka etc.).
+
+Row lifecycle: `pending → processing → submitted → confirmed`, with
+`processing → simulated` (dry run), back to `pending` on retry, and `dead`
+past the attempt limit.
+
+## Slashing saga
+
+*Implemented — issue #397.* The `accepted → slashed` row of the mapping table
+runs as a durable saga (`src/intents/slashing-pipeline.service.ts`, table
+`pending_slashes`):
+
+`detected → challenge_window → submitted → confirmed | cancelled`
+
+The sweeper only *detects*. The slash is broadcast after a configurable
+challenge window, and only after the chain has been re-checked for a fill that
+landed by `fillDeadline + SLASH_CLOCK_SKEW_TOLERANCE_SECONDS` (by ledger close
+time, so server clock skew can't cause a wrong slash). A unique constraint on
+`intent_id` makes it exactly-once. Cancellation (solver fill-proof, admin, or
+giving up after `SLASH_MAX_SUBMIT_ATTEMPTS`) runs the compensation
+(`SolversService.rollbackPenalty`, intent leaves `slashed`) exactly once. The
+operator procedure is in
+[`docs/runbooks/slash-cancellation.md`](../runbooks/slash-cancellation.md).
+
 ## Persistence layer
 
 Both `IntentsService` and `SolversService` delegate all storage to an
@@ -180,8 +263,9 @@ Two concrete adapters ship for each:
 
 | Adapter | Module constant | When to use |
 |---|---|---|
-| `InMemoryIntentsRepository` | `INTENTS_PERSISTENCE=memory` (default) | Development, tests — no database required |
-| `PrismaIntentsRepository` | `INTENTS_PERSISTENCE=prisma` | Production / staging — persists to the `intents` table |
+| `InMemoryIntentsRepository` | `INTENTS_STORE=memory` (default) | Development, tests — no database required |
+| `DualWriteIntentsRepository` | `INTENTS_STORE=dual` | Migration phase — memory reads, Postgres mirror, consistency verifier |
+| `PrismaIntentsRepository` | `INTENTS_STORE=postgres` | Production / staging — persists to the `intents` table |
 | `InMemorySolversRepository` | `SOLVERS_PERSISTENCE=memory` (default) | Development, tests |
 | `PrismaSolversRepository` | `SOLVERS_PERSISTENCE=prisma` | Production / staging — persists to the `solvers` table |
 
@@ -193,11 +277,14 @@ guarantee:
 
 - **In-memory adapter** — the Node.js event loop is single-threaded, so a
   plain state-guard read-then-write is atomic within a single process.
-- **Prisma adapter** — uses a single `prisma.intent.updateMany({
-  where: { intentId, state: 'open' }, data: ... })` call; the database
-  enforces the condition atomically.  A `count === 0` result means another
-  writer won the race.  This guarantee holds across multiple horizontally
-  scaled API instances.
+- **Prisma adapter** — every transition is one
+  `UPDATE intents SET … , version = version + 1 WHERE intent_id = $1 AND
+  state = 'open' [AND version = $2] RETURNING *` statement; the database
+  enforces the condition atomically. Zero rows means another writer won the
+  race (or, with an expected version, a `VersionConflict` — issue #405). This
+  guarantee holds across horizontally scaled API instances. The shared
+  contract suite (`src/intents/intents-repository.contract.ts`) runs against
+  every adapter.
 
 The `fillIfAccepted` path additionally guards on `solver === <address>` in
 the WHERE clause so a different solver can never accidentally fill another
@@ -205,7 +292,8 @@ solver's accepted intent.
 
 ### Switching adapters
 
-Set `INTENTS_PERSISTENCE=prisma` and `SOLVERS_PERSISTENCE=prisma` in your
+Set `INTENTS_STORE=postgres` (via `dual` — see
+`docs/runbooks/intents-store-migration.md`) and `SOLVERS_PERSISTENCE=prisma` in your
 environment (see the Docker production deployment section in `README.md`).
 `DATABASE_URL` must point to a running Postgres instance with migrations
 applied (`npm run db:migrate:prod`).  No code changes are required —

@@ -60,12 +60,12 @@ describe("SolversController (e2e)", () => {
       state: "filled",
       filledAt: now,
       fillAmount: "1000",
-    });
+    }, (await intentsService.get(filledIntent.intentId))!.version);
     await intentsService.update(slashedIntent.intentId, {
       solver: GAMMA_ADDR,
       state: "slashed",
       slashedAt: now,
-    });
+    }, (await intentsService.get(slashedIntent.intentId))!.version);
 
     const res = await request(app.getHttpServer())
       .get(`/api/v1/solvers/${GAMMA_ADDR}/stats`)

@@ -1,14 +1,16 @@
 import { HttpException, HttpStatus, ArgumentsHost } from "@nestjs/common";
 import { HttpExceptionFilter } from "./http-exception.filter";
 import * as sentryModule from "./sentry";
+import { logger } from "./logger";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-function makeHost(json: jest.Mock, requestId?: string): ArgumentsHost {
+function makeHost(json: jest.Mock, requestId?: string, setHeader?: jest.Mock): ArgumentsHost {
   return {
     switchToHttp: () => ({
       getResponse: () => ({
         status: (_code: number) => ({ json }),
+        setHeader: setHeader ?? jest.fn(),
       }),
       getRequest: () => (requestId ? { requestId } : {}),
     }),
@@ -122,6 +124,41 @@ describe("HttpExceptionFilter", () => {
       filter.catch(new Error("boom"), host);
 
       expect(json).toHaveBeenCalledWith({ error: "boom" });
+    });
+  });
+
+  describe("custom-shaped body passthrough (issue #304)", () => {
+    it("forwards allowlisted fields from a custom-shaped exception body", () => {
+      const host = makeHost(json);
+      const body = { error: "fill-check failed", intentId: "abc-123", fillAmount: "100", minDstAmount: "90" };
+      filter.catch(new HttpException(body, HttpStatus.BAD_REQUEST), host);
+      expect(json).toHaveBeenCalledWith({
+        error: "fill-check failed",
+        intentId: "abc-123",
+        fillAmount: "100",
+        minDstAmount: "90",
+      });
+    });
+
+    it("strips unknown fields from a custom-shaped body and logs a warning", () => {
+      const host = makeHost(json);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const warnSpy = jest.spyOn(logger, "warn").mockImplementation((() => logger) as any);
+      const body = { error: "something failed", intentId: "abc-123", internalDebugField: "secret" };
+      filter.catch(new HttpException(body, HttpStatus.BAD_REQUEST), host);
+      const response = json.mock.calls[0][0] as Record<string, unknown>;
+      expect(response).not.toHaveProperty("internalDebugField");
+      expect(response).toHaveProperty("error");
+      expect(response).toHaveProperty("intentId");
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("internalDebugField"));
+      warnSpy.mockRestore();
+    });
+
+    it("injects requestId into a custom-shaped body response", () => {
+      const host = makeHost(json, "req-xyz-456");
+      const body = { error: "fill-check failed", intentId: "abc-123" };
+      filter.catch(new HttpException(body, HttpStatus.BAD_REQUEST), host);
+      expect(json).toHaveBeenCalledWith(expect.objectContaining({ requestId: "req-xyz-456" }));
     });
   });
 });

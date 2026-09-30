@@ -44,18 +44,37 @@ export class MockPrismaService {
   };
 }
 
+/**
+ * With INTENTS_STORE=postgres|dual (issue #404 — CI runs the suite both ways)
+ * the real PrismaService is used against DATABASE_URL; otherwise the stub
+ * above keeps the suite database-free.
+ */
+function usesRealDatabase(): boolean {
+  return process.env.INTENTS_STORE === "postgres" || process.env.INTENTS_STORE === "dual";
+}
+
 export async function createTestApp(): Promise<INestApplication> {
-  const moduleRef = await Test.createTestingModule({
+  const builder = Test.createTestingModule({
     imports: [AppModule],
-  })
-    .overrideProvider(PrismaService)
-    .useClass(MockPrismaService)
-    .compile();
+  });
+  if (!usesRealDatabase()) {
+    builder.overrideProvider(PrismaService).useClass(MockPrismaService);
+  }
+  const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication();
 
   // Mirror the production body-size limit so 413 tests behave correctly
   app.use(json({ limit: BODY_SIZE_LIMIT }));
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+      frameguard: { action: "deny" },
+      noSniff: true,
+      referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+    }),
+  );
 
   // Mirror the JSON depth-check middleware from main.ts (issue #476)
   app.use((req: Request, res: Response, next: NextFunction) => {

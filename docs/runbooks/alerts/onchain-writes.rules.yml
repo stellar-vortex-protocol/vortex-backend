@@ -1,0 +1,33 @@
+# Prometheus alerting rules for the on-chain write path.
+# Metric names are defined in src/metrics/metrics.service.ts — keep in sync.
+groups:
+  - name: vortex-onchain-writes
+    rules:
+      # Issue #396 — a poison outbox row was dead-lettered. Later operations for
+      # the same intent are blocked until it is requeued.
+      - alert: VortexOutboxRowDead
+        expr: increase(vortex_outbox_dead_total[5m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "Outbox row moved to dead after exhausting OUTBOX_MAX_ATTEMPTS"
+          runbook: docs/runbooks/on-call.md#scenario-g--outbox-rows-dead-or-backlogged
+
+      # Issue #396 — the relay is not draining (RPC outage, relay disabled, signer broken).
+      - alert: VortexOutboxBacklog
+        expr: sum(vortex_outbox_rows{status=~"pending|processing|submitted"}) > 100
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "More than 100 on-chain writes waiting in the outbox for 15m"
+          runbook: docs/runbooks/on-call.md#scenario-g--outbox-rows-dead-or-backlogged
+
+      # Issue #397 — the slashing saga gave up on a slash (submit kept failing).
+      - alert: VortexSlashSubmitFailed
+        expr: increase(vortex_slash_pipeline_transitions_total{to_state="cancelled",reason="submit_failed"}[15m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "A detected solver slash was cancelled after repeated submission failures"
+          runbook: docs/runbooks/slash-cancellation.md#submit-failed-slashes

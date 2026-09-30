@@ -39,4 +39,16 @@ describe("HealthController (e2e)", () => {
       expect(res.body.db.latencyMs).toBeUndefined();
     }
   });
+
+  it("GET /health reports contract version state and read-only mode (#402)", async () => {
+    const res = await request(app.getHttpServer()).get("/health").expect(200);
+
+    // No contract IDs are configured in the test env: nothing to gate, so the
+    // backend is not read-only and both contracts report `unconfigured`.
+    expect(res.body.readOnly).toBe(false);
+    expect(res.body.contracts).toMatchObject({
+      settlement: { contract: "settlement", status: "unconfigured" },
+      solverRegistry: { contract: "solverRegistry", status: "unconfigured" },
+    });
+  });
 });

@@ -22,7 +22,11 @@ describe("StatsController (e2e)", () => {
     await app.close();
   });
 
-  it("GET /api/v1/stats reflects the seeded data", async () => {
+  // The seed data only exists in the in-memory store; with INTENTS_STORE=
+  // postgres the table is shared across suites and holds whatever ran first.
+  const seeded = (process.env.INTENTS_STORE ?? "memory") === "memory" ? it : it.skip;
+
+  seeded("GET /api/v1/stats reflects the seeded data", async () => {
     const res = await request(app.getHttpServer()).get("/api/v1/stats").expect(200);
 
     expect(res.body.totalIntents).toBe(5);
@@ -45,7 +49,7 @@ describe("StatsController (e2e)", () => {
         dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
         dstTokenSymbol: "USDC",
         dstTokenDecimals: 7,
-        minDstAmount: "990000",
+        minDstAmount: "9900000",
       })
       .expect(201);
     const intentId = createRes.body.intentId as string;
@@ -59,13 +63,13 @@ describe("StatsController (e2e)", () => {
     const fillSig = sign(ALPHA_KP, buildFillMessage(intentId, ALPHA_KP.publicKey()));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${intentId}/fill`)
-      .send({ solver: ALPHA_KP.publicKey(), fillAmount: "995000", signature: fillSig })
+      .send({ solver: ALPHA_KP.publicKey(), fillAmount: "9950000", signature: fillSig })
       .expect(201);
 
     const after = await request(app.getHttpServer()).get("/api/v1/stats").expect(200);
 
     expect(after.body.totalIntents).toBe(before.body.totalIntents + 1);
-    expect(BigInt(after.body.totalVolume) - BigInt(before.body.totalVolume)).toBe(995000n);
+    expect(BigInt(after.body.totalVolume) - BigInt(before.body.totalVolume)).toBe(9950000n);
   });
 
   it("GET /api/v1/stats/ws returns the current WebSocket subscriber count", async () => {

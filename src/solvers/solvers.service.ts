@@ -356,9 +356,22 @@ export class SolversService {
    * investigate the discrepancy.
    *
    * @param intentId  The intent whose slash submission failed.
+   * @param solverAddress  Optional fallback for callers that track the
+   *   penalty durably (the slashing saga, issue #397): when the in-memory
+   *   pending entry is gone — e.g. lost in a restart — the fillsFailed
+   *   increment is still reverted for this solver. Callers passing it must
+   *   guarantee they compensate at most once per intent.
    */
-  async rollbackPenalty(intentId: string): Promise<SolverRecord | null> {
+  async rollbackPenalty(intentId: string, solverAddress?: string): Promise<SolverRecord | null> {
     const penalty = this.pendingPenalties.get(intentId);
+    if (!penalty && solverAddress) {
+      const solver = await this.repo.findByAddress(solverAddress);
+      if (!solver) return null;
+      this.logger.warn(
+        `[penalty] rolled back without in-memory record: solver=${solverAddress} intent=${intentId}`,
+      );
+      return this.repo.save({ ...solver, fillsFailed: Math.max(0, solver.fillsFailed - 1) });
+    }
     if (!penalty || penalty.state !== "pending") {
       this.logger.warn(
         `rollbackPenalty called for intentId=${intentId} but no pending penalty found (state=${penalty?.state ?? "none"})`,

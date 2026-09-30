@@ -155,6 +155,12 @@ describe("SorobanController (e2e)", () => {
       expect(res.body).toMatchObject({
         passphrase: mockNetwork.passphrase,
         protocolVersion: mockNetwork.protocolVersion,
+        // Issue #402: contract version state rides along with network info.
+        readOnly: false,
+        contracts: {
+          settlement: { status: "unconfigured" },
+          solverRegistry: { status: "unconfigured" },
+        },
       });
       expect(sorobanService.getNetwork).toHaveBeenCalledTimes(1);
     });

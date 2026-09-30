@@ -6,6 +6,7 @@ import { AppConfig } from "../config/configuration";
 import { DatabaseHealthService } from "./database-health.service";
 import { KillSwitchService } from "../killswitch/killswitch.service";
 import { HealthIndicatorRegistry } from "./health-indicator.registry";
+import { ContractVersionService } from "../soroban/contract-version.service";
 
 @ApiTags("health")
 @Controller("health")
@@ -15,6 +16,7 @@ export class HealthController {
     private readonly dbHealth: DatabaseHealthService,
     private readonly registry: HealthIndicatorRegistry,
     @Optional() private readonly killSwitch?: KillSwitchService,
+    @Optional() private readonly contractVersions?: ContractVersionService,
   ) {}
 
   private base() {
@@ -51,6 +53,9 @@ export class HealthController {
       ...this.base(),
       ...readiness,
       db: db?.status === "up" ? { status: "ok", latencyMs: db.details?.latencyMs } : { status: "unreachable", error: db?.error },
+      // Issue #402: read-only when a configured contract's WASM hash is not
+      // on a supported ABI. Reads keep working, so this does not fail the probe.
+      ...(this.contractVersions?.snapshot() ?? {}),
     };
   }
 
@@ -96,6 +101,9 @@ export class HealthController {
             },
           }
         : {}),
+      // Issue #402: read-only when a configured contract's WASM hash is not
+      // on a supported ABI. Reads keep working, so this does not fail the probe.
+      ...(this.contractVersions?.snapshot() ?? {}),
     };
   }
 }

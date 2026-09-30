@@ -21,6 +21,8 @@ function intent(overrides: Partial<Intent>): Intent {
     filledAt: 1_010,
     fillAmount: "100",
     feeAmount: "5",
+    version: 0,
+    srcVerified: true,
     ...overrides,
   };
 }

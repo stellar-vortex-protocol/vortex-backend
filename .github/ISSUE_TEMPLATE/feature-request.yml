@@ -1,0 +1,63 @@
+name: Feature Request
+description: Propose a new feature or improvement for vortex-backend.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please describe the problem you're trying to solve
+        and your proposed solution so we can discuss it effectively.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: |
+        What problem does this feature solve? Why is the current behaviour insufficient?
+      placeholder: |
+        As a solver, I need to ... because currently ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the feature you'd like. Include API/interface sketches where relevant.
+      placeholder: Add a new endpoint / guard / config option that ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you consider and why did you rule them out?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Intents / solver flow
+        - WebSocket / real-time feed
+        - Soroban / on-chain integration
+        - Auth / access control
+        - Observability / metrics
+        - Developer experience / CI
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I am willing to help implement or review this feature.
+          required: false

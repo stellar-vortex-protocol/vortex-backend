@@ -297,6 +297,7 @@ a canonical message for every mutating action, so a wildcard
 
 | Route | Action | Canonical message | Proof required |
 |---|---|---|---|
+| `POST /api/v1/intents` | Create with high slippage | `acknowledge-high-slippage:<user>:<srcAmount>:<minDstAmount>` | Required only when `acknowledgeHighSlippage` is true; signed by the intent `user` |
 | `POST /api/v1/intents/:id/accept` | Accept | `accept:<intentId>:<solver>` | Valid solver signature |
 | `POST /api/v1/intents/:id/fill` | Fill | `fill:<intentId>:<solver>` | Valid solver signature |
 | `POST /api/v1/intents/:id/cancel` | Cancel | `cancel:<intentId>` | Valid user signature |

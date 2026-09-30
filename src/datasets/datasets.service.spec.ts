@@ -33,6 +33,8 @@ function makeIntent(overrides: Partial<Intent> = {}): Intent {
     state: "open",
     createdAt: 1_000_000,
     deadline: 1_001_800,
+    version: 0,
+    srcVerified: true,
     ...overrides,
   };
 }

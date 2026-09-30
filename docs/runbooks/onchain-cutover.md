@@ -20,6 +20,7 @@ should be reviewed/updated as each lands:
 | Solver-registry wiring (issue #23) | `accept()` calls the solver-registry contract | Open |
 | On-chain fill settlement (issue #24) | `fill()` submits + confirms a settlement tx | Open |
 | Dry-run mode (issue #35) | Config flag to simulate on-chain writes without submitting | **Done** (issue #260) |
+| Contract version gating (issue #402) | Writes refused unless the deployed WASM hash maps to a supported ABI — see [contract-upgrades.md](./contract-upgrades.md) | **Done** — `SUPPORTED_CONTRACT_VERSIONS` must list the deployed hashes before cutover |
 | Intent audit trail (issue #62) | Append-only log of every state transition, independent of the state store | Open |
 | Shadow-mode divergence monitor (issue #401) | Quantitative proof that simulated on-chain transitions match the off-chain path | **Done** (issue #401) |
 

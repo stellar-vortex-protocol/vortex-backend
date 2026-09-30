@@ -121,6 +121,26 @@ Solvers must maintain a collateral bond in the Soroban `SolverRegistryContract` 
 - **Minimum Bond Requirement**: Solvers cannot accept high-value intents without adequate active collateral.
 - **On-Chain Settlement**: Bond balances are recorded on-chain via the Soroban contract and synchronized with the backend registry.
 
+### Bond and Exposure Checks on Acceptance
+Every accept request verifies the solver's bond amount and active status against
+the registry contract through a read-only Soroban simulation. A successful
+result is cached for at most 30 seconds and registry bond/activity events
+invalidate the cache. If the registry RPC, contract, or response is unavailable,
+the API fails closed with `503`; the projected `bondAmount` in the backend
+solver record is not used as a substitute.
+
+The backend values the intent's source amount in USD using integer arithmetic
+and enforces this ceiling before the state transition:
+
+> accepted exposure in USD + new intent value in USD ≤ on-chain bond value in USD × `maxExposureRatio`
+
+`maxExposureRatio` is the current governance parameter. Stellar bond amounts are
+interpreted in 7-decimal XLM base units and valued using the configured XLM USD
+price. An intent price snapshot older than five minutes, a missing/non-positive
+price, or malformed amount fails closed with `503`. An intent exceeding the
+remaining capacity is rejected with `403` and error code `INSUFFICIENT_BOND`.
+Bond top-ups remain an on-chain operation and are outside this API flow.
+
 ### Reputation & Bond Reconciliation
 A solver's active reputation score is continuously computed using completion rates and account age:
 $$\text{ReputationScore} = \text{SuccessRate} \times e^{-\frac{\text{AgeInDays}}{180}}$$

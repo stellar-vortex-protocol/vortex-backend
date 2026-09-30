@@ -22,7 +22,7 @@ const validCreateBody = {
   dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
   dstTokenSymbol: "USDC",
   dstTokenDecimals: 7,
-  minDstAmount: "990000",
+  minDstAmount: "9900000",
 };
 
 describe("Audit trail e2e (#217)", () => {
@@ -89,7 +89,7 @@ describe("Audit trail e2e (#217)", () => {
     const intentsService = app.get(IntentsService);
 
     // Manually set to expired state and append an audit entry (simulating sweeper)
-    await intentsService.update(created.intentId, { state: "expired" });
+    await intentsService.update(created.intentId, { state: "expired" }, (await intentsService.get(created.intentId))!.version);
     await intentsService.appendAuditEntry(
       created.intentId,
       "expired",
@@ -119,7 +119,7 @@ describe("Audit trail e2e (#217)", () => {
       state: "slashed",
       slashedAt: Math.floor(Date.now() / 1000),
       slashReason: "accepted intent not filled before deadline",
-    });
+    }, (await intentsService.get(created.intentId))!.version);
     await intentsService.appendAuditEntry(
       created.intentId,
       "slashed",

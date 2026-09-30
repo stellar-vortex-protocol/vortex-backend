@@ -46,4 +46,9 @@ export class QuoteRequestDto {
   @IsOptional()
   @IsString()
   dstTokenContract?: string;
+
+  @ApiPropertyOptional({ description: "Integrator referral code. Unknown codes quote a fee with no integrator share." })
+  @IsOptional()
+  @IsString()
+  referralCode?: string;
 }

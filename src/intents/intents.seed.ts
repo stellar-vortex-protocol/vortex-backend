@@ -1,6 +1,6 @@
 import { Intent } from "./intents.types";
 
-export function buildSeedIntents(now: number): Array<Omit<Intent, "intentId" | "createdAt">> {
+export function buildSeedIntents(now: number): Array<Omit<Intent, "intentId" | "createdAt" | "version" | "srcVerified">> {
   return [
     {
       user: "GABC...1234",

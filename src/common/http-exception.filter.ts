@@ -2,6 +2,29 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException } from "@nestjs/co
 import { captureException } from "./sentry";
 import { logger } from "./logger";
 
+/**
+ * Fields that are explicitly allowed to pass through in a custom-shaped exception
+ * body (i.e. the `b.error && !b.statusCode` branch).
+ *
+ * Any key NOT in this set will be stripped and a warning emitted in development
+ * so the author learns about the leak before it reaches production.  In
+ * production the field is silently dropped so no internal detail escapes.
+ *
+ * Today's only known usage is IntentsController.fill():
+ *   throw new BadRequestException({ error, intentId, minDstAmount, fillAmount })
+ * — all four fields are intentionally public.
+ *
+ * To expose a new field from a custom-shaped exception, add its name here and
+ * document why it is safe to return to API consumers.  Closes #304.
+ */
+const CUSTOM_BODY_ALLOWLIST = new Set<string>([
+  "error",       // human-readable error message (required)
+  "intentId",    // the intent that failed — already in the URL, safe to echo
+  "fillAmount",  // the amount the solver attempted — safe to echo to the solver
+  "minDstAmount", // the required minimum — safe to echo to the solver
+  "requestId",   // injected below; listed for clarity
+]);
+
 interface JsonResponse {
   status: (code: number) => { json: (body: unknown) => void };
   setHeader?: (name: string, value: string) => void;
@@ -57,8 +80,24 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
         // Custom-shaped bodies passed directly to an exception constructor,
         // e.g. new BadRequestException({ error: "...", fillAmount, minDstAmount })
+        // Only fields on CUSTOM_BODY_ALLOWLIST are forwarded to the client.
+        // Any extra field is stripped and a warning is emitted so that future
+        // contributors learn about the leak before it reaches production.
+        // Closes #304.
         if (typeof b.error === "string" && !b.statusCode) {
-          response.status(status).json(b);
+          const sanitized: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(b)) {
+            if (CUSTOM_BODY_ALLOWLIST.has(key)) {
+              sanitized[key] = value;
+            } else {
+              logger.warn(
+                `HttpExceptionFilter: custom exception body contains unexpected field "${key}" — ` +
+                  "it has been stripped from the response. If this field is safe to expose to " +
+                  "API consumers, add it to CUSTOM_BODY_ALLOWLIST in http-exception.filter.ts.",
+              );
+            }
+          }
+          response.status(status).json(addRequestId(sanitized, requestId));
           return;
         }
 

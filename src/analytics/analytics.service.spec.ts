@@ -18,6 +18,8 @@ function filledIntent(overrides: Partial<Intent> = {}): Intent {
     fillAmount: "5000000",
     feeAmount: "250",
     solver: "SOLVER_A",
+    version: 0,
+    srcVerified: true,
     ...overrides,
   };
 }

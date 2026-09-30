@@ -44,6 +44,7 @@ import { SorobanService } from "../soroban.service";
 import { SolversService } from "../../solvers/solvers.service";
 import { IntentsGateway } from "../../intents/intents.gateway";
 import { MetricsService } from "../../metrics/metrics.service";
+import { SolverBondService } from "../solver-bond.service";
 import { logger as appLogger } from "../../common/logger";
 import { parseEventIndex, buildDedupeKey } from "../event-ingestion.service";
 
@@ -63,6 +64,7 @@ export class SolverRegistryEventsService implements OnModuleInit, OnModuleDestro
     private readonly solversService: SolversService,
     @Optional() private readonly gateway?: IntentsGateway,
     @Optional() private readonly metricsService?: MetricsService,
+    @Optional() private readonly solverBondService?: SolverBondService,
   ) {}
 
   onModuleInit(): void {
@@ -120,6 +122,12 @@ export class SolverRegistryEventsService implements OnModuleInit, OnModuleDestro
 
     const eventName = typeof topic[0] === "string" ? topic[0] : undefined;
     if (!eventName) return;
+
+    if (["SolverRegistered", "BondUpdated", "BondDeposited", "BondWithdrawn", "SolverSlashed", "SolverDeactivated"].includes(eventName)) {
+      const address = topic[1];
+      if (typeof address === "string") this.solverBondService?.invalidate(address);
+      else this.solverBondService?.invalidateAll();
+    }
 
     try {
       switch (eventName) {

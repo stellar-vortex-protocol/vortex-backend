@@ -9,11 +9,15 @@ import {
 import { StrKey } from "@stellar/stellar-sdk";
 import { SorobanService } from "./soroban.service";
 import { AccountRateLimitGuard } from "./account-rate-limit.guard";
+import { ContractVersionService } from "./contract-version.service";
 
 @ApiTags("chain")
 @Controller("api/v1/chain")
 export class SorobanController {
-  constructor(private readonly sorobanService: SorobanService) {}
+  constructor(
+    private readonly sorobanService: SorobanService,
+    private readonly contractVersions: ContractVersionService,
+  ) {}
 
   @Get("health")
   @UseGuards(AccountRateLimitGuard)
@@ -77,12 +81,21 @@ export class SorobanController {
         friendbotUrl: { type: "string", nullable: true },
         passphrase: { type: "string", example: "Test SDF Network ; September 2015" },
         protocolVersion: { type: "number" },
+        readOnly: {
+          type: "boolean",
+          description: "True when a configured contract runs an unsupported WASM version and writes are disabled",
+        },
+        contracts: {
+          type: "object",
+          description: "Per-contract version state (settlement, solverRegistry): status, wasmHash, abiVersion, checkedAt",
+        },
       },
-      required: ["passphrase"],
+      required: ["passphrase", "readOnly", "contracts"],
     },
   })
-  getNetwork() {
-    return this.sorobanService.getNetwork();
+  async getNetwork() {
+    const network = await this.sorobanService.getNetwork();
+    return { ...network, ...this.contractVersions.snapshot() };
   }
 
   @Get("account/:publicKey")

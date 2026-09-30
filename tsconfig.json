@@ -2,7 +2,9 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "commonjs",
-    "lib": ["ES2022"],
+    // DOM: viem's typings pull in ox's WebAuthn sources, which reference
+    // browser globals. Type-level only — nothing here runs in a browser.
+    "lib": ["ES2022", "DOM"],
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,

@@ -329,7 +329,7 @@ repository pattern modelled after `SolversModule`:
    (`PrismaIntentsRepository`, `PrismaSolversRepository`, …).
 
 3. **`<domain>.module.ts`** binds the token to an adapter via a `useFactory`
-   provider that reads an env var (`INTENTS_PERSISTENCE`, `SOLVERS_PERSISTENCE`)
+   provider that reads config (`INTENTS_STORE`, `SOLVERS_PERSISTENCE`)
    and returns the appropriate instance.  Nothing else in the codebase needs
    to change when switching adapters.
 

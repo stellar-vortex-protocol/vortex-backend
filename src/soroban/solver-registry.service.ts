@@ -1,14 +1,12 @@
 import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
-  Address,
   BASE_FEE,
   Contract,
   Keypair,
   Networks,
   SorobanRpc,
   TransactionBuilder,
-  nativeToScVal,
 } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 import { SignerService } from "./signer.service";
@@ -19,6 +17,8 @@ import {
 } from "../killswitch/killswitch.guard";
 import { STELLAR_CHAIN } from "../intents/intents.types";
 import { FeatureFlagService } from "../flags/feature-flag.service";
+import { ContractVersionService, ContractVersionUnsupportedException } from "./contract-version.service";
+import { SOLVER_REGISTRY_CODECS } from "./contracts/solver-registry.client";
 
 const NETWORK_PASSPHRASE: Record<AppConfig["stellar"]["network"], string> = {
   testnet: Networks.TESTNET,
@@ -45,6 +45,12 @@ export interface SlashResult {
    * depending on whether the contract is configured.
    */
   dryRun: boolean;
+  /**
+   * true when the call errored (RPC failure, simulation error) and should be
+   * retried by the caller. false for successful, dry-run, and unconfigured
+   * (no-op) outcomes (issue #397).
+   */
+  failed: boolean;
 }
 
 /**
@@ -78,6 +84,7 @@ export class SolverRegistryService {
     private readonly signerService?: SignerService,
     private readonly killSwitch?: KillSwitchService,
     @Optional() private readonly flags?: FeatureFlagService,
+    @Optional() private readonly contractVersions?: ContractVersionService,
   ) {
     this.contractId = configService.get("stellar.solverRegistryContractId", { infer: true });
     this.signingKey = configService.get("stellar.signingKey", { infer: true });
@@ -117,6 +124,7 @@ export class SolverRegistryService {
         submitted: false,
         simulated: false,
         dryRun: true,
+        failed: false,
         detail: "ONCHAIN_DRY_RUN=true — simulated log only, no transaction submitted",
       };
     }
@@ -128,7 +136,26 @@ export class SolverRegistryService {
       this.logger.log(
         `[solver-registry] would slash solver=${params.solverAddress} intent=${params.intentId} reason="${params.reason}" (${detail})`,
       );
-      return { submitted: false, simulated: false, dryRun: false, detail };
+      return { submitted: false, simulated: false, dryRun: false, failed: false, detail };
+    }
+
+    // Version preflight (issue #402): encode with the codec for the deployed
+    // ABI, or refuse — never throw, the sweeper must keep sweeping.
+    let codec = SOLVER_REGISTRY_CODECS["solver-registry-v1"];
+    if (this.contractVersions) {
+      try {
+        const { abiVersion } = await this.contractVersions.assertWritable("solverRegistry");
+        codec = SOLVER_REGISTRY_CODECS[abiVersion];
+      } catch (err) {
+        if (!(err instanceof ContractVersionUnsupportedException)) throw err;
+        const detail =
+          `solver-registry contract version not supported (${err.state.status}` +
+          `${err.state.wasmHash ? `, wasmHash=${err.state.wasmHash}` : ""}) — read-only mode, slash not submitted`;
+        this.logger.error(
+          `[solver-registry] blocked slash for solver=${params.solverAddress} intent=${params.intentId}: ${detail}`,
+        );
+        return { submitted: false, simulated: false, dryRun: false, detail };
+      }
     }
 
     try {
@@ -138,11 +165,8 @@ export class SolverRegistryService {
       const account = await this.server.getAccount(sourceKeypair.publicKey());
       const contract = new Contract(this.contractId);
 
-      const operation = contract.call(
-        "slash",
-        Address.fromString(params.solverAddress).toScVal(),
-        nativeToScVal(params.intentId, { type: "string" }),
-      );
+      const { method, args } = codec.slash(params.solverAddress, params.intentId);
+      const operation = contract.call(method, ...args);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -158,7 +182,7 @@ export class SolverRegistryService {
         this.logger.error(
           `[solver-registry] slash simulation errored for solver=${params.solverAddress} intent=${params.intentId}: ${detail}`,
         );
-        return { submitted: false, simulated: true, dryRun: false, detail };
+        return { submitted: false, simulated: true, dryRun: false, failed: true, detail };
       }
 
       // TODO: Once issue #23 confirms the real contract interface, replace
@@ -172,7 +196,7 @@ export class SolverRegistryService {
       this.logger.log(
         `[solver-registry] simulated slash tx for solver=${params.solverAddress} intent=${params.intentId} (${detail})`,
       );
-      return { submitted: false, simulated: true, dryRun: false, detail };
+      return { submitted: false, simulated: true, dryRun: false, failed: false, detail };
     } catch (err) {
       // Issue #300 — the SDK may include serialized transaction/XDR details in
       // thrown errors; do not log the signing key or any raw secret here.
@@ -180,7 +204,7 @@ export class SolverRegistryService {
       this.logger.error(
         `[solver-registry] slash call errored for solver=${params.solverAddress} intent=${params.intentId}: ${detail}`,
       );
-      return { submitted: false, simulated: false, dryRun: false, detail };
+      return { submitted: false, simulated: false, dryRun: false, failed: true, detail };
     }
   }
 

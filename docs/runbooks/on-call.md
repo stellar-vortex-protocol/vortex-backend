@@ -187,7 +187,7 @@ A sweep that has been delayed or killed will simply be absent.
 ### How the sweeper works
 
 `IntentsSweeperService.sweep()` is triggered by a `setInterval` every
-`SWEEP_INTERVAL_MS` (30 000 ms, hardcoded).  It:
+`SAFETY_SWEEP_INTERVAL_MS` (default 300 000 ms). Deadline jobs (`expire-intent`, `fill-window-expired`) are the primary path. The safety sweep:
 
 1. Calls `IntentsService.getByState("open")` — iterates the in-memory store.
 2. Compares each intent's `deadline` (Unix timestamp) against `Date.now()`.
@@ -523,7 +523,7 @@ handlers never wait for Redis.
 | `STELLAR_NETWORK` | `testnet` | Network passphrase selection |
 | `PORT` | `4000` | HTTP + WS listen port |
 | `NODE_ENV` | `development` | Log verbosity (set to `production` in prod) |
-| `SWEEP_INTERVAL_MS` | `30000` (hardcoded) | How often the sweeper runs; change requires code deploy |
+| `SAFETY_SWEEP_INTERVAL_MS` | `300000` | How often the safety sweep scans for deadline jobs the queue missed |
 | `KILLSWITCH_OPERATOR_TOKEN` | empty (control plane disabled) | Secret for `/api/v1/ops/killswitch`; **required in production** |
 | `KILLSWITCH_REDIS_URL` | `REDIS_URL` when `WS_BACKPLANE=redis` | Cross-replica pause propagation; empty = poll only |
 | `KILLSWITCH_POLL_MS` | `2000` | DB change-probe interval backing up Redis; caps propagation delay |
@@ -543,53 +543,3 @@ handlers never wait for Redis.
 
 > For production incidents open a severity-1 ticket and page the service owner
 > via the alerting system.
-
----
-
-## Inspecting Stuck Transactions (#386)
-
-Transactions in `pending_transactions` with `status = 'pending'` and `next_poll_at` in the past are being actively retried by `TxConfirmationService`. Normal retries use exponential backoff up to `max_track_until`.
-
-### Find all stuck transactions
-
-```sql
-SELECT tx_hash, intent_id, attempts, fee_bump_count,
-       to_timestamp(next_poll_at) AS next_poll_at_ts,
-       to_timestamp(max_track_until) AS expires_at,
-       created_at
-FROM   pending_transactions
-WHERE  status = 'pending'
-  AND  next_poll_at < extract(epoch FROM now())
-ORDER  BY next_poll_at ASC
-LIMIT  50;
-```
-
-### Force-expire a stuck transaction
-
-```sql
-UPDATE pending_transactions
-SET    status = 'expired', updated_at = now()
-WHERE  tx_hash = '<hash>';
-```
-
-### Inspect dead-lettered events (#389)
-
-```sql
-SELECT ledger, event_index, contract_id, network, last_error, attempts, created_at
-FROM   dead_letter_events
-ORDER  BY created_at DESC
-LIMIT  20;
-```
-
-### Key Prometheus metrics
-
-| Metric | Alert threshold |
-|--------|----------------|
-| `vortex_tx_confirmation_outcomes_total{status="confirmed\|failed\|expired"}` | — (informational) |
-| `vortex_tx_confirmation_latency_seconds` | p99 > 120 s |
-| `vortex_tx_fee_bump_total{percentile}` | — (informational) |
-| `vortex_tx_fee_bump_ceiling_hits_total` | > 0 (alert) |
-| `vortex_channel_pool_utilisation` | > 0.9 sustained |
-| `vortex_channel_bad_seq_resyncs_total` | spike > 10/min |
-| `vortex_ingestion_cursor_lag_ledgers` | > 200 ledgers |
-| `vortex_ingestion_dead_letter_total` | > 0 (alert) |

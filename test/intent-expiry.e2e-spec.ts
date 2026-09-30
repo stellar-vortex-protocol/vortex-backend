@@ -28,7 +28,7 @@ const BASE_INTENT = {
   dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
   dstTokenSymbol: "USDC",
   dstTokenDecimals: 7,
-  minDstAmount: "490000",
+  minDstAmount: "4950000",
 };
 
 /** Helper — open a WS client and collect messages until the timeout. */
@@ -88,7 +88,7 @@ describe("Intent expiry via sweeper (e2e)", () => {
     expect(createRes.body.state).toBe("open");
 
     // Manually back-date the deadline by patching via IntentsService
-    await intentsService.update(intentId, { deadline: pastDeadline });
+    await intentsService.update(intentId, { deadline: pastDeadline }, (await intentsService.get(intentId))!.version);
 
     // Confirm it's still open before sweep
     const beforeSweep = await request(app.getHttpServer())
@@ -116,7 +116,7 @@ describe("Intent expiry via sweeper (e2e)", () => {
     const { intentId } = createRes.body;
 
     // Ensure deadline is in the future (it will be by default but be explicit)
-    await intentsService.update(intentId, { deadline: futureDeadline });
+    await intentsService.update(intentId, { deadline: futureDeadline }, (await intentsService.get(intentId))!.version);
 
     await (sweeper as unknown as { sweep(): Promise<void> }).sweep();
 
@@ -145,7 +145,7 @@ describe("Intent expiry via sweeper (e2e)", () => {
       .expect(201);
 
     // Back-date the deadline
-    await intentsService.update(intentId, { deadline: pastDeadline });
+    await intentsService.update(intentId, { deadline: pastDeadline }, (await intentsService.get(intentId))!.version);
 
     await (sweeper as unknown as { sweep(): Promise<void> }).sweep();
 
@@ -168,7 +168,7 @@ describe("Intent expiry via sweeper (e2e)", () => {
       .expect(201);
     const { intentId } = createRes.body;
 
-    await intentsService.update(intentId, { deadline: pastDeadline });
+    await intentsService.update(intentId, { deadline: pastDeadline }, (await intentsService.get(intentId))!.version);
 
     // Connect a WS client before triggering the sweep
     const addressInfo = app.getHttpServer().address();
@@ -194,7 +194,7 @@ describe("Intent expiry via sweeper (e2e)", () => {
     // Force all open intents to cancelled so getByState('open') returns []
     const open = await intentsService.getByState("open");
     for (const intent of open) {
-      await intentsService.update(intent.intentId, { state: "cancelled" });
+      await intentsService.update(intent.intentId, { state: "cancelled" }, (await intentsService.get(intent.intentId))!.version);
     }
 
     await expect(

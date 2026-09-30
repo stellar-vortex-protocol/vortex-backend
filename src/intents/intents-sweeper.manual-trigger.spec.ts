@@ -3,7 +3,7 @@ import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
-import { SolverRegistryService } from "../soroban/solver-registry.service";
+import { SlashingPipelineService } from "./slashing-pipeline.service";
 import { MetricsService } from "../metrics/metrics.service";
 import { KillSwitchService } from "../killswitch/killswitch.service";
 import { LeaderElectionService } from "../common/leader-election";
@@ -37,9 +37,7 @@ describe("IntentsSweeperService — manual sweep trigger (#269)", () => {
     } as unknown as IntentsService;
     const gateway = { broadcast: jest.fn() } as unknown as IntentsGateway;
     const solversService = { recordFailedFill: jest.fn() } as unknown as SolversService;
-    const solverRegistry = {
-      slashSolver: jest.fn().mockResolvedValue({ detail: "no-op" }),
-    } as unknown as SolverRegistryService;
+    const slashingPipeline = { detect: jest.fn() } as unknown as SlashingPipelineService;
     const metricsService = { recordSweep: jest.fn() } as unknown as MetricsService;
     const killSwitch = {
       evaluateTarget: jest.fn().mockReturnValue({ paused: false, matched: null, matchedChain: [] }),
@@ -49,7 +47,7 @@ describe("IntentsSweeperService — manual sweep trigger (#269)", () => {
       intentsService,
       gateway,
       solversService,
-      solverRegistry,
+      slashingPipeline,
       metricsService,
       killSwitch,
       noopLeaderElection(),

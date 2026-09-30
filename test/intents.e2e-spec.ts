@@ -29,7 +29,7 @@ const validCreateBody = {
   dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
   dstTokenSymbol: "USDC",
   dstTokenDecimals: 7,
-  minDstAmount: "990000",
+  minDstAmount: "9900000",
 };
 
 describe("IntentsController (e2e)", () => {
@@ -152,7 +152,7 @@ describe("IntentsController (e2e)", () => {
     const betaFillSig = sign(BETA_KP, buildFillMessage(created.intentId, BETA_KP.publicKey()));
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/fill`)
-      .send({ solver: BETA_KP.publicKey(), fillAmount: "995000", signature: betaFillSig })
+      .send({ solver: BETA_KP.publicKey(), fillAmount: "9950000", signature: betaFillSig })
       .expect(403);
 
     // correct solver fills
@@ -161,13 +161,13 @@ describe("IntentsController (e2e)", () => {
       .post(`/api/v1/intents/${created.intentId}/fill`)
       .send({
         solver: ALPHA_KP.publicKey(),
-        fillAmount: "995000",
+        fillAmount: "9950000",
         txHash: "e2e-hash",
         signature: fillSig,
       })
       .expect(201);
     expect(filled.body.state).toBe("filled");
-    expect(filled.body.fillAmount).toBe("995000");
+    expect(filled.body.fillAmount).toBe("9950000");
     expect(filled.body.txHash).toBe("e2e-hash");
   });
 
@@ -261,12 +261,12 @@ describe("IntentsController (e2e)", () => {
       .expect(201);
 
     const intentsService = app.get(IntentsService);
-    await intentsService.update(created.intentId, { minDstAmount: "not-a-number" });
+    await intentsService.update(created.intentId, { minDstAmount: "not-a-number" }, (await intentsService.get(created.intentId))!.version);
 
     const fillSig = sign(ALPHA_KP, buildFillMessage(created.intentId, ALPHA_KP.publicKey()));
     const res = await request(app.getHttpServer())
       .post(`/api/v1/intents/${created.intentId}/fill`)
-      .send({ solver: ALPHA_KP.publicKey(), fillAmount: "995000", txHash: "e2e-hash", signature: fillSig })
+      .send({ solver: ALPHA_KP.publicKey(), fillAmount: "9950000", txHash: "e2e-hash", signature: fillSig })
       .expect(400);
     expect(res.body.error).toBe("Data integrity error: intent minDstAmount is not a valid integer");
     expect(res.body.intentId).toBe(created.intentId);
