@@ -21,6 +21,7 @@ import { JobsModule } from "./jobs/jobs.module";
 import { FlagsModule } from "./flags/flags.module";
 import { GuardianStateModule } from "./governance/guardian-state.service";
 import { DatasetsModule } from "./datasets/datasets.module";
+import { DocsModule } from "./docs/docs.module";
 
 @Module({
   imports: [
@@ -63,6 +64,8 @@ import { DatasetsModule } from "./datasets/datasets.module";
     RoutingModule,
     TreasuryModule,
     GovernanceModule,
+    // Serves GET /docs/ws — the WebSocket AsyncAPI document (issue #456).
+    DocsModule,
   ],
   controllers: [],
   providers: [

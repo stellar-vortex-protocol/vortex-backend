@@ -1,5 +1,6 @@
 import { OnModuleDestroy, Optional } from "@nestjs/common";
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
+import type { IncomingMessage } from "node:http";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
 import { SolversService } from "../solvers/solvers.service";
@@ -8,6 +9,13 @@ import { logger } from "../common/logger";
 import { SUPPORTED_CHAINS, SupportedChain } from "./intents.types";
 import { verifyStellarSignature, buildWsAuthMessage } from "../common/stellar-signature";
 import { buildMatchPredicate, IntentCapabilityIndex, SolverMatchPredicate } from "./solver-intent-matcher";
+import {
+  negotiateFromRequest,
+  selectWsSubprotocol,
+  WS_CLOSE_GOING_AWAY,
+  WS_CLOSE_UNSUPPORTED_PROTOCOL,
+} from "../ws/ws-protocol";
+import { validateClientMessage, validateServerFrame, wsValidationEnabled } from "../ws/ws-schemas";
 import {
   WS_MAX_FILTER_CHAINS,
   WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
@@ -113,8 +121,13 @@ export class EventRingBuffer {
  *
  * Solver bots submit intents and accept/fill them through the authenticated
  * REST API. The WS gateway never accepts writes.
+ *
+ * Protocol versioning (issue #456): the handshake negotiates a
+ * `Sec-WebSocket-Protocol` version (see `src/ws/ws-protocol.ts`). Clients that
+ * only offer unknown versions are closed with code 1002; a client that offers
+ * none is served the documented default, `vortex.v1`.
  */
-@WebSocketGateway({ path: "/ws" })
+@WebSocketGateway({ path: "/ws", handleProtocols: selectWsSubprotocol })
 export class IntentsGateway
   implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
@@ -309,7 +322,31 @@ export class IntentsGateway
     }
   }
 
-  handleConnection(client: WebSocket) {
+  /**
+   * Accept a client connection.
+   *
+   * @param client  - The accepted socket.
+   * @param request - The HTTP upgrade request (supplied by the `ws` adapter);
+   *   only its `Sec-WebSocket-protocol` header is used, to negotiate the
+   *   protocol version (issue #456). Absent in unit tests, which therefore
+   *   exercise the documented "no header → v1" default.
+   */
+  handleConnection(client: WebSocket, request?: IncomingMessage) {
+    // ── Protocol version negotiation (issue #456) ──────────────────────────
+    // Runs before anything is registered: an unsupported version must never
+    // reach the subscriber set, the connection gauge, or the message pump.
+    const negotiation = negotiateFromRequest(request);
+    if (!negotiation.ok) {
+      logger.warn(
+        `ws closing connection: unsupported protocol version (requested=${negotiation.requested.join(", ")})`,
+      );
+      client.close(
+        WS_CLOSE_UNSUPPORTED_PROTOCOL,
+        "unsupported protocol version — see docs/asyncapi.yaml",
+      );
+      return;
+    }
+
     this.subscribers.set(client, {
       chains: null,
       solver: null,
@@ -336,25 +373,47 @@ export class IntentsGateway
 
     const currentSeq = this.nextSeq - 1;
 
-    client.send(
-      JSON.stringify({
-        type: "connected",
-        message: "Vortex intent stream",
-        seq: currentSeq,
-      }),
-    );
+    this.sendFrame(client, {
+      type: "connected",
+      message: "Vortex intent stream",
+      seq: currentSeq,
+      protocol: negotiation.protocol,
+    });
 
     // Send the initial snapshot asynchronously — the client receives it
     // immediately after the "connected" message.
     Promise.resolve(this.intentsService.getByState("open"))
       .then((open) => {
-        client.send(JSON.stringify({ type: "snapshot", intents: open.slice(0, 20), seq: currentSeq }));
+        this.sendFrame(client, {
+          type: "snapshot",
+          intents: open.slice(0, 20),
+          seq: currentSeq,
+        });
       })
       .catch(() => {
         /* snapshot failure is non-fatal — client can re-fetch via REST */
       });
 
     logger.info(`ws client connected (subscribers=${this.subscribers.size})`);
+  }
+
+  /**
+   * Send one control frame to one client.
+   *
+   * Central choke point so that every non-broadcast frame gets the same
+   * readyState guard and, outside production, the same schema validation
+   * (issue #456). Broadcast payloads are validated once in
+   * {@link broadcast} instead of once per subscriber.
+   */
+  private sendFrame(client: WebSocket, frame: Record<string, unknown>): void {
+    if (client.readyState !== WebSocket.OPEN) return;
+    if (wsValidationEnabled()) {
+      const result = validateServerFrame(frame);
+      if (!result.ok) {
+        logger.warn(`ws frame failed schema validation: ${result.error}`);
+      }
+    }
+    client.send(JSON.stringify(frame));
   }
 
   handleDisconnect(client: WebSocket) {
@@ -396,6 +455,11 @@ export class IntentsGateway
    *   auto-scoped snapshot of currently-eligible open intents.
    *
    * Unknown types and malformed messages are silently ignored.
+   *
+   * Outside production every message is additionally checked against
+   * `clientMessageSchemas` (issue #456). Validation is advisory — a mismatch
+   * is logged loudly but handling is unchanged, so the check can never alter
+   * the wire protocol of a development or test run.
    */
   private async handleMessage(client: WebSocket, raw: import("ws").RawData): Promise<void> {
     let parsed: unknown;
@@ -408,6 +472,13 @@ export class IntentsGateway
     if (typeof parsed !== "object" || parsed === null) return;
 
     const msg = parsed as Record<string, unknown>;
+
+    if (wsValidationEnabled()) {
+      const result = validateClientMessage(msg);
+      if (!result.ok) {
+        logger.warn(`ws invalid client message: ${result.error}`);
+      }
+    }
 
     switch (msg.type) {
       case "subscribe":
@@ -455,9 +526,7 @@ export class IntentsGateway
       };
       this.subscribers.set(client, { ...existing, wantAll: true });
       logger.debug("ws client opted out of capability filtering (all=true)");
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: "subscribed", filter: { all: true } }));
-      }
+      this.sendFrame(client, { type: "subscribed", filter: { all: true } });
       return;
     }
 
@@ -478,14 +547,10 @@ export class IntentsGateway
       logger.warn(
         `ws subscribe_rejected: connection has reached the max subscription limit (${maxSubs})`,
       );
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(
-          JSON.stringify({
-            type: "subscribe_rejected",
-            reason: `Maximum subscription limit of ${maxSubs} reached for this connection`,
-          }),
-        );
-      }
+      this.sendFrame(client, {
+        type: "subscribe_rejected",
+        reason: `Maximum subscription limit of ${maxSubs} reached for this connection`,
+      });
       return;
     }
 
@@ -499,14 +564,10 @@ export class IntentsGateway
       logger.warn(
         `ws subscribe_rejected: chains array length ${rawChains.length} exceeds max ${maxChains}`,
       );
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(
-          JSON.stringify({
-            type: "subscribe_rejected",
-            reason: `chains array may contain at most ${maxChains} values`,
-          }),
-        );
-      }
+      this.sendFrame(client, {
+        type: "subscribe_rejected",
+        reason: `chains array may contain at most ${maxChains} values`,
+      });
       return;
     }
 
@@ -520,14 +581,10 @@ export class IntentsGateway
 
     logger.debug(`ws client subscribed to chains: ${validChains.join(", ") || "(none)"}`);
 
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(
-        JSON.stringify({
-          type: "subscribed",
-          filter: { chains: validChains },
-        }),
-      );
-    }
+    this.sendFrame(client, {
+      type: "subscribed",
+      filter: { chains: validChains },
+    });
   }
 
   /**
@@ -545,40 +602,35 @@ export class IntentsGateway
     const oldest = this.ringBuffer.oldestSeq();
 
     if (oldest !== -1 && fromSeq < oldest - 1) {
-      client.send(
-        JSON.stringify({
-          type: "replay_too_old",
-          fromSeq,
-          oldestAvailableSeq: oldest,
-        }),
-      );
+      this.sendFrame(client, {
+        type: "replay_too_old",
+        fromSeq,
+        oldestAvailableSeq: oldest,
+      });
       logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
       return;
     }
 
     const events = this.ringBuffer.since(fromSeq);
 
-    client.send(
-      JSON.stringify({
-        type: "replay_start",
-        fromSeq,
-        count: events.length,
-      }),
-    );
+    this.sendFrame(client, {
+      type: "replay_start",
+      fromSeq,
+      count: events.length,
+    });
 
+    // Replayed events were schema-checked once when they were broadcast, so
+    // they are sent directly here — re-validating a 10k-event burst per
+    // client would dominate the replay budget (issue #457).
     for (const event of events) {
       if (client.readyState !== WebSocket.OPEN) break;
       client.send(JSON.stringify(event));
     }
 
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(
-        JSON.stringify({
-          type: "replay_end",
-          count: events.length,
-        }),
-      );
-    }
+    this.sendFrame(client, {
+      type: "replay_end",
+      count: events.length,
+    });
 
     logger.debug(`ws replay complete: fromSeq=${fromSeq} count=${events.length}`);
   }
@@ -603,27 +655,33 @@ export class IntentsGateway
     const signature = typeof payload.signature === "string" ? payload.signature : "";
 
     if (!solver || !signature || typeof timestamp !== "number") {
-      client.send(JSON.stringify({ type: "auth_error", reason: "auth payload requires solver, timestamp, and signature" }));
+      this.sendFrame(client, {
+        type: "auth_error",
+        reason: "auth payload requires solver, timestamp, and signature",
+      });
       return;
     }
 
     const now = Math.floor(Date.now() / 1000);
     const skew = Math.abs(now - timestamp);
     if (skew > 300) {
-      client.send(JSON.stringify({ type: "auth_error", reason: "stale or future auth timestamp" }));
+      this.sendFrame(client, { type: "auth_error", reason: "stale or future auth timestamp" });
       return;
     }
 
     const solverRecord = await this.solversService.get(solver);
     if (!solverRecord || !solverRecord.isActive) {
-      client.send(JSON.stringify({ type: "auth_error", reason: "solver not registered or inactive" }));
+      this.sendFrame(client, {
+        type: "auth_error",
+        reason: "solver not registered or inactive",
+      });
       return;
     }
 
     try {
       verifyStellarSignature(solver, buildWsAuthMessage(solver, timestamp), signature);
     } catch {
-      client.send(JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }));
+      this.sendFrame(client, { type: "auth_error", reason: "invalid solver signature" });
       return;
     }
 
@@ -638,18 +696,16 @@ export class IntentsGateway
       subscriptionCount: authFilter?.subscriptionCount ?? 0,
     });
 
-    client.send(JSON.stringify({ type: "auth_ok" }));
+    this.sendFrame(client, { type: "auth_ok" });
 
     // Send scoped snapshot of currently-eligible intents (issue #436).
     try {
       const eligible = this.intentIndex.getEligibleFor(solverRecord);
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({
-          type: "eligible_snapshot",
-          intents: eligible,
-          count: eligible.length,
-        }));
-      }
+      this.sendFrame(client, {
+        type: "eligible_snapshot",
+        intents: eligible,
+        count: eligible.length,
+      });
     } catch {
       // Non-fatal — solver can fall back to GET /solvers/:address/eligible-intents.
     }
@@ -743,6 +799,20 @@ export class IntentsGateway
     // Push into replay buffer before sending.
     this.ringBuffer.push(sequencedEvent);
 
+    // Issue #456 — validate the sequenced event once per broadcast (not once
+    // per subscriber) outside production. Advisory only: an event that no
+    // longer matches its documented schema is logged loudly and still sent.
+    if (wsValidationEnabled()) {
+      try {
+        const result = validateServerFrame(sequencedEvent);
+        if (!result.ok) {
+          logger.warn(`ws broadcast frame failed schema validation: ${result.error}`);
+        }
+      } catch {
+        // Validation must never break a broadcast.
+      }
+    }
+
     logger.debug(`ws broadcast type=${event.type} seq=${seq} subscribers=${this.subscribers.size}`);
 
     if (this.backplane) {
@@ -822,7 +892,7 @@ export class IntentsGateway
   onModuleDestroy() {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     for (const [client] of this.subscribers) {
-      client.close(1001, "Server shutting down");
+      client.close(WS_CLOSE_GOING_AWAY, "Server shutting down");
       this.removeSubscriber(client);
     }
   }

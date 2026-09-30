@@ -40,6 +40,7 @@ GET  /api/v1/stats                — protocol stats
 GET  /health                      — service health
 WS   /ws                          — real-time intent feed
 GET  /docs                        — Swagger / OpenAPI docs
+GET  /docs/ws                     — AsyncAPI contract for the WS protocol (YAML)
 GET  /api/v1/chain/health         — Soroban RPC health (read-only)
 GET  /api/v1/chain/ledger         — latest Soroban ledger
 GET  /api/v1/chain/network        — Soroban network info
@@ -56,6 +57,13 @@ the accept critical section with stable error codes (`ANTIGRIEFING_COOLDOWN`,
 env-configurable, admin-declared chain incidents are excluded from the ratio,
 and every action is audited. See
 [`docs/solver-anti-griefing.md`](docs/solver-anti-griefing.md).
+
+### WebSocket protocol
+
+The `/ws` feed is versioned via `Sec-WebSocket-Protocol: vortex.v1` and fully
+specified in AsyncAPI: fetch the live contract at `GET /docs/ws`, read
+[`docs/websocket-protocol.md`](docs/websocket-protocol.md) for the guide, and
+generate SDK types with `npm run generate:ws-types`.
 
 ---
 

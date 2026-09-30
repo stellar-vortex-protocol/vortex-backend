@@ -1,0 +1,779 @@
+# Vortex intent stream — AsyncAPI definition (issue #456)
+#
+# Single source of truth for every frame exchanged over the WebSocket endpoint
+# at `/ws`.
+#
+#   Live document : GET /docs/ws
+#   Generated types: `npm run generate:ws-types` → src/generated/ws-api-types.ts
+#   Contract tests : test/asyncapi-contract.e2e-spec.ts captures frames over
+#                    the wire and validates them against `components.schemas`.
+asyncapi: 3.0.0
+info:
+  title: Vortex Intent Stream
+  version: 1.0.0
+  description: |
+    JSON frames exchanged over a single WebSocket endpoint (`/ws`). The socket
+    is public and read-only: solvers accept/fill intents over the
+    authenticated REST API, never over the socket.
+
+    ## Protocol versioning
+
+    The handshake negotiates the protocol version with the standard
+    `Sec-WebSocket-Protocol` header:
+
+    | Client handshake | Server behaviour |
+    | --- | --- |
+    | `Sec-WebSocket-Protocol: vortex.v1` | echoes `vortex.v1` — version 1 selected |
+    | header absent | accepted and treated as `vortex.v1` (documented default) |
+    | header lists several, `vortex.v1` among them | echoes `vortex.v1` |
+    | only unknown versions (e.g. `vortex.v2`) | echoes one offered token so the handshake completes, then immediately closes with code `1002` |
+
+    The `connected` frame repeats the negotiated version in its `protocol`
+    field so a client can assert what the server is actually speaking.
+
+    ## Close codes
+
+    | Code | Meaning |
+    | --- | --- |
+    | `1001` | Server is shutting down — reconnect. |
+    | `1002` | Unsupported protocol version — reconnect offering a supported `Sec-WebSocket-Protocol`. |
+
+    ## Frame semantics
+
+    * Every broadcast event carries a monotonically increasing `seq`. A client
+      that misses frames sends `{ "type": "replay", "fromSeq": <last seen seq> }`
+      to fill the gap; `replay_too_old` means the gap is no longer buffered and
+      a fresh snapshot is required.
+    * Per-connection server-side filters (`subscribe`) apply to the live feed
+      only; replayed frames are already sequenced events and are returned as
+      they were broadcast.
+    * Protocol-level errors (`auth_error`, `subscribe_rejected`,
+      `replay_too_old`) are delivered as frames — the socket stays open.
+
+    ## Validation
+
+    In `development` and `test` the gateway validates every inbound client
+    message and every outbound frame against these schemas and logs
+    `ws invalid …` warnings on mismatch; validation is advisory there (it never
+    changes wire behaviour). CI enforces the same schemas through
+    `test/asyncapi-contract.e2e-spec.ts`.
+defaultContentType: application/json
+
+servers:
+  vortex:
+    name: Vortex backend
+    host: "{host}:{port}"
+    protocol: ws
+    pathname: /ws
+    description: |
+      Local development endpoint. Deployments terminate TLS upstream, so use
+      `wss://` in production.
+    # Machine-readable list of the `Sec-WebSocket-Protocol` values this server
+    # accepts on the handshake for this channel.
+    x-vortex-subprotocols:
+      - vortex.v1
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "4000"
+
+channels:
+  intentStream:
+    address: /ws
+    title: Intent stream
+    summary: Multiplexed feed of intent lifecycle events, control frames and replay frames.
+    description: |
+      One channel carries everything: control frames (connection, snapshot,
+      subscription, authentication), intent lifecycle events, kill-switch
+      status and replay frames. Delivery is filtered per connection by
+      `subscribe` (chain filter / capability filter); clients without a filter
+      receive the full feed.
+    servers:
+      - $ref: "#/servers/vortex"
+    messages:
+      # ── server → client ────────────────────────────────────────────────
+      connected:
+        $ref: "#/components/messages/connected"
+      snapshot:
+        $ref: "#/components/messages/snapshot"
+      subscribed:
+        $ref: "#/components/messages/subscribed"
+      subscribeRejected:
+        $ref: "#/components/messages/subscribeRejected"
+      replayStart:
+        $ref: "#/components/messages/replayStart"
+      replayEnd:
+        $ref: "#/components/messages/replayEnd"
+      replayTooOld:
+        $ref: "#/components/messages/replayTooOld"
+      authOk:
+        $ref: "#/components/messages/authOk"
+      authError:
+        $ref: "#/components/messages/authError"
+      eligibleSnapshot:
+        $ref: "#/components/messages/eligibleSnapshot"
+      intentCreated:
+        $ref: "#/components/messages/intentCreated"
+      intentAccepted:
+        $ref: "#/components/messages/intentAccepted"
+      intentFilled:
+        $ref: "#/components/messages/intentFilled"
+      intentCancelled:
+        $ref: "#/components/messages/intentCancelled"
+      intentExpired:
+        $ref: "#/components/messages/intentExpired"
+      intentSlashed:
+        $ref: "#/components/messages/intentSlashed"
+      protocolStatus:
+        $ref: "#/components/messages/protocolStatus"
+      # ── client → server ────────────────────────────────────────────────
+      subscribe:
+        $ref: "#/components/messages/subscribe"
+      replay:
+        $ref: "#/components/messages/replay"
+      auth:
+        $ref: "#/components/messages/auth"
+
+operations:
+  sendToClient:
+    title: Server → client frames
+    summary: Every frame the gateway pushes to a connected client.
+    action: send
+    channel:
+      $ref: "#/channels/intentStream"
+    messages:
+      - $ref: "#/channels/intentStream/messages/connected"
+      - $ref: "#/channels/intentStream/messages/snapshot"
+      - $ref: "#/channels/intentStream/messages/subscribed"
+      - $ref: "#/channels/intentStream/messages/subscribeRejected"
+      - $ref: "#/channels/intentStream/messages/replayStart"
+      - $ref: "#/channels/intentStream/messages/replayEnd"
+      - $ref: "#/channels/intentStream/messages/replayTooOld"
+      - $ref: "#/channels/intentStream/messages/authOk"
+      - $ref: "#/channels/intentStream/messages/authError"
+      - $ref: "#/channels/intentStream/messages/eligibleSnapshot"
+      - $ref: "#/channels/intentStream/messages/intentCreated"
+      - $ref: "#/channels/intentStream/messages/intentAccepted"
+      - $ref: "#/channels/intentStream/messages/intentFilled"
+      - $ref: "#/channels/intentStream/messages/intentCancelled"
+      - $ref: "#/channels/intentStream/messages/intentExpired"
+      - $ref: "#/channels/intentStream/messages/intentSlashed"
+      - $ref: "#/channels/intentStream/messages/protocolStatus"
+
+  receiveFromClient:
+    title: Client → server messages
+    summary: Messages a client may send; anything else is ignored.
+    action: receive
+    channel:
+      $ref: "#/channels/intentStream"
+    messages:
+      - $ref: "#/channels/intentStream/messages/subscribe"
+      - $ref: "#/channels/intentStream/messages/replay"
+      - $ref: "#/channels/intentStream/messages/auth"
+
+components:
+  messages:
+    # ── server → client ──────────────────────────────────────────────────
+    connected:
+      name: connected
+      title: Connection accepted
+      summary: First frame on every connection; carries the negotiated protocol version.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/Connected"
+    snapshot:
+      name: snapshot
+      title: Open-intent snapshot
+      summary: Up to 20 currently open intents, sent right after `connected`.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/Snapshot"
+    subscribed:
+      name: subscribed
+      title: Subscription installed
+      summary: Acknowledges a `subscribe` message and echoes the installed filter.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/Subscribed"
+    subscribeRejected:
+      name: subscribe_rejected
+      title: Subscription rejected
+      summary: |
+        A `subscribe` message violated a per-connection limit (too many chains
+        in one message, or too many `subscribe` messages on this connection).
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/SubscribeRejected"
+    replayStart:
+      name: replay_start
+      title: Replay started
+      summary: Precedes the replayed events; `count` is the number that follow.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/ReplayStart"
+    replayEnd:
+      name: replay_end
+      title: Replay finished
+      summary: Terminates a replay burst.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/ReplayEnd"
+    replayTooOld:
+      name: replay_too_old
+      title: Replay window exceeded
+      summary: |
+        The requested `fromSeq` is older than the oldest retained event.
+        The client must discard its cursor and re-read `snapshot`.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/ReplayTooOld"
+    authOk:
+      name: auth_ok
+      title: Solver authenticated
+      summary: |
+        The solver signature verified; subsequent frames are filtered by the
+        solver's registered capabilities (unless `subscribe { "all": true }`).
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/AuthOk"
+    authError:
+      name: auth_error
+      title: Authentication rejected
+      summary: Malformed payload, stale timestamp, unknown solver or bad signature.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/AuthError"
+    eligibleSnapshot:
+      name: eligible_snapshot
+      title: Solver-scoped eligible intents
+      summary: Open intents matching the authenticated solver's chains/tokens, sent after `auth_ok`.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/EligibleSnapshot"
+    intentCreated:
+      name: intent_created
+      title: Intent created
+      summary: A new intent is open for solving; carries the full intent.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/IntentCreated"
+    intentAccepted:
+      name: intent_accepted
+      title: Intent accepted
+      summary: A solver claimed the intent.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/IntentAccepted"
+    intentFilled:
+      name: intent_filled
+      title: Intent filled
+      summary: The accepting solver settled the intent.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/IntentFilled"
+    intentCancelled:
+      name: intent_cancelled
+      title: Intent cancelled
+      summary: The user cancelled the intent.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/IntentCancelled"
+    intentExpired:
+      name: intent_expired
+      title: Intent expired
+      summary: The deadline passed before any solver filled the intent.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/IntentExpired"
+    intentSlashed:
+      name: intent_slashed
+      title: Intent slashed
+      summary: The accepted intent was not filled before the deadline and the bond was slashed.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/IntentSlashed"
+    protocolStatus:
+      name: protocol_status
+      title: Kill-switch status change
+      summary: |
+        An operator paused or resumed part of the protocol (scope: chain,
+        token, operation or global). Clients should stop affected flows while
+        `paused` is true.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/ProtocolStatus"
+    # ── client → server ──────────────────────────────────────────────────
+    subscribe:
+      name: subscribe
+      title: Install a feed filter
+      summary: |
+        `chains` filters the feed by source chain; `all: true` opts out of
+        capability filtering after authentication. Unknown chain values are
+        dropped, so a message may end up subscribing to nothing.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/SubscribeMessage"
+    replay:
+      name: replay
+      title: Request replay
+      summary: Replay every retained event with `seq > fromSeq`.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/ReplayMessage"
+    auth:
+      name: auth
+      title: Authenticate as a solver
+      summary: |
+        Signs `timestamp` with the solver's Stellar keypair (see
+        `buildWsAuthMessage`). Timestamps more than 300 s from server time are
+        rejected as stale.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/AuthMessage"
+
+  schemas:
+    # ── server → client frames ───────────────────────────────────────────
+    Connected:
+      type: object
+      additionalProperties: false
+      required: [type, message, seq, protocol]
+      properties:
+        type:
+          type: string
+          enum: [connected]
+        message:
+          type: string
+          description: Human-readable greeting.
+        seq:
+          type: integer
+          minimum: 0
+          description: Last sequence number already assigned (0 when nothing has been broadcast).
+        protocol:
+          type: string
+          enum: [vortex.v1]
+          description: Negotiated subprotocol version (defaults to v1 when the client offered none).
+
+    Snapshot:
+      type: object
+      additionalProperties: false
+      required: [type, intents, seq]
+      properties:
+        type:
+          type: string
+          enum: [snapshot]
+        intents:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/Intent"
+        seq:
+          type: integer
+          minimum: 0
+
+    Subscribed:
+      type: object
+      additionalProperties: false
+      required: [type, filter]
+      properties:
+        type:
+          type: string
+          enum: [subscribed]
+        filter:
+          $ref: "#/components/schemas/SubscribedFilter"
+
+    SubscribedFilter:
+      type: object
+      additionalProperties: false
+      description: |
+        Either `{ "all": true }` (unfiltered feed) or the chain filter that was
+        installed, containing only chains the protocol recognises.
+      properties:
+        all:
+          type: boolean
+        chains:
+          type: array
+          items:
+            $ref: "#/components/schemas/SupportedChain"
+
+    SubscribeRejected:
+      type: object
+      additionalProperties: false
+      required: [type, reason]
+      properties:
+        type:
+          type: string
+          enum: [subscribe_rejected]
+        reason:
+          type: string
+
+    ReplayStart:
+      type: object
+      additionalProperties: false
+      required: [type, fromSeq, count]
+      properties:
+        type:
+          type: string
+          enum: [replay_start]
+        fromSeq:
+          type: integer
+          minimum: 0
+          description: Cursor the client asked for.
+        count:
+          type: integer
+          minimum: 0
+          description: Number of event frames that follow before `replay_end`.
+
+    ReplayEnd:
+      type: object
+      additionalProperties: false
+      required: [type, count]
+      properties:
+        type:
+          type: string
+          enum: [replay_end]
+        count:
+          type: integer
+          minimum: 0
+
+    ReplayTooOld:
+      type: object
+      additionalProperties: false
+      required: [type, fromSeq, oldestAvailableSeq]
+      properties:
+        type:
+          type: string
+          enum: [replay_too_old]
+        fromSeq:
+          type: integer
+          minimum: 0
+        oldestAvailableSeq:
+          type: integer
+          minimum: 1
+          description: Oldest seq still retained — retry from `oldestAvailableSeq - 1` or take a new snapshot.
+
+    AuthOk:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [auth_ok]
+
+    AuthError:
+      type: object
+      additionalProperties: false
+      required: [type, reason]
+      properties:
+        type:
+          type: string
+          enum: [auth_error]
+        reason:
+          type: string
+          enum:
+            - auth payload requires solver, timestamp, and signature
+            - stale or future auth timestamp
+            - solver not registered or inactive
+            - invalid solver signature
+
+    EligibleSnapshot:
+      type: object
+      additionalProperties: false
+      required: [type, intents, count]
+      properties:
+        type:
+          type: string
+          enum: [eligible_snapshot]
+        intents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Intent"
+        count:
+          type: integer
+          minimum: 0
+
+    IntentCreated:
+      type: object
+      additionalProperties: false
+      required: [type, seq, intent]
+      properties:
+        type:
+          type: string
+          enum: [intent_created]
+        seq:
+          type: integer
+          minimum: 1
+        intent:
+          $ref: "#/components/schemas/Intent"
+
+    IntentAccepted:
+      type: object
+      additionalProperties: false
+      required: [type, seq, intentId, solver]
+      properties:
+        type:
+          type: string
+          enum: [intent_accepted]
+        seq:
+          type: integer
+          minimum: 1
+        intentId:
+          type: string
+        solver:
+          type: string
+          description: Stellar public key of the accepting solver.
+
+    IntentFilled:
+      type: object
+      additionalProperties: false
+      required: [type, seq, intentId, solver, fillAmount]
+      properties:
+        type:
+          type: string
+          enum: [intent_filled]
+        seq:
+          type: integer
+          minimum: 1
+        intentId:
+          type: string
+        solver:
+          type: string
+        fillAmount:
+          type: string
+          description: Filled amount in destination-token base units.
+
+    IntentCancelled:
+      type: object
+      additionalProperties: false
+      required: [type, seq, intentId]
+      properties:
+        type:
+          type: string
+          enum: [intent_cancelled]
+        seq:
+          type: integer
+          minimum: 1
+        intentId:
+          type: string
+
+    IntentExpired:
+      type: object
+      additionalProperties: false
+      required: [type, seq, intentId]
+      properties:
+        type:
+          type: string
+          enum: [intent_expired]
+        seq:
+          type: integer
+          minimum: 1
+        intentId:
+          type: string
+
+    IntentSlashed:
+      type: object
+      additionalProperties: false
+      required: [type, seq, intentId, reason]
+      properties:
+        type:
+          type: string
+          enum: [intent_slashed]
+        seq:
+          type: integer
+          minimum: 1
+        intentId:
+          type: string
+        solver:
+          type: [string, "null"]
+          description: Slashed solver address; null/absent when the accepted intent had no solver on record.
+        reason:
+          type: string
+
+    ProtocolStatus:
+      type: object
+      additionalProperties: false
+      required: [type, seq, action, scope, chain, token, operation, reasonCode, reason, paused]
+      properties:
+        type:
+          type: string
+          enum: [protocol_status]
+        seq:
+          type: integer
+          minimum: 1
+        action:
+          type: string
+          enum: [paused, resumed]
+        scope:
+          type: string
+          enum: [global, chain, token, operation]
+        chain:
+          type: [string, "null"]
+        token:
+          type: [string, "null"]
+        operation:
+          type: [string, "null"]
+        reasonCode:
+          type: string
+        reason:
+          type: string
+        paused:
+          type: boolean
+          description: True when the switch is active after this change.
+
+    # ── client → server messages ─────────────────────────────────────────
+    SubscribeMessage:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [subscribe]
+        chains:
+          type: array
+          description: Chain names to keep; values the protocol does not recognise are dropped.
+          items:
+            type: string
+        all:
+          type: boolean
+          description: Opt out of capability filtering and receive the full feed.
+
+    ReplayMessage:
+      type: object
+      additionalProperties: false
+      required: [type, fromSeq]
+      properties:
+        type:
+          type: string
+          enum: [replay]
+        fromSeq:
+          type: integer
+          minimum: 0
+          description: Highest sequence number the client has already processed.
+
+    AuthMessage:
+      type: object
+      additionalProperties: false
+      required: [type, solver, timestamp, signature]
+      properties:
+        type:
+          type: string
+          enum: [auth]
+        solver:
+          type: string
+          description: Stellar public key of the solver.
+        timestamp:
+          type: integer
+          description: Unix seconds; must be within 300 s of server time.
+        signature:
+          type: string
+          description: Base64 ed25519 signature over the WS auth message.
+
+    # ── shared payload shapes ────────────────────────────────────────────
+    SupportedChain:
+      type: string
+      enum:
+        - stellar
+        - ethereum
+        - base
+        - polygon
+        - arbitrum
+        - optimism
+        - avalanche
+
+    Intent:
+      type: object
+      description: |
+        An intent as it appears on the feed (REST `GET /api/v1/intents/:id`
+        returns the same shape). Additional keys may appear as the payload
+        evolves; clients must ignore unknown fields.
+      required:
+        - intentId
+        - user
+        - srcChain
+        - srcToken
+        - srcAmount
+        - dstToken
+        - minDstAmount
+        - state
+        - createdAt
+        - deadline
+      properties:
+        intentId:
+          type: string
+        user:
+          type: string
+          description: User address that created the intent.
+        srcChain:
+          $ref: "#/components/schemas/SupportedChain"
+        srcToken:
+          $ref: "#/components/schemas/TokenInfo"
+        srcAmount:
+          type: string
+          description: Source amount in base units (bigint as string).
+        dstToken:
+          $ref: "#/components/schemas/StellarToken"
+        minDstAmount:
+          type: string
+        quotedDstAmount:
+          type: string
+        solver:
+          type: string
+          description: Solver that accepted the intent (absent while open).
+        state:
+          type: string
+          enum: [open, accepted, filled, cancelled, expired, slashed]
+        createdAt:
+          type: integer
+          description: Unix seconds.
+        deadline:
+          type: integer
+          description: Unix seconds.
+        filledAt:
+          type: integer
+        fillAmount:
+          type: string
+        feeAmount:
+          type: string
+        txHash:
+          type: string
+        slashedAt:
+          type: integer
+        slashReason:
+          type: string
+        paramsVersion:
+          type: integer
+          description: Governance parameter snapshot version active at creation.
+
+    TokenInfo:
+      type: object
+      required: [address, symbol, name, decimals, chain]
+      properties:
+        address:
+          type: string
+        symbol:
+          type: string
+        name:
+          type: string
+        decimals:
+          type: integer
+        chain:
+          $ref: "#/components/schemas/SupportedChain"
+        logoURI:
+          type: string
+        priceUSD:
+          type: number
+
+    StellarToken:
+      type: object
+      required: [contract, symbol, decimals]
+      properties:
+        contract:
+          type: string
+        symbol:
+          type: string
+        decimals:
+          type: integer
+        priceUSD:
+          type: number
