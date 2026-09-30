@@ -1,0 +1,43 @@
+rule_files:
+  - vortex-canary.yml
+
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      # Last success at t=0, interval 5 min → alert once > 15 min pass.
+      - series: 'vortex_canary_last_success_timestamp_seconds{network="testnet"}'
+        values: 0x30
+      - series: 'vortex_canary_interval_seconds{network="testnet"}'
+        values: 300x30
+      - series: 'vortex_canary_balance_xlm{network="testnet"}'
+        values: 10 9.8 9.6 9.4 9.2 9 8.5 8 7.5 7 6.5 6 5.5 5 4.5 4x15
+      - series: 'vortex_canary_min_balance_xlm{network="testnet"}'
+        values: 5x30
+      - series: 'vortex_canary_daily_budget_xlm{network="testnet"}'
+        values: 1x30
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: VortexCanaryConsecutiveFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: VortexCanaryConsecutiveFailures
+        exp_alerts:
+          - exp_labels: { severity: page, network: testnet }
+            exp_annotations:
+              summary: "Canary lifecycle failing on testnet"
+              description: "No successful create→quote→accept→fill→confirm run in 3 intervals. See docs/runbooks/on-call.md#scenario-e--synthetic-canary-failing"
+      - eval_time: 25m
+        alertname: VortexCanaryFundsLow
+        exp_alerts:
+          - exp_labels: { severity: ticket, network: testnet }
+            exp_annotations:
+              summary: "Canary solver balance low on testnet"
+              description: "Top up the canary solver account; mainnet runs stop below the threshold."
+      - eval_time: 25m
+        alertname: VortexCanaryBudgetExceeded
+        exp_alerts:
+          - exp_labels: { severity: page, network: testnet }
+            exp_annotations:
+              summary: "Canary spent more than its daily budget on testnet"
+              description: "Suspend the canary CronJob and investigate (fees spiking or funds leaving canary accounts)."

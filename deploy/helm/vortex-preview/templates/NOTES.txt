@@ -1,0 +1,22 @@
+Preview for PR {{ .Values.preview.prNumber | default "(unset)" }} deployed to namespace {{ .Release.Name }}.
+{{- if .Values.preview.headSha }}
+
+  Head SHA under review: {{ .Values.preview.headSha }}
+{{- end }}
+{{- if .Values.ingress.host }}
+
+  HTTP    {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}
+  Docs    {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}/docs
+  WS      {{ if .Values.ingress.tls.enabled }}wss{{ else }}ws{{ end }}://{{ .Values.ingress.host }}/ws
+{{- else }}
+
+  (no ingress.host set — port-forward instead:)
+    kubectl -n {{ .Release.Name }} port-forward svc/{{ include "vortex-preview.fullname" . }} 4000:{{ .Values.service.port }}
+  then http://localhost:4000/ · /docs · ws://localhost:4000/ws
+{{- end }}
+
+  Lifetime: {{ .Values.preview.ttlHours }}h TTL. Torn down on PR close, on removal of the
+  `preview` label, or by the scheduled TTL sweep — whichever comes first.
+
+  Stellar network: {{ .Values.app.stellarNetwork }} (testnet only — this chart has
+  no mainnet code path, by design).

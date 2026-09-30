@@ -1,0 +1,76 @@
+apiVersion: openslo/v1
+kind: SLO
+metadata:
+  name: vortex-relay-availability
+  displayName: Relay API availability
+spec:
+  description: 99.9% of non-5xx responses over 30d. Minimum 100 events/window to avoid low-traffic false alerts.
+  budgetingMethod: occurrences
+  objectives:
+    - displayName: availability
+      target: 0.999
+      value: 1
+  indicators:
+    ratios:
+      good: sum(rate(vortex_http_requests_total{status_code!~"5.."}[5m]))
+      total: sum(rate(vortex_http_requests_total[5m]))
+  timeWindows:
+    - duration: 30d
+      isBudgeting: true
+  alertPolicies: [burn-rate-1h-5m, burn-rate-6h-30m]
+---
+apiVersion: openslo/v1
+kind: SLO
+metadata:
+  name: intent-create-latency
+  displayName: Intent-create p95 latency
+spec:
+  description: 95% of intent creates < 500ms over 7d.
+  budgetingMethod: occurrences
+  objectives:
+    - displayName: p95-create-latency
+      target: 0.95
+      value: 0.5
+  indicators:
+    ratios:
+      good: sum(rate(vortex_intent_create_duration_seconds_bucket{le="0.5"}[5m]))
+      total: sum(rate(vortex_intent_create_duration_seconds_count[5m]))
+---
+apiVersion: openslo/v1
+kind: SLO
+metadata:
+  name: ws-delivery-latency
+  displayName: WS delivery p95 latency
+spec:
+  description: 95% of WS broadcasts delivered < 1s over 7d.
+  budgetingMethod: occurrences
+  objectives:
+    - displayName: p95-ws-latency
+      target: 0.95
+      value: 1.0
+---
+apiVersion: openslo/v1
+kind: SLO
+metadata:
+  name: event-ingestion-lag
+  displayName: Event ingestion lag
+spec:
+  description: Ingestion lag < 30s for 99% of the time over 7d.
+  budgetingMethod: occurrences
+  objectives:
+    - displayName: ingestion-lag
+      target: 0.99
+      value: 30
+---
+apiVersion: openslo/v1
+kind: SLO
+metadata:
+  name: tx-confirmation-latency
+  displayName: Tx confirmation p95 latency
+spec:
+  description: 95% of fills confirmed < 60s over 7d.
+  budgetingMethod: occurrences
+  objectives:
+    - displayName: p95-confirmation
+      target: 0.95
+      value: 60

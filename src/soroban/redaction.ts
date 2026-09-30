@@ -1,7 +1,29 @@
 const SENSITIVE_KEY_PATTERNS = [
+  // Stellar secret seeds (S... strkeys, 56 chars)
   /S[A-Z2-7]{55}/g,
+  // Generic key patterns in JSON/logs
   /secretKey\s*[:=]\s*["']?\S+/gi,
   /privateKey\s*[:=]\s*["']?\S+/gi,
+  /apiKey\s*[:=]\s*["']?\S+/gi,
+  /accessToken\s*[:=]\s*["']?\S+/gi,
+  /refreshToken\s*[:=]\s*["']?\S+/gi,
+  /jwt\s*[:=]\s*["']?\S+/gi,
+  /signingKey\s*[:=]\s*["']?\S+/gi,
+  /webhookSecret\s*[:=]\s*["']?\S+/gi,
+  /channelKey\s*[:=]\s*["']?\S+/gi,
+  /killswitchOperatorToken\s*[:=]\s*["']?\S+/gi,
+  /adminApiKeys\s*[:=]\s*["']?\S+/gi,
+  /sentryDsn\s*[:=]\s*["']?\S+/gi,
+  /vaultToken\s*[:=]\s*["']?\S+/gi,
+  // AWS secret access key
+  /AKIA[0-9A-Z]{16}/g,
+  // Generic password/secret in URL
+  /:\/\/[^:\/\s]+:([^@\/\s]{8,})@/gi,
+  // Database connection strings with passwords
+  /postgresql:\/\/[^:]+:([^@]+)@/gi,
+  /mysql:\/\/[^:]+:([^@]+)@/gi,
+  // Bearer tokens
+  /Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi,
 ];
 
 /**

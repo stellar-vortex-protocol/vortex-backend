@@ -6,6 +6,7 @@ import { StellarTxService } from "../soroban/stellar-tx.service";
 import { IntentsService } from "./intents.service";
 import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
 import { PrismaService } from "../prisma/prisma.service";
+import { ProtocolParamsService } from "../governance/params.service";
 
 const VALID_CONTRACT_ID = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
 
@@ -30,6 +31,21 @@ function fakePrismaService(): PrismaService {
   } as unknown as PrismaService;
 }
 
+function fakeProtocolParamsService(): ProtocolParamsService {
+  return {
+    snapshotForChain: jest.fn().mockReturnValue({
+      version: 0,
+      feeBps: 30,
+      deadlineSeconds: 1800,
+      fillWindowSeconds: 600,
+      capturedAt: new Date().toISOString(),
+    }),
+    getCurrent: jest.fn().mockReturnValue({ version: 0, feeBps: 30, chains: {}, maxExposureRatio: 0.05, slashAmount: "100000000", activeSinceLedger: 0, adoptedAt: new Date().toISOString() }),
+    getPending: jest.fn().mockReturnValue(null),
+    getHistory: jest.fn().mockReturnValue([]),
+  } as unknown as ProtocolParamsService;
+}
+
 function makeService(
   configOverrides: { onchainIntentsEnabled?: boolean; settlementContractId?: string } = {},
   stellarTx?: jest.Mocked<StellarTxService>,
@@ -39,6 +55,7 @@ function makeService(
     fakeConfig(configOverrides),
     stellarTx ?? fakeStellarTxService(),
     fakePrismaService(),
+    fakeProtocolParamsService(),
   );
 }
 
@@ -75,6 +92,10 @@ async function buildService(
       {
         provide: PrismaService,
         useValue: fakePrismaService(),
+      },
+      {
+        provide: ProtocolParamsService,
+        useValue: fakeProtocolParamsService(),
       },
       IntentsService,
     ],
@@ -349,7 +370,7 @@ describe("IntentsService", () => {
   describe("on-chain registration (ONCHAIN_INTENTS_ENABLED)", () => {
     it("stays fully in the repository when the flag is off, never touching StellarTxService", async () => {
       const stellarTxService = fakeStellarTxService();
-      const service = makeService({ onchainIntentsEnabled: false }, stellarTxService);
+      const svc = makeService({ onchainIntentsEnabled: false }, stellarTxService);
 
       const intent = await svc.create(validCreateData());
 
@@ -360,7 +381,7 @@ describe("IntentsService", () => {
     it("invokes the settlement contract and preserves the Intent shape when the flag is on", async () => {
       const stellarTxService = fakeStellarTxService();
       stellarTxService.invokeContract.mockResolvedValue({ hash: "deadbeef", status: "SUCCESS" } as never);
-      const service = makeService(
+      const svc = makeService(
         { onchainIntentsEnabled: true, settlementContractId: VALID_CONTRACT_ID },
         stellarTxService,
       );
@@ -373,7 +394,9 @@ describe("IntentsService", () => {
       expect(call.contractId).toBe(VALID_CONTRACT_ID);
       expect(call.method).toBe("create_intent");
 
-      // response shape is unchanged relative to the in-memory path
+      // Response shape: the in-memory and on-chain paths return the same keys.
+      // usdValueAtCreate (#440) and paramsVersion (#500) are both stamped by
+      // persistNewIntent, so they appear on every newly created intent.
       expect(Object.keys(intent).sort()).toEqual(
         Object.keys({
           intentId: "",
@@ -386,6 +409,8 @@ describe("IntentsService", () => {
           state: "",
           createdAt: 0,
           deadline: 0,
+          paramsVersion: 0,
+          usdValueAtCreate: 0,
         }).sort(),
       );
       expect(await svc.get(intent.intentId)).toBeDefined();
@@ -394,19 +419,19 @@ describe("IntentsService", () => {
     it("rejects with a clear error and does not create the intent when SETTLEMENT_CONTRACT_ID is unset", async () => {
       const stellarTxService = fakeStellarTxService();
       const service = makeService({ onchainIntentsEnabled: true }, stellarTxService);
-      const before = service.getAll().length;
+      const before = (await service.getAll()).length;
 
-      await expect(svc.create(validCreateData())).rejects.toMatchObject({
+      await expect(service.create(validCreateData())).rejects.toMatchObject({
         message: expect.stringContaining("SETTLEMENT_CONTRACT_ID"),
       });
       expect(stellarTxService.invokeContract).not.toHaveBeenCalled();
-      expect(await svc.getAll()).toHaveLength(before);
+      expect(await service.getAll()).toHaveLength(before);
     });
 
     it("rejects and does not create the intent when the on-chain call fails", async () => {
       const stellarTxService = fakeStellarTxService();
       stellarTxService.invokeContract.mockRejectedValue(new Error("submission failed after 5 attempts"));
-      const service = makeService(
+      const svc = makeService(
         { onchainIntentsEnabled: true, settlementContractId: VALID_CONTRACT_ID },
         stellarTxService,
       );
@@ -475,7 +500,7 @@ describe("IntentsService", () => {
           findMany: jest.fn().mockResolvedValue([]),
         },
       } as unknown as PrismaService;
-      const svc = new IntentsService(new InMemoryIntentsRepository(), fakeConfig(), fakeStellarTxService(), prismaService);
+      const svc = new IntentsService(new InMemoryIntentsRepository(), fakeConfig(), fakeStellarTxService(), prismaService, fakeProtocolParamsService());
 
       svc.appendAuditEntry("intent-db", "slashed", "system", "missed fill", { foo: "bar" });
 
@@ -504,7 +529,7 @@ describe("IntentsService", () => {
           findMany: jest.fn().mockResolvedValue([]),
         },
       } as unknown as PrismaService;
-      const svc = new IntentsService(new InMemoryIntentsRepository(), fakeConfig(), fakeStellarTxService(), prismaService);
+      const svc = new IntentsService(new InMemoryIntentsRepository(), fakeConfig(), fakeStellarTxService(), prismaService, fakeProtocolParamsService());
 
       // Should not throw synchronously
       expect(() =>

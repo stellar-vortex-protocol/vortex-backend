@@ -3,9 +3,9 @@ import request from "supertest";
 import { Keypair } from "@stellar/stellar-sdk";
 import { createTestApp } from "./utils/create-test-app";
 import { IntentsService } from "../src/intents/intents.service";
-import { buildCancelMessage, verifyStellarSignature } from "../src/common/stellar-signature";
+import { buildCancelMessage } from "../src/common/stellar-signature";
 
-const USER_KP = Keypair.fromSecret("SCZANGBA5YELHNOHPQLUIZ6MFJLCVX5BPXTBXCMD5SBKX60RCVHQQHK");
+const USER_KP = Keypair.fromSecret("SDIZIS4EXUZTSAHQM2BCYY2HQUZEB2FGQ5C3BJVSYKMU6PF5KIVEQ6V5");
 
 function sign(kp: Keypair, msg: string): string {
   const msgBuf = Buffer.from(msg, "utf8");
@@ -89,8 +89,8 @@ describe("Audit trail e2e (#217)", () => {
     const intentsService = app.get(IntentsService);
 
     // Manually set to expired state and append an audit entry (simulating sweeper)
-    intentsService.update(created.intentId, { state: "expired" });
-    intentsService.appendAuditEntry(
+    await intentsService.update(created.intentId, { state: "expired" });
+    await intentsService.appendAuditEntry(
       created.intentId,
       "expired",
       "system",
@@ -115,12 +115,12 @@ describe("Audit trail e2e (#217)", () => {
     const intentsService = app.get(IntentsService);
 
     // Simulate sweeper slashing
-    intentsService.update(created.intentId, {
+    await intentsService.update(created.intentId, {
       state: "slashed",
       slashedAt: Math.floor(Date.now() / 1000),
       slashReason: "accepted intent not filled before deadline",
     });
-    intentsService.appendAuditEntry(
+    await intentsService.appendAuditEntry(
       created.intentId,
       "slashed",
       "system",
@@ -140,8 +140,8 @@ describe("Audit trail e2e (#217)", () => {
     const created = await createIntent();
     const intentsService = app.get(IntentsService);
 
-    intentsService.appendAuditEntry(created.intentId, "accepted", "SOLVER_A", "solver accepted");
-    intentsService.appendAuditEntry(created.intentId, "filled", "SOLVER_A", "solver filled");
+    await intentsService.appendAuditEntry(created.intentId, "accepted", "SOLVER_A", "solver accepted");
+    await intentsService.appendAuditEntry(created.intentId, "filled", "SOLVER_A", "solver filled");
 
     const res = await request(app.getHttpServer())
       .get(`/api/v1/intents/${created.intentId}/audit`)

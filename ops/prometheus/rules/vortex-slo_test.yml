@@ -1,0 +1,214 @@
+# promtool unit tests for ops/prometheus/rules/vortex-slo.yml (issue #481).
+#
+# Run: promtool test rules ops/prometheus/rules/vortex-slo_test.yml
+#
+# These assert *alert behaviour* rather than raw recording-rule values on
+# purpose. A recording rule is a rate/ratio expression over an extrapolated
+# range, so a hand-written `promql_expr_test` expectation is a second
+# reimplementation of Prometheus's extrapolation arithmetic and goes stale
+# silently. Asserting the threshold an alert fires on exercises the same
+# recording rule through the one surface an operator actually sees, and the
+# arithmetic cancels (all series in a group share a window), so the
+# expectations are stable.
+#
+# NOTE: this file is deliberately NOT matched by prometheus.yml's rule_files
+# glob, and is not mounted into the observability profile. Prometheus would try
+# to parse it as a rule group and refuse to start.
+
+rule_files:
+  - vortex-slo.yml
+
+evaluation_interval: 1m
+tests:
+  # ── Burn-rate alerts ───────────────────────────────────────────────────────
+  # Traffic heavy enough to clear the `> 100/3600` volume guard, so the error
+  # ratio alone decides whether anything fires.
+  - interval: 1m
+    input_series:
+      - series: 'vortex_http_requests_total{method="POST",route="/api/v1/intents",status_code="500"}'
+        values: 0+1x120
+      - series: 'vortex_http_requests_total{method="POST",route="/api/v1/intents",status_code="200"}'
+        values: 10000+10000x120
+    alert_rule_test:
+      # 1 error in 10001 requests = 0.01%, below both the 0.2% fast threshold
+      # and the 0.1% slow one. A relay serving this much traffic is healthy, and
+      # an alert that would page here is the alert that teaches people to ignore
+      # the pager.
+      - eval_time: 100m
+        alertname: VortexHighBurnRate
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: VortexSlowBurnRate
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # 1.5% errors: above the 0.1% slow threshold, below the 0.2% fast one.
+      # Only the slow alert should fire, which is what the severity split
+      # (ticket, not page) is for.
+      - series: 'vortex_http_requests_total{method="POST",route="/api/v1/intents",status_code="500"}'
+        values: 0+15x120
+      - series: 'vortex_http_requests_total{method="POST",route="/api/v1/intents",status_code="200"}'
+        values: 10000+10000x120
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: VortexHighBurnRate
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: VortexSlowBurnRate
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: vortex-relay-availability
+
+  - interval: 1m
+    input_series:
+      # ~9% errors: unambiguously burning on both windows, so the fast alert
+      # pages. Without this case the suite would only prove the burn rules
+      # never fire, which is also what a typo in their expr looks like.
+      - series: 'vortex_http_requests_total{method="POST",route="/api/v1/intents",status_code="500"}'
+        values: 0+100x120
+      - series: 'vortex_http_requests_total{method="POST",route="/api/v1/intents",status_code="200"}'
+        values: 1000+1000x120
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: VortexHighBurnRate
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: vortex-relay-availability
+
+  # ── Event ingestion lag ────────────────────────────────────────────────────
+  - interval: 1m
+    input_series:
+      - series: vortex_event_ingestion_lag_seconds
+        values: 0+0x5 45+45x20
+    alert_rule_test:
+      # Lag crosses 30s at t=6m and the alert has a 10m `for`, so it is firing
+      # by t=20m.
+      - eval_time: 20m
+        alertname: VortexIngestionLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: event-ingestion-lag
+
+  - interval: 1m
+    input_series:
+      # A gauge, so this is a flat 5s: above zero, below the threshold. Nobody
+      # should be paged for an indexer that is five seconds behind.
+      - series: vortex_event_ingestion_lag_seconds
+        values: 5+0x60
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: VortexIngestionLagHigh
+        exp_alerts: []
+
+  # ── Shadow-mode divergence monitor (issue #401) ───────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'vortex_shadow_comparisons_total{transition="accept",expected="ok",outcome="ok"}'
+        values: 0+100x60
+      - series: 'vortex_shadow_divergences_total{transition="accept",reason="outcome_mismatch"}'
+        values: 0+1x60
+    alert_rule_test:
+      # The contract rejected an accept we committed: a hard no-go for the
+      # cutover, so this one pages regardless of how small the ratio is.
+      - eval_time: 60m
+        alertname: VortexShadowDivergenceDetected
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: onchain-cutover-parity
+      - eval_time: 60m
+        alertname: VortexShadowMonitorStarved
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'vortex_shadow_comparisons_total{transition="fill",expected="ok",outcome="ok"}'
+        values: 0+100x60
+      - series: 'vortex_shadow_dropped_total'
+        values: 0+1x60
+    alert_rule_test:
+      # A clean divergence rate with a non-zero drop count: the ratio is
+      # computed over a biased sample, so the cutover decision is unusable
+      # even though nothing looks wrong on the dashboard.
+      - eval_time: 60m
+        alertname: VortexShadowMonitorStarved
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: onchain-cutover-parity
+      - eval_time: 60m
+        alertname: VortexShadowDivergenceDetected
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'vortex_shadow_comparisons_total{transition="cancel",expected="ok",outcome="unavailable"}'
+        values: 0+100x60
+      - series: 'vortex_shadow_divergences_total{transition="cancel",reason="contract_unconfigured"}'
+        values: 0+1x60
+    alert_rule_test:
+      # No contract to simulate against is not evidence of parity, so it gets
+      # its own ticket rather than being read as a clean result.
+      - eval_time: 60m
+        alertname: VortexShadowMonitorUnconfigured
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: onchain-cutover-parity
+
+  # ── Intent lifecycle (issue #481) ──────────────────────────────────────────
+  - interval: 1m
+    input_series:
+      # 100 opens/min, 92 of which reach a terminal state: terminal_ratio 0.92,
+      # just under the 0.95 guard, with real volume behind it.
+      - series: 'vortex_intent_state_transitions_total{from_state="none",to_state="open"}'
+        values: 0+100x60
+      - series: 'vortex_intent_state_transitions_total{from_state="accepted",to_state="filled"}'
+        values: 0+90x60
+      - series: 'vortex_intent_state_transitions_total{from_state="open",to_state="cancelled"}'
+        values: 0+2x60
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: VortexIntentsNotTerminating
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: intent-lifecycle
+
+  - interval: 1m
+    input_series:
+      # Same volume, every intent terminates: the ratio guard is the only
+      # difference from the case above, which is what proves the guard works
+      # rather than the alert firing on any traffic at all.
+      - series: 'vortex_intent_state_transitions_total{from_state="none",to_state="open"}'
+        values: 0+100x60
+      - series: 'vortex_intent_state_transitions_total{from_state="accepted",to_state="filled"}'
+        values: 0+98x60
+      - series: 'vortex_intent_state_transitions_total{from_state="open",to_state="cancelled"}'
+        values: 0+2x60
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: VortexIntentsNotTerminating
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # Solvers accepting 100/min and filling 80/min: an 80% completion rate.
+      - series: 'vortex_intent_state_transitions_total{from_state="open",to_state="accepted"}'
+        values: 0+100x60
+      - series: 'vortex_intent_state_transitions_total{from_state="accepted",to_state="filled"}'
+        values: 0+80x60
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: VortexSolverFillRateLow
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: intent-settlement
+      - eval_time: 60m
+        alertname: VortexIntentsNotTerminating
+        exp_alerts: []

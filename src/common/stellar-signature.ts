@@ -11,6 +11,35 @@
  */
 import { Keypair } from "@stellar/stellar-sdk";
 import { UnauthorizedException } from "@nestjs/common";
+import { createHash } from "node:crypto";
+
+export const INTENT_SIGNATURE_CLOCK_SKEW_SECONDS = 30;
+export const MAX_INTENT_SIGNATURE_TTL_SECONDS = 900;
+
+export interface IntentSignatureContext {
+  network: string;
+  nonce: string;
+  expiresAt: number;
+}
+
+function canonicalPayload(payload: Record<string, string | number | null>): string {
+  return JSON.stringify(
+    Object.fromEntries(Object.entries(payload).sort(([left], [right]) => left.localeCompare(right))),
+  );
+}
+
+function buildV2IntentMessage(
+  context: IntentSignatureContext,
+  action: "accept" | "fill" | "cancel",
+  /**
+   * Build the canonical message that a solver must sign to update their mutable
+   * profile fields (name / supportedChains / supportedTokens / avgFillTime).
+  intentId: string,
+  payload: Record<string, string | number | null>,
+): string {
+  const payloadHash = createHash("sha256").update(canonicalPayload(payload), "utf8").digest("hex");
+  return `vortex:${context.network}:${action}:${intentId}:${context.nonce}:${context.expiresAt}:${payloadHash}`;
+}
 
 /**
  * Verify that `signature` (base64) over `message` (utf-8) was produced by
@@ -42,7 +71,8 @@ export function verifyStellarSignature(
 /**
  * Build the canonical message that a user must sign to cancel an intent.
  */
-export function buildCancelMessage(intentId: string): string {
+export function buildCancelMessage(intentId: string, context?: IntentSignatureContext, user?: string): string {
+  if (context) return buildV2IntentMessage(context, "cancel", intentId, { user: user ?? "" });
   return `cancel:${intentId}`;
 }
 
@@ -56,14 +86,27 @@ export function buildWsAuthMessage(solver: string, timestamp: number | string): 
 /**
  * Build the canonical message that a solver must sign to accept an intent.
  */
-export function buildAcceptMessage(intentId: string, solver: string): string {
+export function buildAcceptMessage(intentId: string, solver: string, context?: IntentSignatureContext): string {
+  if (context) return buildV2IntentMessage(context, "accept", intentId, { solver });
   return `accept:${intentId}:${solver}`;
 }
 
 /**
  * Build the canonical message that a solver must sign to fill an intent.
  */
-export function buildFillMessage(intentId: string, solver: string): string {
+export function buildFillMessage(
+  intentId: string,
+  solver: string,
+  context?: IntentSignatureContext,
+  fill?: { fillAmount: string; txHash?: string },
+): string {
+  if (context) {
+    return buildV2IntentMessage(context, "fill", intentId, {
+      solver,
+      fillAmount: fill?.fillAmount ?? "",
+      txHash: fill?.txHash ?? null,
+    });
+  }
   return `fill:${intentId}:${solver}`;
 }
 
@@ -82,8 +125,47 @@ export function buildSolverStatusMessage(action: "deactivate" | "reactivate" | "
 }
 
 /**
+ * Build the canonical message that a solver must sign to update its own
+ * mutable profile fields (name / supportedChains / supportedTokens /
+ * avgFillTime — issue #273, `PATCH /api/v1/solvers/:address`).
+ *
+ * Signing over just the address is sufficient here: it proves control of the
+ * account whose profile is being edited, and the request body is already
+ * constrained by the DTO whitelist so no immutable field can ride along.
+ */
+export function buildUpdateSolverMessage(address: string): string {
+  return `update-solver:${address}`;
+}
+
+/**
  * Build the canonical message that a solver must sign to submit a slash dispute.
  */
 export function buildDisputeMessage(slashId: string, address: string, reason: string): string {
   return `dispute:${slashId}:${address}:${reason}`;
+}
+
+/**
+ * Build the canonical message a reviewer must sign to move a dispute into review.
+ */
+export function buildDisputeReviewMessage(disputeId: string): string {
+  return `dispute-review:${disputeId}`;
+}
+
+/**
+ * Build the canonical message a reviewer must sign to decide a dispute.
+ */
+export function buildDisputeDecisionMessage(disputeId: string, resolution: string, reason: string): string {
+  return `dispute-decision:${disputeId}:${resolution}:${reason}`;
+}
+
+/**
+ * Build the canonical message that a solver must sign to update their mutable
+ * profile fields (name / supportedChains / supportedTokens / avgFillTime).
+ *
+ * Signing over just the address is sufficient here: it proves control of the
+ * account whose profile is being edited, and the request body is already
+ * constrained by the DTO whitelist so no immutable field can ride along.
+ */
+export function buildUpdateSolverMessage(address: string): string {
+  return `update-solver:${address}`;
 }

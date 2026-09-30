@@ -38,14 +38,17 @@ export class LoggingInterceptor implements NestInterceptor {
         ? request.headers["x-request-id"][0]
         : request.headers["x-request-id"]) ?? uuidv4();
 
+    // Sanitize the URL before logging to prevent log-injection via crafted paths.
+    // Computed once and used for *both* lines — emitting the raw URL on the
+    // correlated line would let an attacker forge an extra entry there.
+    const safeUrl = sanitizeForLog(request.originalUrl);
+
     return next.handle().pipe(
       tap(() => {
         const duration = Date.now() - start;
         logger.info(
-          `[${request.requestId}] ${request.method} ${request.originalUrl} ${response.statusCode} ${duration}ms`,
+          `[${request.requestId}] ${request.method} ${safeUrl} ${response.statusCode} ${duration}ms`,
         );
-        // Sanitize the URL before logging to prevent log-injection via crafted paths.
-        const safeUrl = sanitizeForLog(request.originalUrl);
         logger.info(`${request.method} ${safeUrl} ${response.statusCode} ${duration}ms`);
       }),
     );

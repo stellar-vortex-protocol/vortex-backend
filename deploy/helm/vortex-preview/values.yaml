@@ -1,0 +1,152 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# vortex-preview — default values (issue #485)
+#
+# Everything here is deliberately *disposable*. A preview namespace is deleted
+# on PR close, on `preview`-label removal, or at most `preview.ttlHours` after
+# it was created, so:
+#   * storage is emptyDir, never a PVC — no persistent volume can outlive (or
+#     block) namespace deletion, and the chart works on a cluster without a
+#     default StorageClass;
+#   * persistence of intents/solvers is `memory` — the repositories seed
+#     themselves from the same builders `npm run seed` exercises, so the API
+#     serves populated data with no migration/seed coupling;
+#   * credentials are random values injected per run by the workflow, never
+#     referenced from a secret store.
+#
+# The workflow (.github/workflows/preview.yml) overrides the fields marked
+# "workflow-set" on every install; the defaults here are what you get from a
+# plain `helm template ./deploy/helm/vortex-preview` during review.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# One replica is the correct answer for a preview: it keeps the cost model
+# obvious (one pod per PR) and matches INTENTS_PERSISTENCE=memory, which has
+# no cross-replica story anyway.
+replicaCount: 1
+
+image:
+  # workflow-set: ghcr.io/<owner>/<repo>/vortex-backend
+  repository: ghcr.io/stellar-vortex-protocol/vortex-backend
+  # workflow-set: pr-<number>-<head sha, 12 chars>
+  tag: latest
+  pullPolicy: IfNotPresent
+  # Preview tags are content-addressed by PR head SHA, so IfNotPresent is
+  # safe: the tag never mutates underneath us the way `main` could.
+  pullSecrets: []
+
+# ── Preview identity (informational; set by the workflow) ────────────────────
+preview:
+  prNumber: ""
+  headSha: ""
+  ttlHours: "6"
+
+# ── Application ──────────────────────────────────────────────────────────────
+app:
+  # Throwaway Stellar TESTNET signing key, generated and masked by the workflow
+  # for each run. Empty is valid: on-chain write paths are no-ops without it.
+  # Never put a funded or mainnet key here — see docs/ci/preview-environments.md.
+  signingKey: ""
+
+  # `development` is required, not a default:
+  #   * env.validation.ts only accepts development|production|test;
+  #   * Swagger is served only when NODE_ENV !== "production" — the preview's
+  #     whole point includes a browsable /docs;
+  #   * `development` skips the strict SETTLEMENT_/SOLVER_REGISTRY_CONTRACT_ID
+  #     startup check, so a preview can boot without deployed contracts.
+  nodeEnv: development
+
+  stellarNetwork: testnet
+  sorobanRpcUrl: https://soroban-testnet.stellar.org
+
+  corsOrigin: "*"
+
+  # Admin RBAC (`x-admin-key`) stays disabled by default: nothing in a preview
+  # needs it, and a published admin secret in a PR comment would be a habit we
+  # must not build. Enable per-namespace with:
+  #   --set app.adminApiKeys='preview:superadmin:<32+ random chars>'
+  adminApiKeys: ""
+
+  # X-Forwarded-For hops to trust. Exactly one: the ingress controller. Without
+  # this, per-IP WS limits (WS_MAX_CONNECTIONS_PER_IP) would see every
+  # connection as coming from the ingress pod's address and throttle the whole
+  # preview as a single client.
+  wsTrustProxyHops: "1"
+
+  env: []
+
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+  # Kubernetes probe wiring. `/health/startup` covers `prisma migrate deploy`
+  # running in the container's entrypoint before the listener opens, so a slow
+  # migration delays readiness instead of failing liveness and crash-looping.
+  probes:
+    startupFailureThreshold: 60   # 60 × 5s = 5 min for migrations
+    startupPeriodSeconds: 5
+    readyPeriodSeconds: 10
+    readyFailureThreshold: 3
+    livePeriodSeconds: 10
+    liveFailureThreshold: 3
+
+# ── Ingress (HTTP + WS on the same host) ─────────────────────────────────────
+ingress:
+  enabled: true
+  # workflow-set: pr-<number>.<vars.PREVIEW_DOMAIN>
+  host: ""
+  # workflow-set: vars.PREVIEW_INGRESS_CLASS (e.g. "nginx"). Empty lets the
+  # cluster's default class answer — fine for a single-class cluster.
+  className: ""
+  annotations: {}
+    # ingress-nginx forwards the Upgrade header without extra configuration;
+    # for nginxinc/nginx-ingress you would instead need:
+    #   nginx.org/websocket-services: <service-name>
+    # See the chart README for the per-controller notes.
+  tls:
+    enabled: false
+    # Optional wildcard cert for *.<domain>; empty uses the ingress default.
+    secretName: ""
+
+# ── Ephemeral Postgres ───────────────────────────────────────────────────────
+# A Deployment + emptyDir rather than a StatefulSet + PVC: preview data dies
+# with the namespace by design, and a chart that needs a StorageClass is a
+# chart that fails on half the clusters it could otherwise run on.
+postgres:
+  enabled: true
+  image: postgres:16-alpine       # same major as ci.yml's service container
+  user: vortex
+  database: vortex
+  # workflow-set: random per-run password (masked in the workflow log).
+  password: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+# ── Ephemeral Redis ──────────────────────────────────────────────────────────
+# Same reasoning as Postgres. Serves the WS backplane, BullMQ jobs, flag pub/sub
+# and the kill-switch cache — i.e. the exact integrations a reviewer of a WS or
+# auth PR needs exercised.
+redis:
+  enabled: true
+  image: redis:7-alpine           # same tag as docker-compose.yml
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 250m, memory: 256Mi }
+
+# ── Cost cap (cluster half) ──────────────────────────────────────────────────
+# The workflow's PREVIEW_MAX_CONCURRENT check is best-effort (two deploys can
+# race it). This ResourceQuota is the hard guarantee: whatever happens, a
+# preview cannot take more than this slice of the cluster.
+quota:
+  enabled: true
+  hard:
+    requests.cpu: "1"
+    requests.memory: 2Gi
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    pods: "16"
+
+service:
+  # ClusterIP only. Previews are reachable *only* through the ingress, so a
+  # leaked Service type or a port-forward habit never becomes the access path.
+  type: ClusterIP
+  port: 4000

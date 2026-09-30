@@ -1,0 +1,17 @@
+apiVersion: 1
+
+providers:
+  - name: vortex
+    orgId: 1
+    folder: Vortex
+    # The committed JSON is the source of truth; edit ops/grafana/build.mjs and
+    # re-run `node ops/grafana/build.mjs`. allowUiUpdates: false is what makes
+    # that stick — without it an operator "fixes" a panel in the UI, the change
+    # never reaches the repo, and the next provisioning run silently reverts it.
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards/json
+      foldersFromFilesStructure: false

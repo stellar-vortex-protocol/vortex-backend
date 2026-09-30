@@ -1,5 +1,5 @@
 import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from "@nestjs/common";
-import { Observable, tap } from "rxjs";
+import { Observable, finalize } from "rxjs";
 import { MetricsService } from "./metrics.service";
 
 @Injectable()
@@ -14,14 +14,18 @@ export class MetricsInterceptor implements NestInterceptor {
     const route = request.route?.path || request.originalUrl || request.url || "unknown";
 
     return next.handle().pipe(
-      tap(() => {
-        const statusCode = response.statusCode;
+      // finalize (not tap) so 5xx thrown as exceptions are still counted.
+      finalize(() => {
+        const statusCode = response.statusCode ?? 500;
         const duration = (Date.now() - start) / 1000;
 
         this.metricsService.httpRequestTotal.inc({ method, route, status_code: statusCode });
         this.metricsService.httpRequestDuration.observe({ method, route, status_code: statusCode }, duration);
         if (statusCode >= 500) {
           this.metricsService.httpRequestErrors.inc({ method, route, status_code: statusCode });
+        }
+        if (route.includes("/api/v1/intents") && method === "POST") {
+          this.metricsService.observeIntentCreate(duration);
         }
       }),
     );

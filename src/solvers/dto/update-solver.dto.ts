@@ -6,6 +6,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  MaxLength,
   Min,
 } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
@@ -68,5 +69,6 @@ export class UpdateSolverDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(88)
   signature!: string;
 }

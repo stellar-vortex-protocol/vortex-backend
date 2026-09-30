@@ -1,0 +1,11 @@
+apiVersion: v2
+name: vortex-preview
+description: >-
+  Ephemeral per-PR preview environment for the Vortex backend (issue #485) —
+  one isolated namespace per pull request, with throwaway Postgres and Redis.
+type: application
+# Chart and app versions are independent of the backend's version: the chart
+# is deployed once per PR with an image tag that is the PR head SHA, so
+# pinning appVersion here would be misleading.
+version: 0.1.0
+appVersion: "0.1.0"

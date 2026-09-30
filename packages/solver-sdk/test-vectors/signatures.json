@@ -1,0 +1,56 @@
+{
+  "description": "Shared signing vectors: SDK and server must agree byte-for-byte (issue #446). Throwaway key, never fund it. The key is Keypair.fromRawEd25519Seed(Buffer.alloc(32, seedByte)).",
+  "seedByte": 7,
+  "publicKey": "GDVEU3DD4KOFECV66VIHWEZOYX4ZKR3WV27L464SIIPOU2IUI3JCZA57",
+  "intentId": "0b7c9d4e-1f2a-4b3c-8d5e-6f7a8b9c0d1e",
+  "timestamp": 1700000000,
+  "v2Context": {
+    "network": "testnet",
+    "nonce": "0123456789abcdef0123456789abcdef",
+    "expiresAt": 1700000300
+  },
+  "v2Vectors": [
+    {
+      "kind": "accept",
+      "message": "vortex:testnet:accept:0b7c9d4e-1f2a-4b3c-8d5e-6f7a8b9c0d1e:0123456789abcdef0123456789abcdef:1700000300:93ad942acaa12e3a5a3df1af80923bdce7df00e3263e003f6b7b46aa228dd8aa",
+      "signature": "3RHuf3eazyTuSTeLlwbgWdv0AoclaGgn7c45QK9LzReMAAWY+bCN2u+xeoS+12Rc1sXUkgMayLfkKnnxHAUHDg=="
+    },
+    {
+      "kind": "fill",
+      "message": "vortex:testnet:fill:0b7c9d4e-1f2a-4b3c-8d5e-6f7a8b9c0d1e:0123456789abcdef0123456789abcdef:1700000300:92c42fe46b439f0571a05d953d0466a62221fc73495c7bb6be870b761b2a8dc6",
+      "signature": "7XrEJ8FRXlpWMEHsRmuHVi1dK5NnJtt9UTrp4xg7oGmGlx8VJ/Vb+sNx4xIbv8vmrhtrVhIwPw767C8ef3Y3Cw=="
+    },
+    {
+      "kind": "cancel",
+      "message": "vortex:testnet:cancel:0b7c9d4e-1f2a-4b3c-8d5e-6f7a8b9c0d1e:0123456789abcdef0123456789abcdef:1700000300:1f8b4f88f5521b54a56eaf5cc33e82805e5c96495bad5421ff281155508a93dd",
+      "signature": "3Bf0v2IhFuDzbbm9zi9kg0KHcq+EMfdiTUNG10XRdAEJA/7RCjApxdzQMiYakoVfgV4iiGmUi0REG2bHPHbeDA=="
+    }
+  ],
+  "vectors": [
+    {
+      "kind": "accept",
+      "message": "accept:0b7c9d4e-1f2a-4b3c-8d5e-6f7a8b9c0d1e:GDVEU3DD4KOFECV66VIHWEZOYX4ZKR3WV27L464SIIPOU2IUI3JCZA57",
+      "signature": "pVk/Q+9Wa6EB0bMuRmMLZfIgv9zttni4MkWIzO7VEmXYLKipGDl6Pi5opsVnUhqhgGDQurmmbMYuWtkvHyXEDg=="
+    },
+    {
+      "kind": "fill",
+      "message": "fill:0b7c9d4e-1f2a-4b3c-8d5e-6f7a8b9c0d1e:GDVEU3DD4KOFECV66VIHWEZOYX4ZKR3WV27L464SIIPOU2IUI3JCZA57",
+      "signature": "n5tMIbMK+5qCEV0nIh1TKXCLJ2b6G8LlLHJb95F58BpDsdkIbKtr2bV7Q25Lvv7aO8d3EalpfzRQB4WEyIP/DQ=="
+    },
+    {
+      "kind": "cancel",
+      "message": "cancel:0b7c9d4e-1f2a-4b3c-8d5e-6f7a8b9c0d1e",
+      "signature": "zdidAxyyr8aZR/vzrLihZoXqlhDmI94ev6j8Fi4pyHL6cPvE5YdbDDbyxmgoZgSdYq1GLsrKTeK5ahpPnBjDAw=="
+    },
+    {
+      "kind": "wsAuth",
+      "message": "solver-auth:GDVEU3DD4KOFECV66VIHWEZOYX4ZKR3WV27L464SIIPOU2IUI3JCZA57:1700000000",
+      "signature": "Y2gq+vsQ7v10UbgabP129qGHsdYng5bBQS/7BCFAf521fpqKuojbRrayHwgNpTk4unf2xka1bQyOyeRQnXYmDg=="
+    },
+    {
+      "kind": "register",
+      "message": "register:GDVEU3DD4KOFECV66VIHWEZOYX4ZKR3WV27L464SIIPOU2IUI3JCZA57",
+      "signature": "129rzlkCdyTcCRuSb9BrXSn7kH9YaAnFUKAvt7ooKK4RTEm0TxyEbwl6GD3U7z4ffd8gbjeKT0+BmegCqdXpBA=="
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{{/*
+Ephemeral Postgres for the preview — Deployment + emptyDir, not StatefulSet +
+PVC, on purpose:
+
+  * A preview's database is worthless by design (deleted with the namespace on
+    close / label removal / TTL), so a PersistentVolume would be pure cost and
+    would risk a leaked PV after namespace deletion on clusters whose reclaim
+    policy is `Retain`.
+  * No StorageClass dependency means the chart renders on any conformant
+    cluster — including kind/k3d setups a reviewer uses to eyeball the chart.
+  * The trade-off, stated so nobody is surprised: a pod restart loses the data.
+    That is identical to what namespace teardown does anyway. If a preview ever
+    needs to survive restarts, switch this to a PVC-backed StatefulSet — the
+    acceptance criteria do not call for it.
+*/}}
+{{- if .Values.postgres.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vortex-preview.fullname" . }}-postgres
+  labels:
+    {{- include "vortex-preview.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "vortex-preview.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "vortex-preview.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vortex-preview.fullname" . }}-env
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            # PGDATA in a subdirectory: the official image refuses to start on
+            # a non-empty data dir, and the emptyDir mount point counts.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgres.user | quote }}, "-d", {{ .Values.postgres.database | quote }}]
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgres.user | quote }}]
+            periodSeconds: 10
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vortex-preview.pgHost" . }}
+  labels:
+    {{- include "vortex-preview.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: {{ include "vortex-preview.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: postgres
+{{- end }}

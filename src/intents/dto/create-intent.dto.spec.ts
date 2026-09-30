@@ -1,4 +1,5 @@
 import { validate } from "class-validator";
+import { plainToInstance } from "class-transformer";
 import { CreateIntentDto } from "./create-intent.dto";
 
 const VALID_PUBLIC_KEY = "G" + "A".repeat(55);
@@ -37,6 +38,7 @@ describe("CreateIntentDto", () => {
 
   it("allows same-symbol contracts across different chains", async () => {
     const dto = makeDto({
+      user: "0x0000000000000000000000000000000000000001",
       srcChain: "ethereum",
       srcTokenAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
       dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
@@ -44,5 +46,19 @@ describe("CreateIntentDto", () => {
 
     const errors = await validate(dto);
     expect(errors).toHaveLength(0);
+  });
+
+  it("validates optional nested Dutch auction terms", async () => {
+    const dto = plainToInstance(CreateIntentDto, {
+      ...makeDto(),
+      user: "0x0000000000000000000000000000000000000001",
+      auction: {
+        startDstAmount: "1200000",
+        decayStart: 1_900_000_000,
+        decayEnd: 1_900_000_300,
+      },
+    });
+
+    expect(await validate(dto)).toHaveLength(0);
   });
 });

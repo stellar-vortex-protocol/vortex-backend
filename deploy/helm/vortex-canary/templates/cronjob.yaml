@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.network }}
+  labels:
+    app.kubernetes.io/name: vortex-canary
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    vortex/network: {{ .Values.network }}
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  # A slow run must not overlap the next one (two canaries would race the
+  # same accounts and double spend).
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ .Values.interval }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: vortex-canary
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: canary
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args: ["--once"]
+              env:
+                - { name: CANARY_NETWORK, value: {{ .Values.network | quote }} }
+                - { name: CANARY_API_BASE, value: {{ .Values.apiBase | quote }} }
+                - { name: CANARY_PUSHGATEWAY_URL, value: {{ .Values.pushgatewayUrl | quote }} }
+                - { name: CANARY_INTERVAL_MS, value: {{ mul .Values.interval 1000 | quote }} }
+                - { name: CANARY_FILL_AMOUNT, value: {{ .Values.fillAmount | quote }} }
+                - { name: CANARY_MAX_FILL_AMOUNT, value: {{ .Values.maxFillAmount | quote }} }
+                - { name: CANARY_SETTLE_ONCHAIN, value: {{ .Values.settleOnchain | quote }} }
+                - { name: CANARY_MIN_BALANCE_XLM, value: {{ .Values.minBalanceXlm | quote }} }
+                - { name: CANARY_DAILY_BUDGET_XLM, value: {{ .Values.dailyBudgetXlm | quote }} }
+              envFrom:
+                - secretRef:
+                    name: {{ .Values.existingSecret }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}

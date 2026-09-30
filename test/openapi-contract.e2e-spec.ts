@@ -5,6 +5,26 @@ import { createTestApp } from "./utils/create-test-app";
 describe("OpenAPI contract (e2e)", () => {
   let app: INestApplication;
 
+  /**
+   * Body schemas are emitted as `$ref`s into `components.schemas`; resolve the
+   * reference (or use the inline schema) so callers can assert on `properties`.
+   */
+  function bodyProps(
+    doc: {
+      paths: Record<string, Record<string, any>>;
+      components?: { schemas?: Record<string, any> };
+    },
+    path: string,
+    method: string,
+  ): Record<string, unknown> {
+    const schema = doc.paths[path][method].requestBody.content["application/json"].schema;
+    const resolved = schema.$ref
+      ? doc.components?.schemas?.[String(schema.$ref).split("/").pop() as string]
+      : schema;
+    expect(resolved).toBeDefined();
+    return resolved.properties;
+  }
+
   beforeAll(async () => {
     app = await createTestApp();
   });
@@ -35,10 +55,8 @@ describe("OpenAPI contract (e2e)", () => {
 
   it("includes required body parameters for create intent", async () => {
     const res = await request(app.getHttpServer()).get("/docs-json").expect(200);
-    const schema = res.body.paths["/api/v1/intents"].post;
-    expect(schema).toBeDefined();
-    expect(schema.requestBody).toBeDefined();
-    const props = schema.requestBody.content["application/json"].schema.properties;
+    expect(res.body.paths["/api/v1/intents"].post.requestBody).toBeDefined();
+    const props = bodyProps(res.body, "/api/v1/intents", "post");
     expect(props.user).toBeDefined();
     expect(props.srcChain).toBeDefined();
     expect(props.srcAmount).toBeDefined();
@@ -47,25 +65,22 @@ describe("OpenAPI contract (e2e)", () => {
 
   it("includes accept-intent body with solver field", async () => {
     const res = await request(app.getHttpServer()).get("/docs-json").expect(200);
-    const schema = res.body.paths["/api/v1/intents/{id}/accept"].post;
-    expect(schema).toBeDefined();
-    const props = schema.requestBody.content["application/json"].schema.properties;
+    expect(res.body.paths["/api/v1/intents/{id}/accept"].post).toBeDefined();
+    const props = bodyProps(res.body, "/api/v1/intents/{id}/accept", "post");
     expect(props.solver).toBeDefined();
   });
 
   it("includes cancel-intent body with user field", async () => {
     const res = await request(app.getHttpServer()).get("/docs-json").expect(200);
-    const schema = res.body.paths["/api/v1/intents/{id}/cancel"].post;
-    expect(schema).toBeDefined();
-    const props = schema.requestBody.content["application/json"].schema.properties;
+    expect(res.body.paths["/api/v1/intents/{id}/cancel"].post).toBeDefined();
+    const props = bodyProps(res.body, "/api/v1/intents/{id}/cancel", "post");
     expect(props.user).toBeDefined();
   });
 
   it("includes fill-intent body with solver, fillAmount, and txHash fields", async () => {
     const res = await request(app.getHttpServer()).get("/docs-json").expect(200);
-    const schema = res.body.paths["/api/v1/intents/{id}/fill"].post;
-    expect(schema).toBeDefined();
-    const props = schema.requestBody.content["application/json"].schema.properties;
+    expect(res.body.paths["/api/v1/intents/{id}/fill"].post).toBeDefined();
+    const props = bodyProps(res.body, "/api/v1/intents/{id}/fill", "post");
     expect(props.solver).toBeDefined();
     expect(props.fillAmount).toBeDefined();
     expect(props.txHash).toBeDefined();
@@ -74,7 +89,9 @@ describe("OpenAPI contract (e2e)", () => {
   it("includes health endpoint", async () => {
     const res = await request(app.getHttpServer()).get("/docs-json").expect(200);
     const paths: Record<string, unknown> = res.body.paths;
-    expect(paths["/api/v1/health"]).toBeDefined();
+    expect(paths["/health"]).toBeDefined();
+    expect(paths["/health/live"]).toBeDefined();
+    expect(paths["/health/ready"]).toBeDefined();
   });
 
   it("includes tokens endpoints", async () => {

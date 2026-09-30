@@ -1,3 +1,5 @@
+import type { DutchAuction } from "../auctions/dutch";
+
 /**
  * Single source of truth for every chain the protocol recognises.
  * `SupportedChain` is derived from this tuple so all three consumers
@@ -15,6 +17,17 @@ export const SUPPORTED_CHAINS = [
 ] as const;
 
 export type SupportedChain = (typeof SUPPORTED_CHAINS)[number];
+
+/**
+ * The Stellar chain identifier, named for readability at call sites that would
+ * otherwise repeat the literal.
+ *
+ * Distinct from the Soroban *network* ("testnet" / "mainnet" /
+ * "futurenet"), which selects an RPC endpoint. Kill-switch scopes and intent
+ * records are addressed by chain, not by network, so anything matching against
+ * a chain must use this value.
+ */
+export const STELLAR_CHAIN = "stellar" satisfies SupportedChain;
 
 /**
  * A single entry in the append-only audit log for an intent.
@@ -77,6 +90,8 @@ export interface Intent {
   srcAmount: string; // bigint as string
   dstToken: StellarToken;
   minDstAmount: string;
+  auction?: DutchAuction;
+  acceptedDstAmount?: string;
   quotedDstAmount?: string; // best quote from solvers
   solver?: string;
   state: IntentState;
@@ -86,8 +101,26 @@ export interface Intent {
   fillAmount?: string;
   feeAmount?: string; // realized protocol fee in dst token base units
   txHash?: string; // fill tx on Stellar
+  fillVerificationState?: "pending" | "verified" | "rejected";
+  fillVerificationReason?: string;
+  fillVerifiedAt?: string;
   slashedAt?: number;
   slashReason?: string;
+  /**
+   * Snapshot of the governance-controlled protocol parameters that were active
+   * when this intent was created.  Used to evaluate fee/window terms for
+   * in-flight intents even after a governance update changes the live values.
+   * Absent on intents created before issue #500 was deployed.
+   */
+  paramsVersion?: number;
+  /**
+   * USD value of `srcAmount` at creation time, computed from the resolved
+   * source-token price.  Powers the `minAmountUsd` / `maxAmountUsd` filters
+   * and USD sorting (issue #440).  `undefined` when the token price was
+   * unknown at creation — historical rows are never backfilled with
+   * fabricated values.
+   */
+  usdValueAtCreate?: number;
 }
 
 export interface Quote {

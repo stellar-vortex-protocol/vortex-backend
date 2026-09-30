@@ -4,6 +4,7 @@ import { InMemoryIntentsRepository } from "./intents.repository";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
+import { ProtocolParamsService } from "../governance/params.service";
 
 /**
  * Issue #275 — service-layer batch lookup used by `POST /api/v1/intents/batch`.
@@ -19,10 +20,11 @@ describe("IntentsService.getMany (#275)", () => {
     const prisma = {
       intentAuditLog: { create: jest.fn().mockResolvedValue({}) },
     } as unknown as PrismaService;
-    service = new IntentsService(new InMemoryIntentsRepository(), config, stellarTx, prisma);
+    const protocolParams = {
+      snapshotForChain: jest.fn().mockReturnValue({ version: 0, feeBps: 30, deadlineSeconds: 1800, fillWindowSeconds: 600, capturedAt: new Date().toISOString() }),
+    } as unknown as ProtocolParamsService;
+    service = new IntentsService(new InMemoryIntentsRepository(), config, stellarTx, prisma, protocolParams);
   });
-
-  afterEach(() => service.onModuleDestroy());
 
   function makeIntent() {
     return service.create({

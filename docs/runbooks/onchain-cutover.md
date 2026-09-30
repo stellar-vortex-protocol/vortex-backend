@@ -21,6 +21,7 @@ should be reviewed/updated as each lands:
 | On-chain fill settlement (issue #24) | `fill()` submits + confirms a settlement tx | Open |
 | Dry-run mode (issue #35) | Config flag to simulate on-chain writes without submitting | **Done** (issue #260) |
 | Intent audit trail (issue #62) | Append-only log of every state transition, independent of the state store | Open |
+| Shadow-mode divergence monitor (issue #401) | Quantitative proof that simulated on-chain transitions match the off-chain path | **Done** (issue #401) |
 
 Treat the checklist below as the gate for actually running this procedure:
 do not attempt a live cutover until every dependency above is merged, has
@@ -93,12 +94,39 @@ code path (`StellarTxService.invokeContract`, `SolverRegistryService.slashSolver
 build and simulate a Soroban transaction, log what *would* be submitted, and
 return without broadcasting it.
 
-**Runtime-toggleable limitation:** The flag is loaded from environment config at
-process start. Changing it requires a process restart — there is no hot-reload
-HTTP endpoint for this iteration. This is an intentional simplification: the
-staged rollout procedure below is designed around restart windows (not hot flips),
-and the cost of a restart in staging is negligible compared to the risk of a
-silent live-mode activation. A live-toggle mechanism is a separate future concern.
+**Runtime toggle (issue #495):** `ONCHAIN_DRY_RUN` is now the *default* for the
+`onchain-dry-run` runtime feature flag; `ONCHAIN_INTENTS_ENABLED` likewise
+defaults the `onchain-intents-enabled` flag. Both can be changed without a
+restart through the admin API, take effect on every instance within a pub/sub
+hop (or `FLAGS_REFRESH_MS` at worst), and every change is written to
+`admin_audit_log`:
+
+```bash
+# Inspect current state (env default, override pin, stored rules)
+curl -H "x-admin-key: $ADMIN_KEY" http://localhost:4000/admin/flags
+
+# Stage 2 example: live writes only for one solver, dry-run for everyone else
+curl -X PUT -H "x-admin-key: $ADMIN_KEY" -H 'content-type: application/json' \
+  -d '{"defaultValue":true,"rules":[{"value":false,"solvers":["G..."]}],"reason":"stage 2 shadow writes"}' \
+  http://localhost:4000/admin/flags/onchain-dry-run
+```
+
+Rules are evaluated in order (first match wins) and can target solver
+allowlists, chains and deterministic percentages.
+
+- **Two approvals:** in production any `onchain-dry-run` state that can
+  resolve to `false` returns `{ "status": "pending", "requestId": ... }`. A
+  *different* admin applies it with
+  `POST /admin/flags/change-requests/<requestId>/approve`. Turning dry-run back
+  **on** never needs a second approval.
+- **Break-glass pin:** `FLAG_OVERRIDES=onchain-dry-run=true` wins over any
+  stored state (requires a restart, by design).
+- **Guardian freeze:** a guardian `guardian_freeze` on the flag key (or `*`)
+  blocks changes until unfrozen.
+- **Consistency:** each HTTP request evaluates against one flag snapshot; if
+  the database is unreachable the last-known state (or env default) is served.
+- Store modes (`INTENTS_PERSISTENCE` / `SOLVERS_PERSISTENCE`) stay
+  restart-only: the repository adapter is bound at startup.
 
 **Production requirement:** `ONCHAIN_DRY_RUN` must be explicitly set in any
 `NODE_ENV=production` environment — the process refuses to start without it
@@ -112,9 +140,10 @@ How it factors into cutover staging:
    still served from the in-memory store). This validates that transaction
    construction, contract ID wiring, and the signing key all work, with
    zero funds-moving risk. This is pre-check #2 above.
-2. **Stage 2 — shadow writes.** Flip `ONCHAIN_DRY_RUN=false` for a canary slice (or a
-   single non-critical path, e.g. solver-registry reads before slashing
-   writes) while the in-memory store remains authoritative for reads. Watch
+2. **Stage 2 — shadow writes.** Turn `onchain-dry-run` off for a targeted slice
+   through the flag API (solver allowlist or percentage, two approvals), or a
+   single non-critical path (e.g. solver-registry reads before slashing
+   writes), while the in-memory store remains authoritative for reads. Watch
    for transaction failures, unexpected fees, or confirmation-latency
    surprises.
 3. **Stage 3 — cutover.** Flip the in-memory store from authoritative to
@@ -126,6 +155,104 @@ How it factors into cutover staging:
 Keep `ONCHAIN_DRY_RUN` deployed (not ripped out) after cutover — it's the
 fastest lever if a related on-chain code path needs to be redeployed or
 patched later without another full staged rollout.
+
+## Shadow-mode go/no-go (issue #401)
+
+Stage 2 above says "watch for transaction failures, unexpected fees, or
+confirmation-latency surprises". Those are all *symptoms*. The shadow-mode
+divergence monitor (`src/soroban/shadow.service.ts`) supplies the *leading
+indicator* the staged rollout needs: it runs on-chain **simulations** of every
+`accept` / `fill` / `cancel` / `expire` / `slash` transition in parallel with
+the authoritative off-chain path and reports every
+`(expected_outcome, simulated_outcome)` pair the two disagree on.
+
+Nothing is ever submitted. The only RPC call it makes is
+`simulateTransaction`, which runs the contract against sandboxed ledger state —
+no signature, no sequence consumption, no fee, no ledger write. It is
+independent of `ONCHAIN_DRY_RUN`.
+
+### Enabling it
+
+```bash
+SHADOW_MODE_ENABLED=true
+SHADOW_SAMPLE_RATE=1          # 1 = every transition; see the caveat below
+SHADOW_QUEUE_MAX=256
+SHADOW_CONCURRENCY=4
+SHADOW_SOURCE_ACCOUNT=G...    # a throwaway testnet public key; never signed
+```
+
+It is **off by default**. `SHADOW_SOURCE_ACCOUNT` only has to be a valid Stellar
+public key — it is never signed and never submitted — but it must be *set*, or
+the monitor will report `contract_unconfigured` on every transition rather
+than a real verdict.
+
+### Reading the result
+
+```bash
+curl -s 'http://localhost:4000/api/v1/admin/shadow-report?days=7' | jq
+curl -s http://localhost:4000/metrics | grep vortex_shadow
+```
+
+Prometheus series:
+
+| Metric | Meaning |
+|---|---|
+| `vortex_shadow_comparisons_total{transition,outcome}` | Every resolved comparison. `outcome="unavailable"` means no verdict was obtained. |
+| `vortex_shadow_divergences_total{transition,reason}` | The subset the classifier flagged. |
+| `vortex_shadow_dropped_total` | Observations discarded because the bounded queue was full. |
+| `vortex_shadow_queue_depth` | Observations awaiting simulation. |
+
+Alert: `VortexShadowDivergenceDetected` and `VortexShadowMonitorStarved` in
+`ops/prometheus/rules/vortex-slo.yml`.
+
+Divergence reasons, and what each one means for the go/no-go decision:
+
+| Reason | Meaning | Blocks cutover? |
+|---|---|---|
+| `outcome_mismatch` | The contract accepted/rejected differently from the off-chain path. | **Yes** — this is the exact class of bug the cutover must not ship with. |
+| `simulation_error` | The contract would have failed (panicked, missing method) where the off-chain path succeeded. | **Yes** |
+| `simulation_exception` | The simulation could not be performed (RPC unreachable, transport error). | Not on its own — but it invalidates the denominator, so it must be driven to zero before the rate means anything. |
+| `contract_unconfigured` | No `SETTLEMENT_CONTRACT_ID` or no `SHADOW_SOURCE_ACCOUNT`. | **Yes** — an unconfigured monitor is not evidence of anything. |
+
+### Threshold
+
+**Go** requires all of the following, measured over a continuous soak of
+**at least 7 days** in the target environment with `SHADOW_SAMPLE_RATE=1`:
+
+1. `compared` in the report window is at least **1 000**.
+2. `divergenceRate` is **exactly 0** — zero `outcome_mismatch` and zero
+   `simulation_error` rows.
+3. `divergenceRate` is **at most 0.1%** when counting *only*
+   `simulation_exception`, and the count of `simulation_exception` rows is
+   falling rather than flat (i.e. the failures are RPC blips, not a
+   systematic inability to simulate).
+4. `queue.dropped` is **0** across the window. A non-zero drop count means the
+   monitor was not observing the transitions that actually happened, so the
+   rate above was computed over a biased sample.
+5. No `contract_unconfigured` row appears at all.
+
+**No-go** if any of the above fails. Specifically, do **not** read
+`compared: 0` as a pass: it means the monitor never ran.
+
+### Why `SHADOW_SAMPLE_RATE` should be 1 for the soak
+
+Sampling is useful for keeping a long-running environment's RPC cost bounded
+in steady state, but it turns the divergence rate into a statistical estimate
+over a subset. The go/no-go decision wants a census. Use a full sample rate for
+the soak window and lower it afterwards if RPC budget requires.
+
+### Queue saturation
+
+The queue is bounded on purpose: an observation arriving at a full queue is
+dropped and counted, never queued. That means a slow or unreachable Soroban RPC
+degrades the **monitor**, not the request path — the intent API's latency is
+unaffected by design, and the issue's acceptance criterion (p99 delta < 2 ms)
+is asserted in `src/soroban/shadow.service.spec.ts`.
+
+The trade-off is that a saturated monitor's divergence rate is computed over a
+biased subset of transitions. `queue.dropped > 0` therefore always resolves to
+**no-go** until the queue is given headroom (raise `SHADOW_QUEUE_MAX` and/or
+`SHADOW_CONCURRENCY`) and a fresh clean window is measured.
 
 ## Rollback plan
 

@@ -61,6 +61,8 @@ export class PrismaSolversRepository implements ISolversRepository {
       lastActiveAt: solver.lastActiveAt,
       supportedChains: solver.supportedChains as unknown as Prisma.InputJsonValue,
       supportedTokens: solver.supportedTokens as unknown as Prisma.InputJsonValue,
+      source: solver.source ?? "api",
+      chainUpdatedLedger: solver.chainUpdatedLedger ?? null,
     };
   }
 
@@ -77,6 +79,8 @@ export class PrismaSolversRepository implements ISolversRepository {
     lastActiveAt: number;
     supportedChains: Prisma.JsonValue;
     supportedTokens: Prisma.JsonValue;
+    source?: string | null;
+    chainUpdatedLedger?: number | null;
   }): SolverRecord {
     return {
       address: row.address,
@@ -91,6 +95,8 @@ export class PrismaSolversRepository implements ISolversRepository {
       lastActiveAt: row.lastActiveAt,
       supportedChains: row.supportedChains as SolverRecord["supportedChains"],
       supportedTokens: row.supportedTokens as SolverRecord["supportedTokens"],
+      source: (row.source as SolverRecord["source"]) ?? "api",
+      chainUpdatedLedger: row.chainUpdatedLedger ?? null,
     };
   }
 }

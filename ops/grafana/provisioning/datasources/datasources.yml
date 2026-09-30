@@ -1,0 +1,52 @@
+apiVersion: 1
+
+# Datasources are provisioned, not clicked through the UI, so a dashboard that
+# references vortex-prometheus / vortex-loki resolves on a fresh install. The
+# UIDs are fixed because ops/grafana/build.mjs writes them into every panel and
+# validate.mjs fails the build if a panel points at a uid that is not declared
+# here. Do not change a uid without regenerating the dashboards.
+
+datasources:
+  - name: Prometheus
+    uid: vortex-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Matches the 30s evaluation interval of the recording rule groups, so
+      # panels do not step between evaluation samples.
+      timeInterval: 30s
+      httpMethod: POST
+
+  - name: Loki
+    uid: vortex-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      # Log lines are JSON so panels can unwrap fields (the event-loop
+      # utilisation panel on the API RED dashboard does).
+      derivedFields: []
+      maxLines: 1000
+
+  # Tempo is provisioned so traces are available without a UI step, but no
+  # dashboard in the committed set queries it yet: the service emits no spans.
+  # It is here so enabling tracing is a config change, not a rebuild.
+  - name: Tempo
+    uid: vortex-tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: vortex-loki
+      serviceMap:
+        datasourceUid: vortex-prometheus
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false

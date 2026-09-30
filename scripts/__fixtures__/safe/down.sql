@@ -1,0 +1,3 @@
+DROP INDEX CONCURRENTLY IF EXISTS "intents_user_idx";
+
+ALTER TABLE "intents" DROP COLUMN IF EXISTS "note";

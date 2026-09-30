@@ -1,0 +1,58 @@
+{{/*
+Ingress exposing HTTP + WebSocket on one host (`pr-<n>.<domain>`).
+
+WS upgrade notes, because every ingress controller behaves slightly
+differently and a preview whose /ws returns 400 wastes a reviewer's afternoon:
+
+  * ingress-nginx (kubernetes/ingress-nginx): forwards `Connection: Upgrade`
+    out of the box — no annotation needed.
+  * nginxinc/nginx-ingress: needs
+    `nginx.org/websocket-services: <service-name>`; set it via
+    `ingress.annotations` if that is your controller.
+  * AWS Load Balancer Controller: enable on the ALB via
+    `alb.ingress.kubernetes.io/target-type: ip` (default) — WS works as-is.
+
+Annotations are values, not hard-coded, because the chart has no way to know
+which controller the cluster runs.
+*/}}
+{{- if .Values.ingress.enabled }}
+{{- $fullName := include "vortex-preview.fullname" . -}}
+{{- $svcPort := .Values.service.port -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "vortex-preview.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      {{- if .Values.ingress.tls.secretName }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+      {{- end }}
+  {{- end }}
+  rules:
+    - {{- if .Values.ingress.host }}
+      host: {{ .Values.ingress.host | quote }}
+      {{- end }}
+      http:
+        paths:
+          # One Prefix rule for everything: /, /health*, /docs*, /api/v1/* and
+          # /ws all terminate on the same container port.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+{{- end }}

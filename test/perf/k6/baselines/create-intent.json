@@ -1,0 +1,42 @@
+{
+  "_meta": {
+    "scenario": "create-intent-burst",
+    "description": "Baseline budgets for POST /api/v1/intents burst load",
+    "generatedAt": "2026-09-28T00:00:00.000Z",
+    "note": "Update this file by running: npm run perf:update-baselines",
+    "tolerancePercent": 15
+  },
+  "thresholds": {
+    "http_req_duration": {
+      "p95_ms": 200,
+      "p99_ms": 400
+    },
+    "perf_intent_create_duration": {
+      "p95_ms": 200,
+      "p99_ms": 400
+    },
+    "http_req_failed": {
+      "rate_max": 0.01
+    },
+    "perf_intents_created_total": {
+      "count_min": 50
+    }
+  },
+  "reference": {
+    "http_req_duration": {
+      "p50_ms": 5,
+      "p90_ms": 15,
+      "p95_ms": 25,
+      "p99_ms": 50,
+      "avg_ms": 7
+    },
+    "perf_intent_create_duration": {
+      "p50_ms": 5,
+      "p90_ms": 15,
+      "p95_ms": 25,
+      "p99_ms": 50
+    },
+    "http_req_failed_rate": 0,
+    "rps": 80
+  }
+}
