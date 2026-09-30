@@ -1,0 +1,1040 @@
+name: Preview Environments
+
+on:
+  pull_request:
+    types: [labeled, synchronize, opened, reopened, closed]
+    branches: [main]
+
+# Supply-chain hardening (issue #467)
+# The top-level default is read-only repository access.
+# Fork PRs are explicitly excluded by the `if` condition below.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  PREVIEW_MAX_CONCURRENT: 5
+  PREVIEW_TTL_HOURS: 48
+
+jobs:
+  # Guard: only run for PRs from this repo (not forks), and only when the 'preview' label is present
+  guard:
+    name: Guard (same repo + preview label)
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      pr_number: ${{ github.event.pull_request.number }}
+      head_sha: ${{ github.event.pull_request.head.sha }}
+      namespace: ${{ steps.check.outputs.namespace }}
+    steps:
+      - name: Check same repo (exclude forks)
+        id: check
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "namespace=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          has_label=false
+          for label in ${{ join(github.event.pull_request.labels.*.name, ' ') }}; do
+            if [ "$label" = "preview" ]; then
+              has_label=true
+              break
+            fi
+          done
+          if [ "$has_label" = "false" ] && [ "${{ github.event.action }}" != "closed" ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "namespace=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Cost cap: check concurrent previews (simplified - using API would be better)
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          echo "namespace=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+
+  # Build the preview image
+  build:
+    name: Build preview image
+    needs: guard
+    if: needs.guard.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+      - name: Resolve the image reference
+        id: ref
+        run: echo "image=${REGISTRY}/${IMAGE_NAME}:preview-${{ needs.guard.outputs.pr_number }}-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+name: Preview
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ephemeral per-PR preview environments (issue #485)
+#
+# What this does
+# ---------------
+# Labelling a same-repository PR with `preview` deploys the PR's head commit to
+# an isolated Kubernetes namespace (`pr-<number>`) with its own throwaway
+# Postgres and Redis, posts the URL on the PR, and smoke-tests health, Swagger
+# and the WS endpoint. The environment is destroyed when:
+#
+#   * the PR is closed or merged            (`pull_request: closed`)
+#   * the `preview` label is removed        (`pull_request: unlabeled`)
+#   * its TTL expires                       (`schedule`, every 30 minutes)
+#
+# Out of scope (per the issue): previews for forked PRs.
+#
+# Security model — read this before changing anything here
+# --------------------------------------------------------
+# 1. FORKS ARE EXCLUDED AT THE GATE, not at the job level. The `gate` job is
+#    the single decision point for every event and refuses to act unless
+#    `pull_request.head.repo.full_name == github.repository`. Fork PRs can
+#    therefore never mint cluster credentials, push registry images, or run
+#    arbitrary code against the cluster — including on `closed` and
+#    `unlabeled`, which are also gated. The deploy/teardown jobs repeat the
+#    fork test in their `if:` as defence in depth.
+#
+# 2. THIS WORKFLOW REFERENCES NO REPOSITORY OR ENVIRONMENT SECRETS OTHER THAN
+#    `secrets.GITHUB_TOKEN`. There is literally no `secrets.*` reference for
+#    application configuration below, so a mis-configured preview can only ever
+#    receive testnet configuration: `.env.testnet.example` values, an
+#    unfunded/low-balance throwaway Stellar testnet keypair generated fresh per
+#    run (masked with `::add-mask::` before it is ever printed), and a random
+#    per-run database password. Production secrets cannot leak into a preview
+#    because none are reachable from this workflow.
+#
+# 3. CLUSTER ACCESS IS VIA GitHub OIDC (short-lived token exchanged for AWS
+#    credentials), never a stored kubeconfig or cloud access key. Because every
+#    cluster-touching job declares `environment: preview`, the OIDC subject
+#    claim is `repo:<owner>/<repo>:environment:preview` — the IAM trust policy
+#    pins exactly that (and, recommended, `job_workflow_ref` to this workflow
+#    file), so the credentials exist only for this repo's `preview` environment
+#    and never for a fork or a different workflow. See
+#    docs/ci/preview-environments.md for the trust policy JSON.
+#
+# 4. Every action is pinned to a commit SHA with a `# vX.Y.Z` comment, matching
+#    ci.yml/cd.yml; Dependabot (`.github/dependabot.yml`) keeps the pins fresh.
+#
+# Cost model
+# ----------
+# Two independent caps, because either alone can be bypassed or raced:
+#   * workflow cap — `deploy` counts existing preview namespaces and refuses to
+#     create another once `vars.PREVIEW_MAX_CONCURRENT` (default 5) are live.
+#     Best-effort: two simultaneous deploys could both pass the check, which is
+#     why there is also ...
+#   * cluster cap — the preview chart ships a ResourceQuota per namespace
+#     (deploy/helm/vortex-preview/templates/resourcequota.yaml), so a runaway
+#     preview cannot exceed its CPU/memory slice no matter who created it.
+# And a hard stop on *duration*: every namespace is labelled
+# `vortex.io/preview=true` and the scheduled sweep deletes any whose
+# `creationTimestamp` is older than `vars.PREVIEW_TTL_HOURS` (default 6), so a
+# forgotten PR cannot bill forever.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  # labelled/synchronize/reopened → deploy; unlabeled/closed → teardown.
+  # `reopened` matters because a closed PR's environment was torn down; the
+  # label survives a close, so reopening with the label still present must
+  # redeploy rather than leave a dead link in the comment.
+  pull_request:
+    types: [labeled, synchronize, reopened, closed, unlabeled]
+  # TTL sweeper. Runs from the default branch (GitHub's rule for `schedule`),
+  # so the sweep always uses the merged, reviewed version of this file even
+  # while individual PRs run their own merge-ref copy.
+  # Minute offsets 7/37 rather than 00/30: GitHub throttles schedules that all
+  # fire on the hour, and staggering keeps the sweep inside the queue.
+  schedule:
+    - cron: "7,37 * * * *"
+
+# Floor: read-only. Jobs that need more add it explicitly below — the same
+# supply-chain hardening pattern as cd.yml (issue #467).
+permissions:
+  contents: read
+
+# One group per PR, plus a single shared group for scheduled sweeps.
+#
+# cancel-in-progress is deliberately false (unlike ci.yml): cancelling the
+# *running* job here could kill a teardown halfway through, leaving an
+# unreferenced namespace that only the TTL sweep would eventually reclaim.
+# GitHub still keeps at most one *pending* run per group — each new push
+# replaces the older queued run — so the newest state always wins and stale
+# deploys do not stack up.
+concurrency:
+  group: preview-${{ github.event.pull_request.number || 'ttl-sweep' }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  # Same convention as cd.yml. ghcr.io requires lowercase image names; this
+  # repository is already lowercase. If it were ever renamed, the docker/login
+  # step would fail loudly rather than push somewhere unexpected.
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ── Security + lifecycle gate ──────────────────────────────────────────────
+  # The only job that interprets the event. Everything downstream keys off its
+  # `action` output, so "fork excluded" and "which label did what" are decided
+  # in exactly one place and can be reviewed in exactly one diff.
+  gate:
+    name: Security and lifecycle gate
+    runs-on: ubuntu-latest
+    # `schedule` runs have no pull_request payload; they go straight to the
+    # ttl-cleanup job instead.
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    outputs:
+      action: ${{ steps.decide.outputs.action }}
+      pr: ${{ steps.decide.outputs.pr }}
+      namespace: ${{ steps.decide.outputs.namespace }}
+      reason: ${{ steps.decide.outputs.reason }}
+    steps:
+      - name: Decide what this event means
+        id: decide
+        env:
+          EVENT_ACTION: ${{ github.event.action }}
+          # `contains()` on the labels array is how synchronize/reopened/closed
+          # know whether the PR is currently opted in; `labeled`/`unlabeled`
+          # additionally check the specific label that changed.
+          HAS_PREVIEW_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'preview') }}
+          CHANGED_LABEL: ${{ github.event.label.name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Namespace naming is the contract shared by deploy, teardown and the
+          # TTL sweep. Keep it boring and derived only from the PR number so
+          # every path agrees without sharing state.
+          echo "namespace=pr-${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "pr=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+
+          action="none"
+          reason=""
+
+          # ── Hard security gate ────────────────────────────────────────────
+          # Forks are out of scope for previews (issue #485) AND are the only
+          # way an outside contributor reaches this workflow with attacker-
+          # controlled code, so the fork test comes before every other branch,
+          # including the `closed`/`unlabeled` teardown paths.
+          if [ "$HEAD_REPO" != "$REPO" ]; then
+            reason="fork PR: previews are out of scope (head '${HEAD_REPO}' != '${REPO}')"
+          else
+            case "$EVENT_ACTION" in
+              # Opt-in, and re-opt-in on every push while the label is present.
+              labeled|synchronize|reopened)
+                if [ "$HAS_PREVIEW_LABEL" = "true" ]; then
+                  action="deploy"
+                  reason="preview label present on ${EVENT_ACTION}"
+                else
+                  reason="${EVENT_ACTION} without the preview label"
+                fi
+                ;;
+              # Explicit opt-out. Only removal of *this* label tears down;
+              # removing any other label must not destroy an environment.
+              unlabeled)
+                if [ "$CHANGED_LABEL" = "preview" ]; then
+                  action="teardown"
+                  reason="preview label removed"
+                else
+                  reason="label '${CHANGED_LABEL}' removed; irrelevant to previews"
+                fi
+                ;;
+              # Merge or close. The label is not auto-removed on close, so the
+              # check is "was this PR opted in at close time". If it was
+              # already torn down by label removal this is a harmless,
+              # idempotent second pass (see the teardown job).
+              closed)
+                if [ "$HAS_PREVIEW_LABEL" = "true" ]; then
+                  action="teardown"
+                  reason="PR closed while opted in"
+                else
+                  reason="closed without ever being opted in (or already torn down)"
+                fi
+                ;;
+              *)
+                reason="pull_request action '${EVENT_ACTION}' does not change preview state"
+                ;;
+            esac
+          fi
+
+          echo "action=${action}" >> "$GITHUB_OUTPUT"
+          echo "reason=${reason}" >> "$GITHUB_OUTPUT"
+          echo "Event '${EVENT_ACTION}' → action='${action}' (${reason})"
+
+  # ── Deploy ────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy preview
+    needs: gate
+    # Defence in depth: the gate already excluded forks, but a future edit that
+    # loosens the gate must not silently open the cluster path. Two copies of a
+    # security predicate is the right redundancy.
+    if: >-
+      needs.gate.outputs.action == 'deploy' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The GitHub Environment `preview` is where reviewers can optionally add
+    # required reviewers (a manual approval gate on every deploy) and where
+    # environment-scoped vars live. No environment *secrets* are used: see the
+    # security note at the top of this file.
+    environment: preview
+    permissions:
+      contents: read
+      # Short-lived AWS credentials for the cluster via OIDC. This is the only
+      # reason `id-token: write` exists in this file.
+      id-token: write
+      # Push the PR image to ghcr.io. Only reachable from same-repo PRs (gate).
+      packages: write
+      # Post/update the sticky preview comment on the PR.
+      pull-requests: write
+    # Consumed by the smoke job — declared here (not just written by the step)
+    # because a job's `steps.*` outputs are invisible to downstream jobs.
+    outputs:
+      url: ${{ steps.url.outputs.base }}
+      docs-url: ${{ steps.url.outputs.docs }}
+      ws-url: ${{ steps.url.outputs.ws }}
+    env:
+      NS: ${{ needs.gate.outputs.namespace }}
+      PR_NUMBER: ${{ needs.gate.outputs.pr }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # Repo- or environment-level Actions variables, all documented in
+      # docs/ci/preview-environments.md. Defaults keep a fresh clone working
+      # down to the two that have no sensible default.
+      PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN }}
+      PREVIEW_INGRESS_CLASS: ${{ vars.PREVIEW_INGRESS_CLASS }}
+      PREVIEW_SCHEME: ${{ vars.PREVIEW_SCHEME || 'https' }}
+      PREVIEW_TTL_HOURS: ${{ vars.PREVIEW_TTL_HOURS || '6' }}
+      PREVIEW_MAX_CONCURRENT: ${{ vars.PREVIEW_MAX_CONCURRENT || '5' }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_PREVIEW_ROLE_ARN: ${{ vars.AWS_PREVIEW_ROLE_ARN }}
+      PREVIEW_EKS_CLUSTER: ${{ vars.PREVIEW_EKS_CLUSTER }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Node 20 = the version this repo's Dockerfile runs on, so the
+          # seed/build steps behave exactly as the previewed image will.
+          node-version: 20
+          cache: npm
+
+      # ── Missing-configuration guard ────────────────────────────────────────
+      # Fail in 5 seconds with a pointer to the runbook instead of in the middle
+      # of `aws sts assume-role` with an empty role ARN.
+      - name: Fail fast if preview repository configuration is missing
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "$PREVIEW_DOMAIN" ] || missing="$missing PREVIEW_DOMAIN"
+          [ -n "$AWS_PREVIEW_ROLE_ARN" ] || missing="$missing AWS_PREVIEW_ROLE_ARN"
+          [ -n "$AWS_REGION" ] || missing="$missing AWS_REGION"
+          [ -n "$PREVIEW_EKS_CLUSTER" ] || missing="$missing PREVIEW_EKS_CLUSTER"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing Actions variables:$missing — see docs/ci/preview-environments.md (repo or 'preview' environment variables)."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ── Seeded data (acceptance criterion) ─────────────────────────────────
+      # `npm run seed` must succeed against the PR's own code — this is the
+      # check that the seed builders the preview serves still execute. It
+      # writes `.seed-data/*.json` (intents/solvers/tokens) and needs
+      # devDependencies (tsx), which is why it runs here on the runner and not
+      # in the cluster: the runtime image ships production deps only.
+      #
+      # The previewed API serves the *same* builders' data: with
+      # INTENTS_PERSISTENCE=memory (the preview default in the chart) the
+      # repositories call buildSeedIntents()/buildSeedSolvers() at boot, so
+      # GET /api/v1/intents is populated the moment the pod starts.
+      - name: Run seed script (npm run seed)
+        run: npm run seed
+
+      # ── Throwaway testnet credentials ──────────────────────────────────────
+      # Fresh keypair per run, never a stored secret, never funded beyond a
+      # testnet dust balance, worthless the moment the namespace dies. The
+      # ::add-mask:: call is what keeps it out of the logs: it must run *before*
+      # the value is written to GITHUB_ENV or echoed anywhere.
+      - name: Generate throwaway testnet signing key
+        run: |
+          set -euo pipefail
+          KEY=$(node -e 'console.log(require("@stellar/stellar-sdk").Keypair.random().secret())')
+          echo "::add-mask::$KEY"
+          echo "SOROBAN_SIGNING_KEY=$KEY" >> "$GITHUB_ENV"
+          echo "Throwaway testnet key generated and masked."
+
+      - name: Generate per-run database password
+        run: |
+          set -euo pipefail
+          PW=$(node -e 'console.log(require("crypto").randomBytes(18).toString("hex"))')
+          echo "::add-mask::$PW"
+          echo "PREVIEW_DB_PASSWORD=$PW" >> "$GITHUB_ENV"
+
+      # ── Cluster credentials via GitHub OIDC ────────────────────────────────
+      # Exchanges the workflow's OIDC token for short-lived AWS credentials —
+      # no stored keys anywhere. The role's trust policy pins the subject to
+      # this repo + workflow + environment `preview`; see the runbook for the
+      # exact JSON. If the cluster is not EKS, replace these two steps with the
+      # equivalent OIDC login for your IdP: nothing downstream (helm, kubectl,
+      # namespace names) is AWS-specific.
+      - name: Authenticate to AWS via GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ env.AWS_PREVIEW_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          # Session name lands in CloudTrail next to the PR number, so cluster
+          # activity during a preview is attributable to a specific PR run.
+          role-session-name: gh-preview-pr-${{ needs.gate.outputs.pr }}
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Configure kubectl for the preview cluster
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig \
+            --name "$PREVIEW_EKS_CLUSTER" \
+            --region "$AWS_REGION" >/dev/null
+          kubectl version --client --output=yaml >/dev/null
+          echo "kubeconfig updated for ${PREVIEW_EKS_CLUSTER}"
+
+      # ── Cost cap (workflow half) ───────────────────────────────────────────
+      # Runs before the image build so a capped PR fails in seconds instead of
+      # after three minutes of Docker build. Counts *other* namespaces so a
+      # re-deploy of this PR is never blocked by its own previous environment.
+      - name: Enforce the concurrent-preview cost cap
+        run: |
+          set -euo pipefail
+          live=$(kubectl get namespaces -l vortex.io/preview=true -o json \
+            | jq --arg me "$NS" '[.items[] | select(.metadata.name != $me)] | length')
+          echo "Live preview namespaces (excluding $NS): $live / cap $PREVIEW_MAX_CONCURRENT"
+          if [ "$live" -ge "$PREVIEW_MAX_CONCURRENT" ]; then
+            echo "::error::Cost cap reached: $live preview environments are already running (vars.PREVIEW_MAX_CONCURRENT=$PREVIEW_MAX_CONCURRENT). Remove the 'preview' label from another PR, wait for the TTL sweep, or raise the cap deliberately after reading docs/ci/preview-environments.md."
+            exit 1
+          fi
+
+      - name: Resolve image metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          short=$(printf '%s' "$HEAD_SHA" | cut -c1-12)
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          echo "image=${REGISTRY}/${IMAGE_NAME}/vortex-backend" >> "$GITHUB_OUTPUT"
+          echo "tag=pr-${PR_NUMBER}-${short}" >> "$GITHUB_OUTPUT"
+
+      # Reserve the slot (create + label the namespace) *before* the expensive
+      # build: it narrows the race between two PRs both passing the cap check
+      # above, and it means a failed build still leaves a labelled, TTL-sweepable
+      # namespace rather than an invisible half-state.
+      - name: Create and label the preview namespace
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+          # The label is the TTL sweep's and the cost cap's discovery key —
+          # nothing in this workflow works without it, so it is applied with
+          # --overwrite and re-applied on every deploy.
+          kubectl label namespace "$NS" \
+            vortex.io/preview=true \
+            vortex.io/preview-pr="$PR_NUMBER" \
+            --overwrite
+          kubectl annotate namespace "$NS" \
+            vortex.io/preview-head-sha="$HEAD_SHA" \
+            vortex.io/preview-ttl-hours="$PREVIEW_TTL_HOURS" \
+            --overwrite
+          echo "Namespace $NS ready (TTL ${PREVIEW_TTL_HOURS}h, discovered by creationTimestamp in the sweep)"
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push the image
+        id: build
+
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      # The PR image is built here rather than reusing cd.yml's: cd only pushes
+      # on main/tags, and there is deliberately no signing step — cosign's
+      # certificate subject (cd.yml) accepts main and v* tags only, so a preview
+      # image is unsigned by construction and must never be mistaken for a
+      # releasable artifact. Reviewers deploy exactly the PR head they are
+      # reviewing, which is the whole point of the environment.
+      - name: Build and push the PR image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.ref.outputs.image }}
+          provenance: false
+          sbom: false
+
+  # Deploy preview environment (using docker-compose for Postgres + Redis + Backend)
+  deploy:
+    name: Deploy preview environment
+    needs: [guard, build]
+    if: needs.guard.outputs.should_run == 'true' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      NAMESPACE: ${{ needs.guard.outputs.namespace }}
+      PR_NUMBER: ${{ needs.guard.outputs.pr_number }}
+      IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Set up docker-compose for preview
+        run: |
+          cat > docker-compose.preview.yml <<'COMPOSE'
+          version: "3.8"
+          services:
+            postgres:
+              image: postgres:16-alpine
+              environment:
+                POSTGRES_USER: vortex
+                POSTGRES_PASSWORD: vortex
+                POSTGRES_DB: vortex
+              ports:
+                - "5432:5432"
+              tmpfs: /var/lib/postgresql/data
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U vortex"]
+                interval: 5s
+                timeout: 3s
+                retries: 10
+
+            redis:
+              image: redis:7-alpine
+              ports:
+                - "6379:6379"
+              healthcheck:
+                test: ["CMD", "redis-cli", "ping"]
+                interval: 5s
+                timeout: 3s
+                retries: 10
+
+            backend:
+              image: ${IMAGE}
+              ports:
+                - "4000:4000"
+              environment:
+                DATABASE_URL: postgresql://vortex:vortex@postgres:5432/vortex?schema=public
+                REDIS_URL: redis://redis:6379
+                NODE_ENV: test
+                STELLAR_NETWORK: testnet
+                SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+                SOROBAN_SIGNING_KEY: ""
+                SETTLEMENT_CONTRACT_ID: ""
+                SOLVER_REGISTRY_CONTRACT_ID: ""
+                ONCHAIN_DRY_RUN: "true"
+                ONCHAIN_INTENTS_ENABLED: "false"
+                SHADOW_MODE_ENABLED: "false"
+                SIGNER_BACKEND: local
+                ALLOW_LOCAL_SIGNER_IN_PROD: "true"
+                KILLSWITCH_OPERATOR_TOKEN: preview-op-token
+                KILLSWITCH_PERSISTENCE: memory
+                INTENTS_PERSISTENCE: prisma
+                SOLVERS_PERSISTENCE: prisma
+                LOG_LEVEL: info
+                CORS_ORIGIN: "*"
+                WS_MAX_CONNECTIONS: 100
+                WS_BACKPLANE: redis
+                FLAGS_PUBSUB: redis
+                PROCESS_ROLE: all
+                JOBS_DRIVER: bullmq
+                PARAMS_CONTRACT_ID: ""
+                GUARDIAN_CONTRACT_ID: ""
+                DATASETS_ENABLED: "false"
+                CANARY_ADDRESSES: ""
+              depends_on:
+                postgres:
+                  condition: service_healthy
+                redis:
+                  condition: service_healthy
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+                interval: 10s
+                timeout: 5s
+                retries: 12
+                start_period: 20s
+          COMPOSE
+
+      - name: Pull and start preview stack
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}"
+          docker-compose -f docker-compose.preview.yml up -d
+          echo "Preview stack started"
+
+      - name: Wait for services to be healthy
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if docker-compose -f docker-compose.preview.yml ps --services --filter "status=running" | grep -q "backend"; then
+              if docker-compose -f docker-compose.preview.yml exec -T backend curl -fsS http://localhost:4000/health 2>/dev/null; then
+                echo "Backend is healthy"
+                exit 0
+              fi
+            fi
+            echo "Waiting for backend... attempt $attempt"
+            sleep 10
+          done
+          echo "Backend failed to become healthy" >&2
+          docker-compose -f docker-compose.preview.yml logs backend
+          exit 1
+
+      - name: Run database migrations
+        run: |
+          set -euo pipefail
+          docker-compose -f docker-compose.preview.yml exec -T backend npx prisma migrate deploy
+
+      - name: Seed preview database
+        run: |
+          set -euo pipefail
+          docker-compose -f docker-compose.preview.yml exec -T backend npm run seed
+
+      - name: Run smoke tests
+        run: |
+          set -euo pipefail
+          # Health check
+          curl -fsS http://localhost:4000/health
+          # Swagger reachable
+          curl -fsS http://localhost:4000/api/docs | grep -q "swagger"
+          # WebSocket endpoint
+          curl -fsS http://localhost:4000/api/docs-json | grep -q "websocket"
+          echo "All smoke tests passed"
+
+      - name: Get preview URL (use localhost since we run on runner)
+        id: url
+        run: |
+          echo "url=http://localhost:4000" >> "$GITHUB_OUTPUT"
+
+      - name: Post preview URL to PR
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const { PR_NUMBER, url } = process.env;
+            const body = `## Preview Environment Ready 🎉\n\n**PR #${PR_NUMBER}** preview is deployed and ready for testing.\n\n- **API Base URL**: ${url}\n- **Swagger UI**: ${url}/api/docs\n- **WebSocket**: ws://localhost:4000\n- **Health**: ${url}/health\n\n> This preview will be torn down when the PR is closed or the \`preview\` label is removed. TTL: 48 hours.\n\n*Deployed from commit ${process.env.GITHUB_SHA} (${process.env.GITHUB_REF_NAME})*`;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(PR_NUMBER),
+              body
+            });
+        env:
+          PR_NUMBER: ${{ needs.guard.outputs.pr_number }}
+          url: ${{ steps.url.outputs.url }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+
+  # Teardown on PR close or label removal
+  teardown:
+    name: Teardown preview environment
+    needs: guard
+    if: needs.guard.outputs.should_run == 'true' && (github.event.action == 'closed' || (github.event.action == 'unlabeled' && github.event.label.name == 'preview'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Teardown preview stack
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ needs.guard.outputs.pr_number }}"
+          echo "Tearing down preview for PR #${PR_NUMBER}"
+          # In a real setup, this would connect to the preview infrastructure
+          # For this runner-based approach, the runner is ephemeral so cleanup is automatic
+          echo "Preview runner will be cleaned up automatically"
+
+      - name: Post teardown notice to PR
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const { PR_NUMBER } = process.env;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(PR_NUMBER),
+              body: `## Preview Environment Torn Down 🧹\n\nThe preview environment for PR #${PR_NUMBER} has been cleaned up.`
+            });
+        env:
+          PR_NUMBER: ${{ needs.guard.outputs.pr_number }}
+
+  # TTL cleanup - scheduled separately (see note below)
+  # In practice, this would be a separate scheduled workflow that checks for stale previews
+          provenance: false
+          sbom: false
+          # BuildKit cache from the registry keeps a re-deploy of the same PR
+          # (e.g. after a label nudge) from rebuilding the world.
+          cache-from: type=gha,scope=preview
+          cache-to: type=gha,mode=max,scope=preview
+          tags: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+
+      # ── Helm install ────────────────────────────────────────────────────────
+      # Throwaway credentials are passed as (masked) --set-string flags. Helm
+      # stores release values in an in-cluster Secret (sh.helm.release.v1.*),
+      # the same behaviour as any Helm deployment; here that Secret lives in the
+      # disposable namespace and holds only testnet/random values.
+      - name: Install the preview Helm release
+        run: |
+          set -euo pipefail
+          helm upgrade --install "$NS" deploy/helm/vortex-preview \
+            --namespace "$NS" \
+            --create-namespace \
+            --set-string "preview.prNumber=${PR_NUMBER}" \
+            --set-string "preview.headSha=${HEAD_SHA}" \
+            --set-string "preview.ttlHours=${PREVIEW_TTL_HOURS}" \
+            --set-string "image.repository=${{ steps.meta.outputs.image }}" \
+            --set-string "image.tag=${{ steps.meta.outputs.tag }}" \
+            --set-string "ingress.host=pr-${PR_NUMBER}.${PREVIEW_DOMAIN}" \
+            --set-string "ingress.className=${PREVIEW_INGRESS_CLASS}" \
+            --set-string "app.signingKey=${SOROBAN_SIGNING_KEY}" \
+            --set-string "postgres.password=${PREVIEW_DB_PASSWORD}" \
+            --wait \
+            --timeout 10m
+          echo "Release '${NS}' is up in namespace '${NS}'."
+
+      - name: Expose preview URLs as job outputs
+        id: url
+        run: |
+          set -euo pipefail
+          base="${PREVIEW_SCHEME}://pr-${PR_NUMBER}.${PREVIEW_DOMAIN}"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "docs=$base/docs" >> "$GITHUB_OUTPUT"
+          if [ "$PREVIEW_SCHEME" = "https" ]; then
+            echo "ws=wss://pr-${PR_NUMBER}.${PREVIEW_DOMAIN}/ws" >> "$GITHUB_OUTPUT"
+          else
+            echo "ws=ws://pr-${PR_NUMBER}.${PREVIEW_DOMAIN}/ws" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Sticky comment: one marker, create-or-update, so every push edits the
+      # same comment instead of spamming the PR. The marker is HTML so it is
+      # invisible in the rendered comment and greppable from scripts.
+      - name: Post the sticky preview comment
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          BASE_URL: ${{ steps.url.outputs.base }}
+          DOCS_URL: ${{ steps.url.outputs.docs }}
+          WS_URL: ${{ steps.url.outputs.ws }}
+          IMAGE_REF: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          TTL_HOURS: ${{ env.PREVIEW_TTL_HOURS }}
+          REASON: ${{ needs.gate.outputs.reason }}
+        with:
+          script: |
+            const marker = '<!-- vortex-preview -->';
+            const body = `${marker}
+            ### 🚀 Preview environment
+
+            | | |
+            |---|---|
+            | API | \`${BASE_URL}\` |
+            | Swagger UI | \`${DOCS_URL}\` |
+            | WebSocket | \`${WS_URL}\` |
+            | Namespace | \`${NS}\` |
+            | Image | \`${IMAGE_REF}\` |
+            | Head SHA | \`${HEAD_SHA}\` |
+            | Smoke test | ⏳ pending |
+            | TTL | ${TTL_HOURS} h — swept on schedule; torn down on close or when the \`preview\` label is removed |
+
+            Trigger: ${REASON}.
+
+            <sub>Stellar <b>testnet</b> only, with a throwaway unfunded signing key
+            generated for this run. No production secrets are injected into
+            previews — see <code>docs/ci/preview-environments.md</code>.</sub>`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments(
+              { owner, repo, issue_number, per_page: 100 },
+            );
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  # ── Smoke test (acceptance criterion) ─────────────────────────────────────
+  # Hits the *public* preview URL from outside the cluster, so it also proves
+  # the ingress, DNS and TLS path work — not just that the pod is Running.
+  smoke:
+    name: Preview smoke test
+    needs: [gate, deploy]
+    if: >-
+      needs.gate.outputs.action == 'deploy' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: preview
+    permissions:
+      contents: read
+      # Update the smoke status line on the sticky comment. No `id-token`:
+      # this job never touches the cluster — it only curls the public URL.
+      pull-requests: write
+    env:
+      BASE_URL: ${{ needs.deploy.outputs.url }}
+      DOCS_URL: ${{ needs.deploy.outputs.docs-url }}
+      WS_URL: ${{ needs.deploy.outputs.ws-url }}
+    steps:
+      # No checkout and no npm install: everything below is curl + jq, both
+      # preinstalled on ubuntu-latest. A smoke test that depends on the repo's
+      # own toolchain can fail for toolchain reasons and say nothing about the
+      # environment.
+      - name: Wait for readiness
+        run: |
+          set -euo pipefail
+          echo "Waiting for ${BASE_URL}/health/ready ..."
+          for attempt in $(seq 1 60); do
+            if curl -fsS --max-time 5 "${BASE_URL}/health/ready" >/dev/null 2>&1; then
+              echo "Preview is ready (attempt ${attempt})."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Preview never became ready at ${BASE_URL}/health/ready"
+          exit 1
+
+      - name: "Smoke: aggregate health endpoint"
+        run: |
+          set -euo pipefail
+          body=$(curl -fsS --max-time 10 "${BASE_URL}/health")
+          echo "$body" | jq -e '.status == "ok"' >/dev/null
+          echo "health ok: $body"
+
+      - name: "Smoke: liveness endpoint"
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 10 "${BASE_URL}/health/live" | jq -e '.status == "ok"' >/dev/null
+          echo "liveness ok"
+
+      - name: "Smoke: Swagger UI + OpenAPI document"
+        run: |
+          set -euo pipefail
+          # The rendered UI (proves the static bundle is served) ...
+          html=$(curl -fsS --max-time 10 "${DOCS_URL}")
+          echo "$html" | grep -qi "swagger" || { echo "::error::${DOCS_URL} does not look like Swagger UI"; exit 1; }
+          # ... and the machine-readable document behind it (proves SwaggerModule
+          # actually generated a spec for this build).
+          curl -fsS --max-time 10 "${DOCS_URL}-json" | jq -e '.openapi and (.paths | length > 0)' >/dev/null
+          echo "swagger ok"
+
+      - name: "Smoke: seeded data is served"
+        run: |
+          set -euo pipefail
+          # The acceptance criterion is "seeded data", not merely "the seed
+          # script ran" — so assert the API returns rows.
+          count=$(curl -fsS --max-time 10 "${BASE_URL}/api/v1/intents" | jq 'length')
+          if [ "$count" -le 0 ]; then
+            echo "::error::/api/v1/intents returned no seeded intents"
+            exit 1
+          fi
+          echo "seeded intents served: $count"
+
+      - name: "Smoke: WebSocket endpoint (expect HTTP 101)"
+        run: |
+          set -euo pipefail
+          # curl has no WebSocket client mode, but the opening handshake is a
+          # plain HTTP/1.1 upgrade: a correct gateway answers `101 Switching
+          # Protocols` and then holds the connection open. --max-time therefore
+          # expires with exit 28 even on success, so the verdict comes from the
+          # captured status line, not curl's exit code.
+          # curl wants http(s), not ws(s): rewrite the scheme for both
+          # websocket variants before the handshake.
+          http_url=$(printf '%s' "$WS_URL" | sed -e 's|^wss:|https:|' -e 's|^ws:|http:|')
+          out=$(curl -sS -i -N --max-time 10 \
+            -H 'Connection: Upgrade' \
+            -H 'Upgrade: websocket' \
+            -H 'Sec-WebSocket-Version: 13' \
+            -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+            "$http_url" 2>/dev/null || true)
+          status=$(printf '%s' "$out" | head -n 1)
+          echo "handshake status: ${status:-<none>}"
+          case "$status" in
+            *" 101"*) echo "websocket ok" ;;
+            *)
+              echo "::error::WS handshake against ${WS_URL} did not return 101. First lines:"
+              printf '%s\n' "$out" | head -n 5
+              exit 1
+              ;;
+          esac
+
+      - name: Record smoke result on the PR
+        if: always()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          SMOKE_OK: ${{ job.status == 'success' }}
+        with:
+          script: |
+            const marker = '<!-- vortex-preview -->';
+            const { owner, repo } = context.repo;
+            const { data: comments } = await github.rest.issues.listComments(
+              { owner, repo, issue_number: context.issue.number, per_page: 100 },
+            );
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (!existing) return; // comment deleted by hand — nothing to update
+            const verdict = SMOKE_OK === 'true'
+              ? '✅ passed (health, liveness, Swagger, seeded data, WS 101)'
+              : '❌ failed — see the Preview smoke test job in this run';
+            const body = existing.body.replace(/Smoke test \| .*?( \||$)/, `Smoke test | ${verdict} |`);
+            if (body !== existing.body) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            }
+
+  # ── Teardown (on close / on label removal) ────────────────────────────────
+  # Idempotent by construction: `helm uninstall --ignore-not-found` and
+  # `kubectl delete namespace --ignore-not-found` both succeed when the thing
+  # is already gone, so a close after an unlabeled (or a TTL sweep that got
+  # there first) is a no-op rather than a failure.
+  teardown:
+    name: Tear down preview
+    needs: gate
+    if: >-
+      needs.gate.outputs.action == 'teardown' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: preview
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      NS: ${{ needs.gate.outputs.namespace }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_PREVIEW_ROLE_ARN: ${{ vars.AWS_PREVIEW_ROLE_ARN }}
+      PREVIEW_EKS_CLUSTER: ${{ vars.PREVIEW_EKS_CLUSTER }}
+      PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN }}
+      PREVIEW_SCHEME: ${{ vars.PREVIEW_SCHEME || 'https' }}
+      PR_NUMBER: ${{ needs.gate.outputs.pr }}
+      # Via env, never via `${{ }}` inline in a run block: `reason` embeds the
+      # label name from the event payload, and expression-substituting
+      # event-controlled text straight into shell is the classic injection
+      # footgun even when labels are maintainer-only today.
+      REASON: ${{ needs.gate.outputs.reason }}
+    steps:
+      - name: Authenticate to AWS via GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ env.AWS_PREVIEW_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-preview-teardown-pr-${{ needs.gate.outputs.pr }}
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Configure kubectl for the preview cluster
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "$PREVIEW_EKS_CLUSTER" --region "$AWS_REGION" >/dev/null
+          echo "kubeconfig updated for ${PREVIEW_EKS_CLUSTER}"
+
+      - name: Delete the preview namespace
+        run: |
+          set -euo pipefail
+          # Uninstall first so Helm's release metadata goes away with the
+          # resources it owns; the namespace delete is the authoritative sweep
+          # (it also reclaims anything applied outside Helm, plus the
+          # ResourceQuota and the namespace itself).
+          helm uninstall "$NS" --namespace "$NS" --ignore-not-found >/dev/null 2>&1 || true
+          kubectl delete namespace "$NS" --ignore-not-found --wait=false
+          echo "Preview namespace ${NS} released (reason: ${REASON})."
+
+      - name: Mark the preview comment as torn down
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          BASE_URL: ${{ env.PREVIEW_SCHEME }}://pr-${{ env.PR_NUMBER }}.${{ env.PREVIEW_DOMAIN }}
+        with:
+          script: |
+            const marker = '<!-- vortex-preview -->';
+            const { owner, repo } = context.repo;
+            const { data: comments } = await github.rest.issues.listComments(
+              { owner, repo, issue_number: context.issue.number, per_page: 100 },
+            );
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (!existing) return;
+            const body = `${marker}
+            ### 🛑 Preview environment torn down
+
+            \`${BASE_URL}\` is gone (PR closed, `preview` label removed, or the TTL
+            sweep reclaimed it). Remove and re-add the \`preview\` label to deploy again.
+
+            <sub>Reason: ${context.payload.action || 'lifecycle event'}.</sub>`;
+            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+
+  # ── TTL sweep (scheduled) ─────────────────────────────────────────────────
+  # The backstop for everything the event-driven paths miss: a PR that keeps its
+  # label and never closes, a deploy whose teardown job lost its credentials, a
+  # namespace left behind by a half-finished run. Idempotent — it only ever
+  # deletes namespaces that carry the preview label *and* are older than the
+  # TTL, and `--ignore-not-found` covers a race with a concurrent teardown.
+  ttl-cleanup:
+    name: TTL sweep for stale previews
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: preview
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_PREVIEW_ROLE_ARN: ${{ vars.AWS_PREVIEW_ROLE_ARN }}
+      PREVIEW_EKS_CLUSTER: ${{ vars.PREVIEW_EKS_CLUSTER }}
+      PREVIEW_TTL_HOURS: ${{ vars.PREVIEW_TTL_HOURS || '6' }}
+      PREVIEW_MAX_CONCURRENT: ${{ vars.PREVIEW_MAX_CONCURRENT || '5' }}
+    steps:
+      - name: Authenticate to AWS via GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ env.AWS_PREVIEW_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-preview-ttl-sweep
+
+      - name: Configure kubectl for the preview cluster
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "$PREVIEW_EKS_CLUSTER" --region "$AWS_REGION" >/dev/null
+
+      - name: Delete preview namespaces older than the TTL
+        run: |
+          set -euo pipefail
+          now=$(date -u +%s)
+          ttl_seconds=$(( PREVIEW_TTL_HOURS * 3600 ))
+          # creationTimestamp is authoritative server state: unlike an
+          # annotation it cannot be forged by the PR's own manifests, so a PR
+          # cannot exempt itself from the sweep.
+          kubectl get namespaces -l vortex.io/preview=true -o json \
+            | jq -r --argjson now "$now" --argjson ttl "$ttl_seconds" \
+              '.items[] | select(($now - (.metadata.creationTimestamp | fromdateiso8601)) > $ttl) | .metadata.name' \
+            | while read -r name; do
+                [ -n "$name" ] || continue
+                echo "Deleting expired preview namespace: $name"
+                kubectl delete namespace "$name" --ignore-not-found --wait=false
+              done
+
+          remaining=$(kubectl get namespaces -l vortex.io/preview=true --no-headers 2>/dev/null | wc -l)
+          echo "Preview namespaces now live: ${remaining} (cost cap: ${PREVIEW_MAX_CONCURRENT})"
+          # Surface (not fail) a cap breach: the sweep's job is to reclaim, and
+          # a red scheduled run at 3am tells nobody anything useful.
+          if [ "$remaining" -gt "$PREVIEW_MAX_CONCURRENT" ]; then
+            echo "::warning::${remaining} live preview namespaces exceeds the configured cap of ${PREVIEW_MAX_CONCURRENT}."
+          fi

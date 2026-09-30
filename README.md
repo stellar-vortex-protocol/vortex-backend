@@ -158,6 +158,8 @@ from those that are safe to leave at their testnet/dev defaults.
 | `WS_MAX_CONNECTIONS` | Recommended | `1000` | Tune to expected solver + frontend connection count |
 | `SENTRY_DSN` | Recommended | — (Sentry disabled) | Set to your Sentry project DSN for error alerting |
 | `LOG_LEVEL` | Recommended | `debug` | Set to `info` in production — `debug` is too noisy |
+| `LEADER_ELECTION_ENABLED` | Recommended (multi-replica) | `false` | Set to `true` when running N > 1 replicas to ensure singleton workers run on exactly one pod. Requires `DATABASE_URL` to point at a live Postgres instance. **Do not use PgBouncer in transaction-pooling mode** — see [Leader Election runbook](./docs/runbooks/leader-election.md). |
+| `LEADER_ELECTION_HEARTBEAT_MS` | Optional | `5000` | Heartbeat interval in ms. Lower = faster failover, higher DB load. Default gives ≤ 15 s failover. |
 | `PORT` | Optional | `4000` | Change if the container port mapping differs |
 
 For a production `.env` template, copy `.env.mainnet.example` — every
@@ -209,6 +211,87 @@ versus **planned** (schema/token data in place, on-chain settlement pending).
 - [x] **Solver WS client** — reference implementation for a solver bot (`npm run solver:demo`, see [`scripts/README.md`](./scripts/README.md))
 
 ---
+
+## Performance Testing (k6)
+
+The repo ships a [k6](https://grafana.com/docs/k6/latest/) performance suite
+that gates PRs against latency and error-rate budgets. Results are posted
+automatically as a PR comment and uploaded as CI artifacts.
+
+### Scenarios
+
+| Scenario | File | What it exercises |
+|----------|------|--------------------|
+| `create-intent-burst` | `scenarios/create-intent-burst.js` | POST `/api/v1/intents` burst (20 VUs, 80 s) |
+| `solver-polling` | `scenarios/solver-polling.js` | GET `/api/v1/intents/open` polling (10 VUs, 60 s) |
+| `quote-requests` | `scenarios/quote-requests.js` | POST `/api/v1/intents/quote` ramping arrival rate |
+| `mixed-lifecycle` | `scenarios/mixed-lifecycle.js` | Full read/write cycle (create → poll → read → quote → stats) |
+
+All four run concurrently via `test/perf/k6/all-scenarios.js` in CI.
+
+### Baseline budgets
+
+Budgets live in `test/perf/k6/baselines/all-scenarios.json`. PRs that regress
+any metric beyond **+15% of baseline** fail the `k6-perf` job.
+
+| Metric | p95 budget | p99 budget |
+|--------|-----------|-----------|
+| `http_req_duration` (all) | 500 ms | 1000 ms |
+| `POST /intents` | 200 ms | 400 ms |
+| `GET /intents/open` | 150 ms | 300 ms |
+| `POST /intents/quote` | 200 ms | 500 ms |
+| Full lifecycle cycle | 600 ms | — |
+| Read-only endpoints | 150 ms | — |
+| Global error rate | < 1% | — |
+
+### Running locally
+
+Prerequisites: [k6 installed](https://grafana.com/docs/k6/latest/get-started/installation/)
+and the server running (`npm run dev`).
+
+```bash
+# Run all four scenarios (CI entry point)
+npm run perf
+
+# Run a single scenario
+npm run perf:create-intent
+npm run perf:solver-polling
+npm run perf:quote-requests
+npm run perf:mixed-lifecycle
+
+# Compare the latest run against baselines
+npm run perf:compare
+
+# Update baselines after a known-good run on main
+npm run perf:update-baselines
+
+# Regenerate pre-computed Ed25519 fixture signatures
+npm run perf:gen-fixtures
+```
+
+### Noise control
+
+The CI workflow runs k6 **three times** and uses the last run's summary.
+The +15% tolerance band absorbs run-to-run variation on the fixed-size
+GitHub Actions runner. Baselines are automatically updated on `main` pushes,
+so the reference point always tracks the current head.
+
+### Updating budgets
+
+Edit the `thresholds` section in
+`test/perf/k6/baselines/all-scenarios.json`.  Do not edit `reference` — that
+section is overwritten automatically by `npm run perf:update-baselines`.
+
+---
+
+## Preview environments
+
+Every same-repo PR can be deployed to an isolated, seeded preview environment
+(API, Swagger at `/docs`, WebSocket at `/ws`) by adding the **`preview`** label;
+it is torn down on close, on label removal, or after a TTL. See
+[docs/ci/preview-environments.md](./docs/ci/preview-environments.md) for the
+trigger rules, cost cap and required repository configuration. Previews are
+testnet-only with throwaway keys — forked PRs are excluded.
 
 ## Contributing
 

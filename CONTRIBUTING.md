@@ -18,9 +18,10 @@
 7. [Module and file structure](#module-and-file-structure)
 8. [Adding a new endpoint](#adding-a-new-endpoint)
 9. [Environment variables](#environment-variables)
-10. [Regenerating the API client SDK](#regenerating-the-api-client-sdk)
-11. [Commit messages](#commit-messages)
-12. [Submitting a pull request](#submitting-a-pull-request)
+10. [Database migrations](#database-migrations)
+11. [Regenerating the API client SDK](#regenerating-the-api-client-sdk)
+12. [Commit messages](#commit-messages)
+13. [Submitting a pull request](#submitting-a-pull-request)
 
 ---
 
@@ -110,6 +111,8 @@ docker compose up --build
 | `npm run solver:demo` | Run the reference solver bot (see [`scripts/README.md`](./scripts/README.md)) |
 | `npm run seed` | Seed the database with sample data |
 | `npm run db:migrate` | Run pending Prisma migrations against the local DB |
+| `npm run check:migrations` | Lint changed migrations for unsafe DDL and a missing `down.sql` (see [Database migrations](#database-migrations)) |
+| `npm run test:scripts` | Tests for the tooling in `scripts/` (e.g. the migration checker's fixtures) |
 
 Run the full verification suite before opening a PR:
 
@@ -145,6 +148,71 @@ The `createTestApp()` helper in `test/utils/create-test-app.ts` boots the full
 The `@stellar/stellar-sdk` is mocked globally in e2e tests via Jest's
 `moduleNameMapper` (see `test/jest-e2e.json`) so Soroban calls never hit
 the network.
+
+### Sharding, flakes and quarantine
+
+CI does not run `npm test` directly. The suite is split across parallel
+runners by `scripts/ci/run-tests.mjs`, and you can reproduce a single shard
+locally with the same command:
+
+```bash
+npm run test:ci                       # unit suite, whole
+npm run test:ci -- --shard=1/4        # unit suite, one of four shards
+npm run test:e2e:ci -- --shard=1/2    # e2e suite, one of two shards
+```
+
+`run-tests.mjs` does three things beyond invoking Jest:
+
+1. Applies [`test/quarantine.json`](./test/quarantine.json), skipping the
+   listed files and printing what it skipped.
+2. Writes a machine-readable result file so a failure can be classified
+   instead of guessed at.
+3. If a run fails, re-runs **only the failing files once** and diffs the two
+   runs. A test that passes on the retry is reported as a flake and the job
+   still goes green, with a `::warning` annotation and a
+   `flake-report.md` in the job summary. Anything that fails twice, or a test
+   file that cannot even load, fails the job — a module-load error is never
+   retried, because retrying cannot fix it.
+
+Coverage is collected per shard but **not** gated per shard: a shard that runs
+a quarter of the suite cannot meet a global threshold. Shards write to
+`coverage-shards/`, and `scripts/ci/coverage-merge.mjs` sums the counters,
+writes `coverage/`, and enforces the 70 % threshold from `jest.config.js` on
+the merged result. Threshold changes therefore stay in one place.
+
+#### Quarantining a flaky test
+
+Quarantine is a debt record, not a silencer. Adding an entry to
+`test/quarantine.json` requires all of:
+
+| Field | Rule |
+|-------|------|
+| `path` | Repo-relative, must exist, no duplicates |
+| `reason` | What actually goes wrong, not "flaky" |
+| `owner` | A GitHub handle — `@you` |
+| `issue` | `#123` or the issue URL tracking the fix |
+| `addedAt` | ISO date the entry was added |
+
+`scripts/ci/check-quarantine.mjs` fails the build on a missing owner or issue,
+a path that no longer exists, a duplicate, or an entry older than
+`staleAfterDays` (90 by default). It is plain Node with no imports, so it also
+works as a pre-commit hook without `npm ci`.
+
+**Prefer fixing the test.** Quarantine only when the flake is genuinely
+environmental (timing, a shared fixture, upstream RPC). Before opening a PR
+that adds an entry, expect a maintainer to ask why the test cannot be made
+deterministic.
+
+### Required status checks
+
+`Backend (Nest) – Node 20` and `Backend (Nest) – Node 22` (note the en dash —
+branch protection matches the check name exactly) cover lint,
+type-check and build only. The test gates are separate checks —
+`Unit tests (shard n/4)`, `E2E tests (shard n/2)` and `Coverage merge and gate`
+— so a red unit test cannot hide behind a green build job. If you change the
+shard counts in `.github/workflows/ci.yml`, update `--expect-shards` in the
+`coverage` job in the same commit; the merge job fails loudly on a mismatch
+rather than silently gating on a partial union.
 
 ---
 
@@ -333,6 +401,30 @@ This repository is licensed under the [MIT License](./LICENSE). Because the
 project is permissive by default, source files do not require a per-file SPDX or
 copyright banner; just keep the repo-level license in place and avoid adding
 custom header text that conflicts with it.
+
+---
+
+## Database migrations
+
+Migrations live in [`prisma/migrations/`](./prisma/migrations/). Every migration
+must ship a hand-authored `down.sql` for rollback, and changed migrations are
+linted for unsafe DDL by the `migration-lint` CI job. See
+[`prisma/migrations/README.md`](./prisma/migrations/README.md) for the full rule
+set and the `-- squawk-ignore` suppression convention.
+
+```bash
+npm run check:migrations                # lint migrations changed since HEAD^1
+npm run check:migrations -- --base <sha>  # lint migrations changed since <sha>
+npm run test:scripts                    # run the checker's fixture tests
+```
+
+When you add a migration, make sure it:
+
+1. includes a `down.sql` that reverses `migration.sql`;
+2. builds/drops indexes with `CONCURRENTLY`;
+3. avoids `ALTER COLUMN … TYPE`, `SET NOT NULL` without a `DEFAULT`, and
+   `LOCK TABLE` — or suppresses them with `-- squawk-ignore <rule>` **plus** a
+   `-- justification:` comment (and repeat that justification in the PR).
 
 ---
 

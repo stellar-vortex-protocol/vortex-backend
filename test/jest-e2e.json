@@ -7,6 +7,7 @@
     "^.+\\.ts$": ["ts-jest", { "diagnostics": false }]
   },
   "moduleNameMapper": {
-    "^@stellar/stellar-sdk$": "<rootDir>/test/__mocks__/@stellar/stellar-sdk.ts"
+    "^@stellar/stellar-sdk$": "<rootDir>/test/__mocks__/@stellar/stellar-sdk.ts",
+    "^@nestjs/schedule$": "<rootDir>/test/__mocks__/@nestjs/schedule.ts"
   }
 }

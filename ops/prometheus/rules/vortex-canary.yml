@@ -1,0 +1,37 @@
+# Synthetic canary alerts (issue #496). Metrics are pushed by
+# tools/canary/canary.ts to the Pushgateway, labelled by network.
+groups:
+  - name: vortex-canary
+    rules:
+      # >= 3 consecutive failed runs: no success within three intervals.
+      # Works for both the CronJob (one run per push) and loop mode.
+      - alert: VortexCanaryConsecutiveFailures
+        expr: |
+          time() - vortex_canary_last_success_timestamp_seconds
+            > 3 * vortex_canary_interval_seconds
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Canary lifecycle failing on {{ $labels.network }}"
+          description: "No successful create→quote→accept→fill→confirm run in 3 intervals. See docs/runbooks/on-call.md#scenario-e--synthetic-canary-failing"
+
+      - alert: VortexCanaryFundsLow
+        expr: vortex_canary_balance_xlm < vortex_canary_min_balance_xlm
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Canary solver balance low on {{ $labels.network }}"
+          description: "Top up the canary solver account; mainnet runs stop below the threshold."
+
+      # Balance drained faster than the configured 24 h budget.
+      - alert: VortexCanaryBudgetExceeded
+        expr: |
+          (max_over_time(vortex_canary_balance_xlm[24h]) - vortex_canary_balance_xlm)
+            > vortex_canary_daily_budget_xlm
+        labels:
+          severity: page
+        annotations:
+          summary: "Canary spent more than its daily budget on {{ $labels.network }}"
+          description: "Suspend the canary CronJob and investigate (fees spiking or funds leaving canary accounts)."

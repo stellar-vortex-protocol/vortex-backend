@@ -1,0 +1,52 @@
+# Minimal Loki for the local observability profile (issue #481).
+#
+# Single binary, filesystem storage, no replication or object store: this is a
+# developer-local stack, not a production log pipeline. The dashboards use Loki
+# for exactly one panel today (event-loop utilisation on the API RED
+# dashboard), so the config is kept deliberately small.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # Local stack: keep a week of logs and cap ingestion so a runaway log line
+  # cannot fill the volume.
+  retention_period: 168h
+  ingestion_rate_mb: 8
+  ingestion_burst_size_mb: 16
+  max_query_series: 10000
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  delete_request_store: filesystem
+
+analytics:
+  reporting_enabled: false

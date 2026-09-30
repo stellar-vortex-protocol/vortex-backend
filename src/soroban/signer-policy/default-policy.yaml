@@ -1,0 +1,8 @@
+version: 1
+defaultAction: deny
+budget:
+  windowMs: 60000
+  maxAuthEntries: 8
+maxInclusionFee: 1000000
+maxResourceFee: 1000000
+rules: []

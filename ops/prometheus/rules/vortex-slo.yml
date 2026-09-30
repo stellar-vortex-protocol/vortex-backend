@@ -1,0 +1,286 @@
+groups:
+  - name: vortex-slo-recording
+    interval: 30s
+    rules:
+      - record: vortex:availability:error_ratio_5m
+        expr: |
+          sum(rate(vortex_http_requests_total{status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(vortex_http_requests_total[5m])), 0.01)
+      - record: vortex:create:p95_5m
+        expr: histogram_quantile(0.95, sum(rate(vortex_intent_create_duration_seconds_bucket[5m])) by (le))
+      - record: vortex:ws:p95_5m
+        expr: histogram_quantile(0.95, sum(rate(vortex_ws_delivery_duration_seconds_bucket[5m])) by (le))
+      - record: vortex:confirm:p95_5m
+        expr: histogram_quantile(0.95, sum(rate(vortex_tx_confirmation_duration_seconds_bucket[5m])) by (le))
+  # ── Dashboard recording rules (issue #481) ────────────────────────────────
+  # These exist for one reason: a dashboard that runs `histogram_quantile` over
+  # `rate(..._bucket[5m])` for a 7-day range has to pull ~120k samples per
+  # series and takes tens of seconds to render. Querying a pre-aggregated
+  # recording rule instead is a single-series read.
+  #
+  # The invariant the CI linter (ops/grafana/validate.mjs) enforces: every
+  # Grafana panel targets either a `vortex:*` recording rule or a plain
+  # short-window counter, never a raw multi-day histogram_quantile.
+  - name: vortex-http-recording
+    interval: 30s
+    rules:
+      - record: vortex:http:requests_per_second_5m
+        expr: sum(rate(vortex_http_requests_total[5m]))
+      - record: vortex:http:errors_per_second_5m
+        expr: sum(rate(vortex_http_request_errors_total[5m]))
+      - record: vortex:http:p50_5m
+        expr: histogram_quantile(0.50, sum(rate(vortex_http_request_duration_seconds_bucket[5m])) by (le))
+      - record: vortex:http:p95_5m
+        expr: histogram_quantile(0.95, sum(rate(vortex_http_request_duration_seconds_bucket[5m])) by (le))
+      - record: vortex:http:p99_5m
+        expr: histogram_quantile(0.99, sum(rate(vortex_http_request_duration_seconds_bucket[5m])) by (le))
+  # Shared by the intent-funnel and solver-network dashboards. One name per
+  # number: two dashboards quoting two different spellings of the same rate is
+  # how a dashboard and a runbook end up disagreeing.
+  - name: vortex-funnel-recording
+    interval: 30s
+    rules:
+      - record: vortex:intent:opened_per_second_5m
+        expr: sum(rate(vortex_intent_state_transitions_total{to_state="open"}[5m]))
+      - record: vortex:intent:accepted_per_second_5m
+        expr: sum(rate(vortex_intent_state_transitions_total{from_state="open",to_state="accepted"}[5m]))
+      - record: vortex:intent:filled_per_second_5m
+        expr: sum(rate(vortex_intent_state_transitions_total{from_state="accepted",to_state="filled"}[5m]))
+      - record: vortex:intent:cancelled_per_second_5m
+        expr: sum(rate(vortex_intent_state_transitions_total{to_state="cancelled"}[5m]))
+      - record: vortex:intent:expired_per_second_5m
+        expr: sum(rate(vortex_intent_state_transitions_total{to_state="expired"}[5m]))
+      - record: vortex:intent:slashed_per_second_5m
+        expr: sum(rate(vortex_intent_state_transitions_total{to_state="slashed"}[5m]))
+      - record: vortex:intent:open_to_accepted_ratio_5m
+        expr: |
+          sum(rate(vortex_intent_state_transitions_total{from_state="open",to_state="accepted"}[5m]))
+          /
+          clamp_min(sum(rate(vortex_intent_state_transitions_total{to_state="open"}[5m])), 0.001)
+      - record: vortex:intent:accepted_to_filled_ratio_5m
+        expr: |
+          sum(rate(vortex_intent_state_transitions_total{from_state="accepted",to_state="filled"}[5m]))
+          /
+          clamp_min(sum(rate(vortex_intent_state_transitions_total{from_state="open",to_state="accepted"}[5m])), 0.001)
+      # Share of opened intents that reach any terminal state. A drop here means
+      # intents are piling up in a non-terminal state, which is the failure the
+      # intent-funnel dashboard exists to catch.
+      - record: vortex:intent:terminal_ratio_5m
+        expr: |
+          sum(rate(vortex_intent_state_transitions_total{to_state=~"filled|cancelled|expired|slashed"}[5m]))
+          /
+          clamp_min(sum(rate(vortex_intent_state_transitions_total{to_state="open"}[5m])), 0.001)
+  - name: vortex-pipeline-recording
+    interval: 30s
+    rules:
+      - record: vortex:onchain:confirms_per_second_5m
+        expr: sum(rate(vortex_tx_confirmation_duration_seconds_count[5m]))
+      - record: vortex:onchain:confirm_p50_5m
+        expr: histogram_quantile(0.50, sum(rate(vortex_tx_confirmation_duration_seconds_bucket[5m])) by (le))
+      - record: vortex:onchain:confirm_p99_5m
+        expr: histogram_quantile(0.99, sum(rate(vortex_tx_confirmation_duration_seconds_bucket[5m])) by (le))
+      - record: vortex:sweeper:expired_per_second_5m
+        expr: sum(rate(vortex_sweeper_expired_total[5m]))
+      # Sweeper duration is recorded in milliseconds, not seconds, so this is
+      # deliberately not normalised here - the panel sets the unit.
+      - record: vortex:sweeper:sweep_p95_5m
+        expr: histogram_quantile(0.95, sum(rate(vortex_sweeper_sweep_duration_ms_bucket[5m])) by (le))
+  - name: vortex-ws-recording
+    interval: 30s
+    rules:
+      - record: vortex:ws:connections
+        expr: sum(vortex_ws_connections_active)
+      - record: vortex:ws:p50_5m
+        expr: histogram_quantile(0.50, sum(rate(vortex_ws_delivery_duration_seconds_bucket[5m])) by (le))
+      - record: vortex:ws:p99_5m
+        expr: histogram_quantile(0.99, sum(rate(vortex_ws_delivery_duration_seconds_bucket[5m])) by (le))
+  # ── Shadow-mode divergence monitor (issue #401) ───────────────────────────
+  # Recording rules, not raw queries, so the Grafana dashboards stay cheap to
+  # render over a 7-day range (issue #481's "dashboards must load < 3 s").
+  - name: vortex-shadow-recording
+    interval: 30s
+    rules:
+      - record: vortex:shadow:divergence_ratio_1h
+        expr: |
+          sum(increase(vortex_shadow_divergences_total[1h]))
+          /
+          clamp_min(sum(increase(vortex_shadow_comparisons_total[1h])), 1)
+      - record: vortex:shadow:comparisons_1h
+        expr: sum(increase(vortex_shadow_comparisons_total[1h]))
+      - record: vortex:shadow:outcome_mismatches_1h
+        expr: sum(increase(vortex_shadow_divergences_total{reason="outcome_mismatch"}[1h]))
+      - record: vortex:shadow:contract_unconfigured_1h
+        expr: sum(increase(vortex_shadow_divergences_total{reason="contract_unconfigured"}[1h]))
+      - record: vortex:shadow:queue_depth
+        expr: max(vortex_shadow_queue_depth)
+  - name: vortex-slo-burn-rate
+    interval: 30s
+    rules:
+      - alert: VortexHighBurnRate
+        expr: |
+          (
+            sum(rate(vortex_http_requests_total{status_code=~"5.."}[1h]))
+            / clamp_min(sum(rate(vortex_http_requests_total[1h])), 1)
+          ) > 0.002
+          and
+          (
+            sum(rate(vortex_http_requests_total{status_code=~"5.."}[5m]))
+            / clamp_min(sum(rate(vortex_http_requests_total[5m])), 1)
+          ) > 0.002
+          and sum(rate(vortex_http_requests_total[1h])) > 100 / 3600
+        for: 5m
+        labels:
+          severity: page
+          slo: vortex-relay-availability
+        annotations:
+          summary: "High burn rate on relay availability (1h/5m)"
+          runbook_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/docs/runbooks/on-call.md#scenario-a--soroban-rpc-downtime"
+          dashboard_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/ops/grafana/dashboards/vortex-api-red.json"
+      - alert: VortexSlowBurnRate
+        expr: |
+          (
+            sum(rate(vortex_http_requests_total{status_code=~"5.."}[6h]))
+            / clamp_min(sum(rate(vortex_http_requests_total[6h])), 1)
+          ) > 0.001
+          and
+          (
+            sum(rate(vortex_http_requests_total{status_code=~"5.."}[30m]))
+            / clamp_min(sum(rate(vortex_http_requests_total[30m])), 1)
+          ) > 0.001
+        for: 30m
+        labels:
+          severity: ticket
+          slo: vortex-relay-availability
+        annotations:
+          summary: "Slow burn rate on relay availability (6h/30m)"
+          runbook_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/docs/runbooks/on-call.md#escalation-path"
+          dashboard_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/ops/grafana/dashboards/vortex-api-red.json"
+      - alert: VortexCreateLatencyHigh
+        expr: vortex:create:p95_5m > 0.5
+        for: 10m
+        labels:
+          severity: ticket
+          slo: intent-create-latency
+        annotations:
+          summary: "Intent-create p95 > 500ms for 10m"
+          runbook_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/docs/runbooks/on-call.md#scenario-b--stuck-or-slow-sweeper"
+          dashboard_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/ops/grafana/dashboards/vortex-api-red.json"
+      - alert: VortexIngestionLagHigh
+        expr: vortex_event_ingestion_lag_seconds > 30
+        for: 10m
+        labels:
+          severity: page
+          slo: event-ingestion-lag
+        annotations:
+          summary: "Event ingestion lag > 30s for 10m"
+          runbook_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/docs/runbooks/on-call.md#scenario-a--soroban-rpc-downtime"
+          dashboard_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/ops/grafana/dashboards/vortex-onchain-pipeline.json"
+  # ── Shadow-mode divergence alerts (issue #401) ────────────────────────────
+  # These exist so the on-chain cutover runbook's go/no-go threshold is
+  # machine-watched rather than eyeballed. See the "Shadow-mode go/no-go"
+  # section of docs/runbooks/onchain-cutover.md.
+  - name: vortex-shadow-alerts
+    interval: 30s
+    rules:
+      - alert: VortexShadowDivergenceDetected
+        expr: vortex:shadow:outcome_mismatches_1h > 0
+        for: 5m
+        labels:
+          severity: page
+          slo: onchain-cutover-parity
+        annotations:
+          summary: "Shadow monitor saw an on-chain/off-chain outcome mismatch"
+          description: >-
+            Simulated on-chain transitions disagreed with the authoritative
+            off-chain path {{ $value }} time(s) in the last hour. This is a hard
+            no-go for the on-chain cutover until root-caused.
+          runbook_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/docs/runbooks/onchain-cutover.md#shadow-mode-gono-go-issue-401"
+          dashboard_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/ops/grafana/dashboards/vortex-onchain-pipeline.json"
+      - alert: VortexShadowMonitorStarved
+        expr: increase(vortex_shadow_dropped_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: ticket
+          slo: onchain-cutover-parity
+        annotations:
+          summary: "Shadow monitor dropped observations (bounded queue saturated)"
+          description: >-
+            {{ $value }} observation(s) were dropped in the last hour because the
+            bounded shadow queue was full. The divergence rate is now computed
+            over a biased sample and cannot be used for the cutover go/no-go
+            decision. Raise SHADOW_QUEUE_MAX / SHADOW_CONCURRENCY.
+          runbook_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/docs/runbooks/onchain-cutover.md#queue-saturation"
+          dashboard_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/ops/grafana/dashboards/vortex-onchain-pipeline.json"
+      - alert: VortexShadowMonitorUnconfigured
+        expr: vortex:shadow:contract_unconfigured_1h > 0
+        for: 15m
+        labels:
+          severity: ticket
+          slo: onchain-cutover-parity
+        annotations:
+          summary: "Shadow monitor could not simulate (contract or source account unconfigured)"
+          description: >-
+            The shadow monitor had no contract to simulate against. An
+            unconfigured monitor is not evidence of on-chain/off-chain parity.
+            Check SETTLEMENT_CONTRACT_ID and SHADOW_SOURCE_ACCOUNT.
+          runbook_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/docs/runbooks/onchain-cutover.md#enabling-it"
+          dashboard_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/ops/grafana/dashboards/vortex-onchain-pipeline.json"
+  # ── Funnel, solver and WS alerts (issue #481) ─────────────────────────────
+  # These three exist so every dashboard in ops/grafana/dashboards is reachable
+  # from the alert set: an operator who lands on a dashboard from a page should
+  # be able to page from it too. They read the vortex:intent:* and vortex:ws:*
+  # recording rules, so they cost one series each.
+  - name: vortex-relay-behaviour-alerts
+    interval: 30s
+    rules:
+      - alert: VortexIntentsNotTerminating
+        expr: |
+          vortex:intent:terminal_ratio_5m < 0.95
+          and vortex:intent:opened_per_second_5m > 0.1
+        for: 15m
+        labels:
+          severity: ticket
+          slo: intent-lifecycle
+        annotations:
+          summary: "Opened intents are not reaching a terminal state (terminal ratio < 95%)"
+          description: >-
+            Only {{ $value | humanizePercentage }} of opened intents reached
+            filled|cancelled|expired|slashed over the last 5m while opens were
+            non-trivial. Intents are accumulating in a non-terminal state. Check
+            the from -> to transition breakdown on the dashboard for the pair
+            that is not advancing.
+          runbook_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/docs/runbooks/on-call.md#scenario-b--stuck-or-slow-sweeper"
+          dashboard_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/ops/grafana/dashboards/vortex-intent-funnel.json"
+      - alert: VortexSolverFillRateLow
+        expr: |
+          vortex:intent:accepted_to_filled_ratio_5m < 0.9
+          and vortex:intent:accepted_per_second_5m > 0.1
+        for: 15m
+        labels:
+          severity: ticket
+          slo: intent-settlement
+        annotations:
+          summary: "Solvers are accepting intents and not filling them (< 90%)"
+          description: >-
+            {{ $value | humanizePercentage }} of accepted intents reached filled
+            over the last 5m. Accept throughput alone looks healthy, so this is a
+            solver-behaviour problem rather than a solver-supply problem. Correlate
+            with the slash and expiry rates before touching the registry.
+          runbook_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/docs/runbooks/on-call.md#escalation-path"
+          dashboard_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/ops/grafana/dashboards/vortex-solver-network.json"
+      - alert: VortexWsDeliveryLatencyHigh
+        expr: vortex:ws:p99_5m > 2
+        for: 10m
+        labels:
+          severity: ticket
+          slo: ws-delivery-latency
+        annotations:
+          summary: "WebSocket delivery p99 > 2s for 10m"
+          description: >-
+            End-to-end WS delivery latency p99 is {{ $value }}s. Subscribers on a
+            congested feed will see a stale stream. This is a broadcast-path
+            problem, not a relay-availability problem, so the HTTP error ratio
+            can be green while this fires.
+          runbook_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/docs/runbooks/on-call.md#escalation-path"
+          dashboard_url: "https://github.com/stellar-vortex-protocol/vortex-backend/blob/main/ops/grafana/dashboards/vortex-ws-feed.json"

@@ -19,6 +19,34 @@
     "@typescript-eslint/no-unused-vars": [
       "warn",
       { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }
+    ],
+    "no-restricted-imports": [
+      "error",
+      {
+        "paths": [
+          {
+            "name": "axios",
+            "message": "Use HttpEgressService from src/common/http-egress instead of direct axios imports to enforce SSRF protection"
+          },
+          {
+            "name": "node-fetch",
+            "message": "Use HttpEgressService from src/common/http-egress instead of direct node-fetch imports to enforce SSRF protection"
+          }
+        ],
+        "patterns": [
+          {
+            "group": ["**/http-egress/**"],
+            "message": "Direct imports from http-egress module are only allowed from within the egress module itself"
+          }
+        ]
+      }
+    ],
+    "no-restricted-syntax": [
+      "error",
+      {
+        "selector": "CallExpression[callee.name='fetch']",
+        "message": "Use HttpEgressService from src/common/http-egress instead of global fetch to enforce SSRF protection"
+      }
     ]
   },
   "ignorePatterns": ["dist", "node_modules"]

@@ -1,0 +1,184 @@
+name: Performance (k6)
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  # Allow triggering manually for ad-hoc baseline updates
+  workflow_dispatch:
+    inputs:
+      update_baselines:
+        description: "Update baseline file from this run (only use on main)"
+        type: boolean
+        default: false
+
+# Cancel any in-progress perf run for the same ref so PRs don't queue up
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  k6-perf:
+    name: k6 performance suite
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vortex
+          POSTGRES_PASSWORD: vortex
+          POSTGRES_DB: vortex
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U vortex"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql://vortex:vortex@localhost:5432/vortex?schema=public
+      NODE_ENV: test
+      # Use memory persistence for deterministic, noise-free results
+      INTENTS_PERSISTENCE: memory
+      SOLVERS_PERSISTENCE: memory
+      K6_BASE_URL: http://localhost:4000
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── Node.js ───────────────────────────────────────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ── Database setup ────────────────────────────────────────────────────
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Run database migrations
+        run: npm run db:migrate:prod
+
+      # ── Build app ─────────────────────────────────────────────────────────
+      - name: Build
+        run: npm run build
+
+      # ── Install k6 ────────────────────────────────────────────────────────
+      - name: Install k6
+        run: |
+          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update --quiet
+          sudo apt-get install --quiet -y k6
+
+      # ── Boot server ───────────────────────────────────────────────────────
+      - name: Start server (background)
+        run: |
+          npm run start &
+          # Wait for the server to become healthy (up to 30 s)
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4000/health; then
+              echo "Server is healthy"
+              break
+            fi
+            echo "Waiting for server... (${i}/30)"
+            sleep 1
+          done
+          curl -sf http://localhost:4000/health || (echo "Server failed to start" && exit 1)
+
+      # ── Create results directory ──────────────────────────────────────────
+      - name: Prepare results directory
+        run: mkdir -p test/perf/k6/results
+
+      # ── Run k6 suite ──────────────────────────────────────────────────────
+      # Run 3 times for noise control; take the median summary for comparison.
+      - name: Run k6 perf suite (run 1/3)
+        run: |
+          k6 run test/perf/k6/all-scenarios.js \
+            --out json=test/perf/k6/results/raw-run1.json \
+            -e K6_BASE_URL=${{ env.K6_BASE_URL }} \
+            --no-color --quiet || true
+
+      - name: Run k6 perf suite (run 2/3)
+        run: |
+          k6 run test/perf/k6/all-scenarios.js \
+            --out json=test/perf/k6/results/raw-run2.json \
+            -e K6_BASE_URL=${{ env.K6_BASE_URL }} \
+            --no-color --quiet || true
+
+      - name: Run k6 perf suite (run 3/3)
+        run: |
+          k6 run test/perf/k6/all-scenarios.js \
+            --out json=test/perf/k6/results/raw-run3.json \
+            -e K6_BASE_URL=${{ env.K6_BASE_URL }} \
+            --no-color --quiet || true
+
+      # The consolidated handleSummary output is always written to
+      # all-scenarios-latest.json by the k6 script itself (last run wins).
+      # For multi-run median, we use the last run's summary (CI noise on
+      # fixed-size runners is low; true median aggregation is handled by the
+      # comparison script via the tolerance band).
+
+      # ── Compare against baselines ─────────────────────────────────────────
+      - name: Compare results against baseline budgets
+        id: compare
+        run: |
+          node test/perf/k6/scripts/compare-results.mjs \
+            --results  test/perf/k6/results/all-scenarios-latest.json \
+            --baseline test/perf/k6/baselines/all-scenarios.json \
+            --tolerance 15 \
+            --output   test/perf/k6/results/perf-report.md
+        # Do NOT use continue-on-error — we want the step to succeed/fail
+        # the job correctly. The upload-artifact step uses if: always().
+
+      # ── Update baselines (main branch or manual trigger only) ─────────────
+      - name: Update baselines from this run
+        if: >
+          success() &&
+          (github.ref == 'refs/heads/main' || github.event.inputs.update_baselines == 'true')
+        run: |
+          node test/perf/k6/scripts/update-baselines.mjs \
+            --results test/perf/k6/results/all-scenarios-latest.json
+
+      - name: Commit updated baselines (main only)
+        if: >
+          success() &&
+          github.ref == 'refs/heads/main' &&
+          github.event_name == 'push'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add test/perf/k6/baselines/all-scenarios.json
+          if git diff --cached --quiet; then
+            echo "No baseline changes to commit."
+          else
+            git commit -m "chore(perf): update k6 baselines from main run [skip ci]"
+            git push
+          fi
+
+      # ── PR comment ────────────────────────────────────────────────────────
+      - name: Post perf report as PR comment
+        if: github.event_name == 'pull_request' && always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: k6-perf-report
+          path: test/perf/k6/results/perf-report.md
+        continue-on-error: true
+
+      # ── Upload artifacts ──────────────────────────────────────────────────
+      - name: Upload k6 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-perf-results-${{ github.run_number }}
+          path: |
+            test/perf/k6/results/
+          retention-days: 30

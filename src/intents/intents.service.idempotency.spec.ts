@@ -5,6 +5,7 @@ import { Intent } from "./intents.types";
 import { AppConfig } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { ProtocolParamsService } from "../governance/params.service";
 
 /**
  * Issue #274 — the idempotency-key path in IntentsService.create() must be
@@ -77,12 +78,16 @@ function buildService(onchain = false): Harness {
 
   const stellarTx = {} as unknown as StellarTxService;
   const prisma = {} as unknown as PrismaService;
+  const protocolParams = {
+    snapshotForChain: jest.fn().mockReturnValue({ version: 0, feeBps: 30, deadlineSeconds: 1800, fillWindowSeconds: 600, capturedAt: new Date().toISOString() }),
+  } as unknown as ProtocolParamsService;
 
   const service = new IntentsService(
     repo as unknown as IIntentsRepository,
     config,
     stellarTx,
     prisma,
+    protocolParams,
   );
 
   return { service, repo };
@@ -92,7 +97,6 @@ describe("IntentsService.create — idempotency race safety (#274)", () => {
   let harness: Harness;
 
   afterEach(() => {
-    harness?.service.onModuleDestroy();
     jest.restoreAllMocks();
   });
 

@@ -1,0 +1,171 @@
+{{/*
+The previewed backend itself.
+
+Config choices that matter (each one exists because a reviewer asked for it or
+would otherwise be bitten by it):
+
+  * INTENTS/SOLVERS_PERSISTENCE=memory — the repositories call
+    buildSeedIntents()/buildSeedSolvers() on construction, so the API serves
+    seeded data the moment the pod is Ready, with zero migration coupling.
+    Postgres is still present (and still migrated by the image entrypoint)
+    because /health, kill-switch persistence and Prisma-backed features need a
+    real database to be exercised.
+  * NODE_ENV=development — see values.yaml; required for Swagger and for the
+    contract-id startup check.
+  * No production secrets, ever: DATABASE_URL and SOROBAN_SIGNING_KEY come from
+    the per-run Secret; everything else is public testnet configuration.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vortex-preview.fullname" . }}
+  labels:
+    {{- include "vortex-preview.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Recreate, not RollingUpdate: a preview namespace has exactly one replica
+  # and no other pod may talk to *this* pod's in-memory store, so a surge pod
+  # would briefly double the namespace's requests against its own ResourceQuota
+  # for no benefit.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "vortex-preview.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vortex-preview.labels" . | nindent 8 }}
+      annotations:
+        # Bump on every install so a same-tag re-deploy restarts pods instead
+        # of silently keeping the old image (the workflow changes the tag per
+        # head SHA, but a manual `helm upgrade` may not).
+        vortex.io/preview-revision: {{ .Values.preview.headSha | default .Release.Revision | quote }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.service.port | quote }}
+            - name: NODE_ENV
+              value: {{ .Values.app.nodeEnv | quote }}
+            # Secrets injected from the per-run Secret, never from values.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vortex-preview.fullname" . }}-env
+                  key: DATABASE_URL
+            - name: SOROBAN_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vortex-preview.fullname" . }}-env
+                  key: SOROBAN_SIGNING_KEY
+            # ── Stellar: testnet only, by values *and* by review ────────────
+            # There is no mainnet branch anywhere in this template: the chart
+            # cannot be pointed at mainnet without editing the chart itself.
+            - name: STELLAR_NETWORK
+              value: {{ .Values.app.stellarNetwork | quote }}
+            - name: SOROBAN_RPC_URL
+              value: {{ .Values.app.sorobanRpcUrl | quote }}
+            # Empty → on-chain write paths no-op. Previews are for exercising
+            # protocol logic, not for moving even testnet funds by default.
+            - name: SETTLEMENT_CONTRACT_ID
+              value: ""
+            - name: SOLVER_REGISTRY_CONTRACT_ID
+              value: ""
+            - name: ONCHAIN_INTENTS_ENABLED
+              value: "false"
+            - name: CORS_ORIGIN
+              value: {{ .Values.app.corsOrigin | quote }}
+            # ── Redis-backed integrations (memory when redis.enabled=false) ──
+            {{- if .Values.redis.enabled }}
+            - name: REDIS_URL
+              value: {{ include "vortex-preview.redisUrl" . | quote }}
+            - name: WS_BACKPLANE
+              value: {{ include "vortex-preview.backplane" . | quote }}
+            - name: JOBS_DRIVER
+              value: "bullmq"
+            - name: FLAGS_PUBSUB
+              value: "redis"
+            {{- else }}
+            - name: WS_BACKPLANE
+              value: "memory"
+            - name: JOBS_DRIVER
+              value: "memory"
+            - name: FLAGS_PUBSUB
+              value: "memory"
+            {{- end }}
+            # In-memory stores, boot-seeded from the same builders as
+            # `npm run seed` — this is what makes /api/v1/intents non-empty.
+            - name: INTENTS_PERSISTENCE
+              value: "memory"
+            - name: SOLVERS_PERSISTENCE
+              value: "memory"
+            - name: PROCESS_ROLE
+              value: "all"
+            # The preview's URL is http(s) behind one trusted proxy hop — see
+            # app.wsTrustProxyHops for why this matters to the WS limits.
+            - name: WS_TRUST_PROXY_HOPS
+              value: {{ .Values.app.wsTrustProxyHops | quote }}
+            # Empty disables admin RBAC by default; set via
+            # --set app.adminApiKeys=... if a review needs /admin endpoints.
+            - name: ADMIN_API_KEYS
+              value: {{ .Values.app.adminApiKeys | quote }}
+            - name: LOG_LEVEL
+              value: "info"
+            # Explicitly empty: a preview must never reach a real Sentry DSN.
+            - name: SENTRY_DSN
+              value: ""
+            {{- with .Values.app.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # Migrations run in the image entrypoint before the listener opens;
+          # the startup probe holds readiness "not ready" for up to 5 minutes
+          # instead of letting liveness kill the pod mid-migrate.
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: http
+            periodSeconds: {{ .Values.app.probes.startupPeriodSeconds }}
+            failureThreshold: {{ .Values.app.probes.startupFailureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: {{ .Values.app.probes.readyPeriodSeconds }}
+            failureThreshold: {{ .Values.app.probes.readyFailureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: {{ .Values.app.probes.livePeriodSeconds }}
+            failureThreshold: {{ .Values.app.probes.liveFailureThreshold }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # No `runAsNonRoot: true`: the node:20-alpine runtime image defines
+            # no USER, so forcing non-root would crash-loop every preview. The
+            # root filesystem is still read-only-*ish* in practice (nothing
+            # writes outside /app and /tmp). Making the image run as a
+            # non-root user is a worthwhile hardening issue of its own — it
+            # must not be smuggled in through a preview chart where nobody can
+            # test the image change.
+          resources:
+            {{- toYaml .Values.app.resources | nindent 12 }}
+      # Autoscaling is deliberately absent: a preview scales with the PR's
+      # traffic (a human) or not at all, and a HPA would fight the
+      # ResourceQuota's cost model.

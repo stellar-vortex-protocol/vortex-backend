@@ -4,10 +4,23 @@ import { logger } from "./logger";
 
 interface JsonResponse {
   status: (code: number) => { json: (body: unknown) => void };
+  setHeader?: (name: string, value: string) => void;
 }
 
 interface RequestWithId {
   requestId?: string;
+}
+
+/**
+ * Some 503s are transient and tell the client when to come back (an emergency
+ * pause, a shedding load-shed). An exception may expose `retryAfterSeconds` to
+ * have the `Retry-After` header set alongside the body.
+ */
+function setRetryAfter(response: JsonResponse, exception: unknown): void {
+  const retryAfter = (exception as { retryAfterSeconds?: unknown })?.retryAfterSeconds;
+  if (typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter > 0) {
+    response.setHeader?.("Retry-After", String(Math.ceil(retryAfter)));
+  }
 }
 
 function addRequestId(body: Record<string, unknown>, requestId?: string): Record<string, unknown> {
@@ -25,6 +38,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
       const body = exception.getResponse();
+      setRetryAfter(response, exception);
 
       if (typeof body === "string") {
         response.status(status).json(addRequestId({ error: body }, requestId));

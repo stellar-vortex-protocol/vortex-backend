@@ -625,6 +625,39 @@
         ]
       }
     },
+    "/api/v1/intents/{id}/auction": {
+      "get": {
+        "operationId": "IntentsController_getAuctionPrice",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current and accepted Dutch auction prices",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "intentId": { "type": "string" },
+                    "currentDstAmount": { "type": "string" },
+                    "acceptedDstAmount": { "type": "string" },
+                    "timestamp": { "type": "number" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "description": "Intent not found or does not use a Dutch auction" }
+        },
+        "tags": ["intents"]
+      }
+    },
     "/api/v1/intents/{id}/accept": {
       "post": {
         "operationId": "IntentsController_accept",
@@ -1091,12 +1124,23 @@
           "tokens"
         ]
       },
+      "DutchAuctionDto": {
+        "type": "object",
+        "properties": {
+          "startDstAmount": { "type": "string", "description": "Starting destination amount in base units" },
+          "decayStart": { "type": "number", "description": "Unix timestamp when the price decay starts" },
+          "decayEnd": { "type": "number", "description": "Unix timestamp when the price reaches minDstAmount" },
+          "exclusiveSolver": { "type": "string", "maxLength": 56, "description": "Solver address exclusively eligible until exclusivityEnd" },
+          "exclusivityEnd": { "type": "number", "description": "Unix timestamp when solver exclusivity ends" }
+        },
+        "required": ["startDstAmount", "decayStart", "decayEnd"]
+      },
       "CreateIntentDto": {
         "type": "object",
         "properties": {
           "user": {
             "type": "string",
-            "description": "Stellar address of the user creating the intent"
+            "description": "Stellar or EVM address of the user creating the intent"
           },
           "srcChain": {
             "type": "string",
@@ -1147,10 +1191,17 @@
             "type": "string",
             "description": "Minimum acceptable destination amount as an integer string"
           },
+          "auction": {
+            "$ref": "#/components/schemas/DutchAuctionDto",
+            "description": "Optional Dutch-auction allocation terms"
+          },
           "deadline": {
             "type": "number",
             "description": "Unix timestamp deadline; defaults to now + 1800s; must be between now+60s and now+24h"
           },
+          "signature": { "type": "string", "maxLength": 4096, "description": "EIP-712 signature for EVM-originated intent creation" },
+          "nonce": { "type": "string", "maxLength": 128, "description": "Unique nonce included in the EIP-712 signature" },
+          "expiresAt": { "type": "number", "description": "Unix timestamp when the EIP-712 signature expires" },
           "idempotencyKey": {
             "type": "string",
             "description": "Idempotency key for deduplicating duplicate requests"
@@ -1176,9 +1227,11 @@
             "type": "string",
             "description": "Solver address accepting the intent"
           },
+          "nonce": { "type": "string", "minLength": 16, "maxLength": 128, "description": "Single-use signing nonce" },
+          "expiresAt": { "type": "number", "description": "Unix timestamp when the signature expires" },
           "signature": {
             "type": "string",
-            "description": "Base64-encoded Ed25519 signature of the message \"accept:<intentId>:<solver>\" produced by the solver's private key"
+            "description": "Base64-encoded Ed25519 signature of the signed intent action"
           }
         },
         "required": [
@@ -1201,9 +1254,11 @@
             "type": "string",
             "description": "Stellar fill transaction hash"
           },
+          "nonce": { "type": "string", "minLength": 16, "maxLength": 128, "description": "Single-use signing nonce" },
+          "expiresAt": { "type": "number", "description": "Unix timestamp when the signature expires" },
           "signature": {
             "type": "string",
-            "description": "Base64-encoded Ed25519 signature of the message \"fill:<intentId>:<solver>\" produced by the solver's private key"
+            "description": "Base64-encoded Ed25519 signature of the signed intent action"
           }
         },
         "required": [
@@ -1217,11 +1272,14 @@
         "properties": {
           "user": {
             "type": "string",
-            "description": "Stellar address of the intent's original creator (must match)"
+            "description": "Stellar or EVM address of the intent's original creator (must match)"
           },
+          "nonce": { "type": "string", "minLength": 16, "maxLength": 128, "description": "Single-use signing nonce" },
+          "expiresAt": { "type": "number", "description": "Unix timestamp when the signature expires" },
           "signature": {
             "type": "string",
-            "description": "Base64-encoded Ed25519 signature of the message \"cancel:<intentId>\" produced by the private key of `user`"
+            "maxLength": 4096,
+            "description": "Base64 Ed25519 or EIP-712 signature proving control of user"
           }
         },
         "required": [

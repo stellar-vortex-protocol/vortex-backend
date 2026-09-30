@@ -1,0 +1,71 @@
+{
+  "_meta": {
+    "description": "Combined performance baselines for all k6 scenarios — vortex-backend",
+    "generatedAt": "2026-09-28T00:00:00.000Z",
+    "note": "Update baselines after a known-good run: npm run perf:update-baselines",
+    "tolerancePercent": 15,
+    "budgetPolicy": "PR fails when any metric exceeds baseline * (1 + tolerance/100). Median of 3 runs used for noise control."
+  },
+  "metrics": {
+    "http_req_duration": {
+      "p95_ms": 500,
+      "p99_ms": 1000,
+      "description": "Overall HTTP request duration across all scenarios"
+    },
+    "perf_intent_create_duration": {
+      "p95_ms": 200,
+      "p99_ms": 400,
+      "description": "POST /api/v1/intents latency"
+    },
+    "perf_solver_poll_duration": {
+      "p95_ms": 150,
+      "p99_ms": 300,
+      "description": "GET /api/v1/intents/open latency"
+    },
+    "perf_quote_duration": {
+      "p95_ms": 200,
+      "p99_ms": 500,
+      "description": "POST /api/v1/intents/quote latency"
+    },
+    "perf_lifecycle_duration": {
+      "p95_ms": 600,
+      "description": "Full mixed read/write cycle duration"
+    },
+    "perf_reads_duration": {
+      "p95_ms": 150,
+      "description": "Read-only endpoint latency (GET /intents/open, /intents/:id, /stats, /solvers)"
+    },
+    "http_req_failed": {
+      "rate_max": 0.01,
+      "description": "Global HTTP error rate (non-2xx / 3xx)"
+    },
+    "perf_intents_created_total": {
+      "count_min": 50,
+      "description": "Minimum successful intent creates (validates test ran meaningfully)"
+    },
+    "perf_solver_poll_total": {
+      "count_min": 50,
+      "description": "Minimum successful solver polls"
+    },
+    "perf_quotes_requested_total": {
+      "count_min": 30,
+      "description": "Minimum successful quote requests"
+    },
+    "perf_lifecycle_completed_total": {
+      "count_min": 15,
+      "description": "Minimum completed lifecycle cycles"
+    }
+  },
+  "reference": {
+    "capturedAt": "2026-09-28T00:00:00.000Z",
+    "environment": "ubuntu-latest / postgres:16-alpine / memory persistence",
+    "http_req_duration_p95_ms": 50,
+    "http_req_duration_p99_ms": 120,
+    "perf_intent_create_duration_p95_ms": 25,
+    "perf_solver_poll_duration_p95_ms": 12,
+    "perf_quote_duration_p95_ms": 30,
+    "perf_lifecycle_duration_p95_ms": 180,
+    "perf_reads_duration_p95_ms": 15,
+    "http_req_failed_rate": 0
+  }
+}

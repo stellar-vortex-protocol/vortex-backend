@@ -27,3 +27,6 @@ npm-debug.log*
 # Test / coverage
 coverage/
 .nyc_output/
+
+# Public datasets local export directory
+.datasets/

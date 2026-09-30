@@ -11,3 +11,11 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    # Every action pin lands as one PR. A pin bump is a supply-chain change
+    # (see SECURITY.md), so it should be reviewable as a single diff of "these
+    # are the actions that changed" rather than as a dozen one-line PRs, and a
+    # single PR is what lets a reviewer spot "one unexpected action moved".
+    groups:
+      github-actions:
+        patterns:
+          - "*"

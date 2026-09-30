@@ -1,0 +1,61 @@
+# Prometheus for the local observability profile (issue #481).
+#
+# This file exists for two reasons beyond "scrape the app":
+#
+# 1. The committed Grafana dashboards have `env` and `chain` template variables,
+#    and nothing in the application emits those labels. They are attached here
+#    at ingest with metric_relabel_configs, which is the only place they can be
+#    added without touching instrumentation code. Change the two literals below
+#    per environment; the dashboards default to matching values.
+#
+# 2. It loads ops/prometheus/rules/vortex-slo.yml, so `promtool check rules`
+#    in CI and a real Prometheus here are validating the same file.
+#
+# Deliberately NOT included: an alertmanager block. Wiring one up needs a real
+# routing tree and receiver credentials, and a stub that silently drops
+# notifications is worse than no alertmanager at all. Add one alongside your
+# deployment's existing alerting rather than here.
+
+global:
+  # Matches the 30s evaluation interval of every rule group in vortex-slo.yml.
+  scrape_interval: 15s
+  evaluation_interval: 30s
+  external_labels:
+    monitor: vortex-local
+
+# Listed one file at a time rather than globbed. The directory also holds
+# vortex-slo_test.yml, which is a promtool test file rather than a rule group:
+# a `*.yml` glob would hand it to the rule loader, and Prometheus refuses to
+# start when a rule file contains no `groups`. Being explicit means adding a
+# rule file is a visible, reviewed line here instead of a directory change that
+# silently breaks startup.
+rule_files:
+  - /etc/prometheus/rules/vortex-slo.yml
+
+scrape_configs:
+  # The API. `host.docker.internal` so the metrics endpoint is reachable from a
+  # container while the app runs on the host (npm run dev). Under Compose the
+  # app is reachable as `app:4000` instead - change the target accordingly.
+  - job_name: vortex
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:4000"]
+        labels:
+          service: vortex-backend
+    metric_relabel_configs:
+      - target_label: env
+        replacement: local
+      - target_label: chain
+        replacement: testnet
+
+  # Prometheus itself. `up` for every target above is emitted by *this* job, so
+  # the env/chain relabels have to be repeated here or the "Targets up" panel
+  # on the API RED dashboard selects nothing.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+    metric_relabel_configs:
+      - target_label: env
+        replacement: local
+      - target_label: chain
+        replacement: testnet

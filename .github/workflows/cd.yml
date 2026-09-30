@@ -3,34 +3,680 @@ name: CD
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      target:
+        description: "Which environment this manual run should deploy to"
+        type: choice
+        default: staging
+        options:
+          - staging
+          - production
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Supply-chain hardening (issue #467)
+#
+# The top-level default is the *floor*: read-only repository access. Nothing
+# here can mint a signature or an attestation. Only the `build` job grants
+# `id-token: write` / `attestations: write` / `packages: write`, and that job
+# is skipped for every `pull_request` event. A fork PR therefore never receives
+# the OIDC token cosign needs to sign in the upstream repository's identity, so
+# a fork cannot produce a signature that `cosign verify` would accept for
+# ghcr.io/stellar-vortex-protocol/vortex-backend.
+#
+# Every action in this file is pinned to a commit SHA. Dependabot
+# (.github/dependabot.yml, `package-ecosystem: github-actions`) keeps the pins
+# current; the `# vX.Y.Z` comment records which release each SHA is.
+# ─────────────────────────────────────────────────────────────────────────────
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.ref }}
+  # Never cancel a half-finished deploy. Superseded runs still verify
+  # independently, so cancelling one would only lose audit trail.
+  #
+  # This is also LAYER 1 of the migration-serialisation story (issue #497):
+  # two CD runs on the same ref queue here, so their `migrate` jobs cannot
+  # overlap. Layer 2 — the PostgreSQL advisory lock acquired by
+  # scripts/db-migrate-locked.js — covers what this group cannot: runs on
+  # *different* refs (a main push and a v* tag at once), re-runs, and manual
+  # `kubectl run`. Both layers are documented in prisma/migrations/README.md.
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # The GitHub OIDC issuer every cosign certificate in this repo is chained to.
+  # `cosign verify` refuses anything not issued here.
+  COSIGN_ISSUER: https://token.actions.githubusercontent.com
+  # Keyless certificates carry the workflow ref as the subject. Accepting only
+  # the refs allowed to sign means a signature made from an attacker's branch
+  # in this repository still fails verification.
+  COSIGN_SUBJECT: "^https://github\.com/stellar-vortex-protocol/vortex-backend/(.github/workflows/cd\.yml@refs/heads/main|refs/tags/v[0-9].*)$"
 
 jobs:
-  staging:
-    name: Deploy to staging
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  # ── Build, SBOM, sign, attest ─────────────────────────────────────────────
+  build:
+    name: Build image, SBOM, sign, attest
+    # Never sign on a pull_request — see the permission note at the top.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    environment: staging
+    permissions:
+      contents: read
+      packages: write
+      # Keyless cosign: exchanged for a short-lived OIDC token, never a stored
+      # key. This is the only reason `id-token: write` exists in this file.
+      id-token: write
+      # Required by actions/attest-* to publish to the GitHub attestation store.
+      attestations: write
+    outputs:
+      # The repository part only; consumers append `@<digest>`.
+      image: ${{ steps.ref.outputs.image }}
+      # Manifest digest of the pushed image. The signature and both
+      # attestations are bound to exactly this value.
+      digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      # A manual dispatch can be started from any ref, but COSIGN_SUBJECT only
+      # accepts main and v* tags. Without this guard the run would build, push
+      # and sign an image and then fail in `verify` on an unrecognised
+      # certificate identity, having already published the artefact. Fail in one
+      # second instead, before anything is pushed.
+      - name: Refuse to build a ref we are not permitted to sign
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/main|refs/tags/v[0-9]*)
+              echo "Ref $GITHUB_REF is allowed to sign."
+              ;;
+            *)
+              echo "::error::Ref $GITHUB_REF cannot be signed. COSIGN_SUBJECT allows refs/heads/main and refs/tags/v<N>. Dispatch this workflow from main or from a v* tag."
+              exit 1
+              ;;
+          esac
+
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Resolve the image reference
+        id: ref
+        run: echo "image=${REGISTRY}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Built exactly once. The `digest` output is the single source of truth
+      # for the SBOM, the signature, both attestations, and every deploy step
+      # downstream — so "we deployed what we signed" is true by construction
+      # rather than by convention.
+      - name: Build and push the image
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Fail early if the push produced no digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DIGEST" ]; then
+            echo "::error::build-push-action reported no digest; refusing to sign nothing"
+            exit 1
+          fi
+          echo "image=${{ steps.ref.outputs.image }}@$DIGEST" >> "$GITHUB_OUTPUT"
+
+      # ── CycloneDX SBOM ──────────────────────────────────────────────────────
+      # `push-sbom` attaches the SBOM to the image itself as an OCI artifact, so
+      # it travels with the image no matter which registry the image is later
+      # mirrored to. The SPDX run exists because "attached to the image" and
+      # "attached to the release" are different audiences: a scanner pulling the
+      # image wants CycloneDX, a human reading the release wants SPDX.
+      - name: Generate CycloneDX SBOM and attach it to the image
+        uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          image: ${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          push-sbom: true
+          upload-artifact: false
+
+      - name: Generate SPDX SBOM for the release
+        uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          image: ${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      - name: cosign sign (keyless)
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # `--yes` because the OIDC consent prompt is interactive; the token
+          # exchange itself is non-interactive in Actions.
+          cosign sign --yes "$IMAGE"
+
+      # ── Attestations ────────────────────────────────────────────────────────
+      # Two separate attestations because they answer two different questions:
+      #   provenance → "which workflow/commit/source produced these bytes"
+      #   sbom       → "what is inside these bytes"
+      # Both are bound to the digest, so neither can be replayed onto a
+      # different build.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ steps.ref.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # `sbom-path` is a *required* input on actions/attest-sbom v2.4.0, and the
+      # file here is not named `sbom.json`, so it has to be stated explicitly.
+      #
+      # There is deliberately no `predicate-type` input: v2.4.0 does not accept
+      # one. The action derives the predicate type from the SBOM's own
+      # `bomFormat` field via its predicate submodule, and a CycloneDX document
+      # yields `https://cyclonedx.org/bom` — which is exactly what the
+      # `cosign verify-attestation --type` step below asserts.
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2.4.0
+        with:
+          subject-name: ${{ steps.ref.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom.cdx.json
+          push-to-registry: true
+
+      - name: Upload the SBOMs for the release job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-${{ github.sha }}
+          path: |
+            sbom.cdx.json
+            sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+  # ── Verify before anything is deployed (issue #467) ─────────────────────────
+  # The issue's "testing" criterion, in the only form that means anything: the
+  # signature and both attestations are re-verified from a clean runner that
+  # shares no state with the signer. A build that cannot verify itself does not
+  # reach staging, let alone production.
+  verify:
+    name: Verify signature and attestations
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Reading the public attestation store needs no extra scope, but cosign's
+      # identity flow does exchange a token, so id-token is granted here too.
+      id-token: write
+    steps:
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      - name: cosign verify (signature)
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" \
+            --certificate-identity-regexp "$COSIGN_SUBJECT" \
+            "$IMAGE"
+
+      - name: cosign verify-attestation (SLSA provenance)
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify-attestation \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" \
+            --certificate-identity-regexp "$COSIGN_SUBJECT" \
+            --type slsaprovenance \
+            "$IMAGE"
+
+      - name: cosign verify-attestation (CycloneDX SBOM)
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify-attestation \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" \
+            --certificate-identity-regexp "$COSIGN_SUBJECT" \
+            --type "https://cyclonedx.org/bom" \
+            "$IMAGE"
+
+      - name: Check the SBOMs are well-formed and describe the deployed digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sbom-${{ github.sha }}
+          path: sboms
+
+      - name: Validate the SBOM contents
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # "An SBOM was produced" is a weak claim — the useful one is "the SBOM
+          # is a valid CycloneDX/SPDX document that describes the exact manifest
+          # we are about to deploy". Node is already on the runner, so this
+          # needs no extra tooling.
+          node <<'NODE'
+          const fs = require("node:fs");
+          const digest = process.env.DIGEST;
+
+          const cdx = JSON.parse(fs.readFileSync("sboms/sbom.cdx.json", "utf8"));
+          if (cdx.bomFormat !== "CycloneDX") throw new Error(`expected CycloneDX, got ${cdx.bomFormat}`);
+          if (!Array.isArray(cdx.components) || cdx.components.length === 0) {
+            throw new Error("CycloneDX SBOM lists no components");
+          }
+          if (!JSON.stringify(cdx).includes(digest)) {
+            throw new Error("CycloneDX SBOM does not reference the deployed digest");
+          }
+
+          const spdx = JSON.parse(fs.readFileSync("sboms/sbom.spdx.json", "utf8"));
+          if (spdx.spdxVersion !== "SPDX-2.3") throw new Error(`expected SPDX-2.3, got ${spdx.spdxVersion}`);
+          if (!Array.isArray(spdx.packages) || spdx.packages.length === 0) {
+            throw new Error("SPDX SBOM lists no packages");
+          }
+
+          console.log(
+            `SBOMs validated: ${cdx.components.length} CycloneDX components, ` +
+              `${spdx.packages.length} SPDX packages, all referencing ${digest}`,
+          );
+          NODE
+
+  # ── Attach the SBOMs to the GitHub release (tag builds only) ───────────────
+  release:
+    name: Attach SBOMs to the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sbom-${{ github.sha }}
+          path: sboms
+
+      - name: Upload the SBOMs to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --generate-notes
+          fi
+          gh release upload "$TAG" \
+            sboms/sbom.cdx.json \
+            sboms/sbom.spdx.json \
+            --clobber
+
+  # ── Publish @vortex/solver-sdk (issue #446) ─────────────────────────────────
+  # Tag builds only; pull requests run `npm publish --dry-run` in ci.yml.
+  solver-sdk-publish:
+    name: Publish @vortex/solver-sdk
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
-          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: SDK version matches the API version
+        run: npm run check:version -w @vortex/solver-sdk
+      - run: npm run build -w @vortex/solver-sdk
+      - name: Publish
+        run: npm publish -w @vortex/solver-sdk --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Install dependencies
-        run: npm ci
+  # ── Pre-deploy migration gate — staging (issue #497) ───────────────────────
+  # `prisma migrate deploy` runs as a Kubernetes Job (deploy/k8s/migration-job.yaml)
+  # *before* any rollout. `staging` and `production` declare this job in
+  # `needs`, so:
+  #   * a failed/timed-out migration skips the rollout jobs entirely (a skipped
+  #     dependency skips its dependents) — the outage class the issue describes,
+  #     "misordered migrations and app versions", is structurally impossible
+  #     from this workflow;
+  #   * the failure surfaces as this check, with ::error:: + a Slack notice.
+  #
+  # Everything cluster- or secret-shaped comes from the `staging` GitHub
+  # Environment, so staging and production never share credentials. If the
+  # Environment is not configured, this job FAILS CLOSED (see the auth step)
+  # rather than silently skipping the gate — a migration stage that quietly
+  # does nothing is worse than no stage at all, because deploys keep shipping.
+  migrate:
+    name: Migrate staging database (gate)
+    # build+verify because the Job runs the image digest this run produced and
+    # verify proved it signed; never migrate with an artefact that would not be
+    # deployed. The `if` mirrors `staging` exactly for the reason documented
+    # there: `production` needs this chain, and a skipped dependency would skip
+    # the whole rollout even for a manual production dispatch.
+    needs: [build, verify]
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: staging
+    # Bounded by the Job's own activeDeadlineSeconds (900s) plus scheduling
+    # headroom; a stuck lock must fail the gate, not the workday.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      # Only for the optional `oidc` cluster-auth mode (aws sts
+      # assume-role-with-web-identity). The default `kubeconfig` mode never
+      # uses it, but the scope has to be declared here because this file's
+      # top-level default is `contents: read`.
+      id-token: write
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
-      - name: Build staging image
-        run: cp .env.testnet.example .env && docker build -t vortex-backend:staging .
+      # ── Cluster access, fail-closed ────────────────────────────────────────
+      # Two supported modes, selected by the `KUBE_AUTH_MODE` repo variable:
+      #   kubeconfig (default) — base64 kubeconfig in the `KUBECONFIG` Environment
+      #                          secret. Works with any cluster.
+      #   oidc                 — GitHub OIDC → sts assume-role-with-web-identity
+      #                          → `aws eks update-kubeconfig`. Needs the repo
+      #                          variables AWS_ROLE_ARN / AWS_REGION /
+      #                          AWS_EKS_CLUSTER and a trust policy on the role
+      #                          for this repo+ref. No long-lived credential.
+      # Either way, a missing/insufficient credential is an ::error:: + exit 1:
+      # the rollout is halted and maintainers are told what to configure.
+      - name: Authenticate to the cluster (fail closed if unconfigured)
+        env:
+          KUBE_AUTH_MODE: ${{ vars.KUBE_AUTH_MODE }}
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG }}
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_EKS_CLUSTER: ${{ vars.AWS_EKS_CLUSTER }}
+          NAMESPACE: ${{ vars.MIGRATION_NAMESPACE || 'default' }}
+        run: |
+          set -euo pipefail
+          MODE="${KUBE_AUTH_MODE:-kubeconfig}"
+          KUBECONFIG_FILE="$RUNNER_TEMP/kubeconfig"
+          case "$MODE" in
+            kubeconfig)
+              if [ -z "${KUBECONFIG_B64:-}" ]; then
+                echo "::error::No cluster credential for the 'staging' GitHub Environment. Set the base64-encoded kubeconfig as the KUBECONFIG secret (echo kubeconfig | base64 -w0), or set KUBE_AUTH_MODE=oidc plus AWS_ROLE_ARN/AWS_REGION/AWS_EKS_CLUSTER variables. The migration gate cannot run, so the rollout stays halted. See prisma/migrations/README.md § Required repository configuration."
+                exit 1
+              fi
+              umask 077
+              printf '%s' "$KUBECONFIG_B64" | base64 --decode > "$KUBECONFIG_FILE"
+              ;;
+            oidc)
+              MISSING=""
+              [ -n "${AWS_ROLE_ARN:-}" ] || MISSING="$MISSING AWS_ROLE_ARN"
+              [ -n "${AWS_REGION:-}" ] || MISSING="$MISSING AWS_REGION"
+              [ -n "${AWS_EKS_CLUSTER:-}" ] || MISSING="$MISSING AWS_EKS_CLUSTER"
+              if [ -n "$MISSING" ]; then
+                echo "::error::KUBE_AUTH_MODE=oidc but these repo variables are unset:$MISSING. The migration gate cannot run, so the rollout stays halted. See prisma/migrations/README.md § Required repository configuration."
+                exit 1
+              fi
+              # Mint a short-lived GitHub OIDC token for the STS audience the
+              # role's trust policy expects, exchange it for cluster creds, and
+              # write a kubeconfig that lives only for this job.
+              AUDIENCE="sts.amazonaws.com"
+              ID_TOKEN=$(curl --fail --silent --show-error --request POST \
+                --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                --header "Content-Type: application/json" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" | jq -r '.value')
+              if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
+                echo "::error::Could not mint an OIDC id_token (is id-token: write granted?). The migration gate cannot run, so the rollout stays halted."
+                exit 1
+              fi
+              read -r AKID SECRET SESSION < <(aws sts assume-role-with-web-identity \
+                --role-arn "$AWS_ROLE_ARN" \
+                --role-session-name "cd-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                --web-identity-token "$ID_TOKEN" \
+                --duration-seconds 3600 \
+                --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+                --output text)
+              export AWS_ACCESS_KEY_ID="$AKID" AWS_SECRET_ACCESS_KEY="$SECRET" AWS_SESSION_TOKEN="$SESSION"
+              aws eks update-kubeconfig --region "$AWS_REGION" --name "$AWS_EKS_CLUSTER" \
+                --kubeconfig "$KUBECONFIG_FILE" >/dev/null
+              ;;
+            *)
+              echo "::error::Unknown KUBE_AUTH_MODE '$MODE' (expected 'kubeconfig' or 'oidc'). The migration gate cannot run, so the rollout stays halted."
+              exit 1
+              ;;
+          esac
+
+          # Fail fast on a bad credential or a wrong namespace, with an error
+          # that says which of the two it was, instead of timing out later in
+          # `kubectl wait`.
+          if ! kubectl cluster-info >/dev/null 2>&1; then
+            echo "::error::kubectl cannot reach the cluster with the supplied credential (KUBE_AUTH_MODE=$MODE). The migration gate cannot run, so the rollout stays halted."
+            exit 1
+          fi
+          if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+            echo "::error::Namespace '$NAMESPACE' does not exist or is not visible to this credential (set MIGRATION_NAMESPACE). The migration gate cannot run, so the rollout stays halted."
+            exit 1
+          fi
+          echo "KUBECONFIG=$KUBECONFIG_FILE" >> "$GITHUB_ENV"
+          echo "MIGRATION_NAMESPACE=$NAMESPACE" >> "$GITHUB_ENV"
+          echo "Authenticated to the cluster (mode=$MODE, namespace=$NAMESPACE)."
+
+      # ── Optional pre-migration logical snapshot ─────────────────────────────
+      # The checkpoint *table* written by the Job is unconditional; this
+      # `pg_dump` is the extra logical snapshot, gated on the MIGRATION_PGDUMP
+      # repo variable because it costs runner time and storage. It runs before
+      # the Job is applied, so the dump is definitionally the pre-migration
+      # state. Fail-closed: if the dump is switched on but cannot be taken, the
+      # gate stops instead of proceeding snapshotless.
+      - name: Pre-migration logical snapshot (pg_dump)
+        if: vars.MIGRATION_PGDUMP == 'true'
+        env:
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MIGRATION_DATABASE_URL:-}" ]; then
+            echo "::error::MIGRATION_PGDUMP=true but the MIGRATION_DATABASE_URL secret is missing from the 'staging' Environment. Refusing to migrate without the configured snapshot."
+            exit 1
+          fi
+          if ! command -v pg_dump >/dev/null 2>&1; then
+            echo "::error::pg_dump is not available on this runner image; refusing to migrate without the configured snapshot. Install postgresql-client or disable MIGRATION_PGDUMP."
+            exit 1
+          fi
+          OUT="pre-migration-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.dump"
+          pg_dump --format=custom --compress=6 --file="$OUT" "$MIGRATION_DATABASE_URL"
+          echo "Pre-migration snapshot written: $OUT ($(stat -c%s "$OUT") bytes)."
+          echo "Restore procedure: RUNBOOK_BACKUP_RESTORE.md § 7."
+      - name: Upload the pre-migration snapshot
+        if: vars.MIGRATION_PGDUMP == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pre-migration-dump-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pre-migration-*.dump
+          if-no-files-found: error
+          # Same retention class as the repo's other artefacts (SBOMs use 90d);
+          # 30 days matches the daily-backup retention in the runbook. Object
+          # storage (S3) remains the long-term home — see the runbook note.
+          retention-days: 30
+      - name: Note that only the checkpoint marker will be recorded
+        if: vars.MIGRATION_PGDUMP != 'true'
+        run: |
+          echo "::notice::MIGRATION_PGDUMP is not enabled for this repository — the pre-migration checkpoint marker in _migration_checkpoints (written by the Job before any DDL) is the recorded snapshot for this deploy. Enable the variable for a full logical dump."
+
+      # ── Hand the DIRECT connection string to the in-cluster Job ────────────
+      # The Job mounts this Secret (it never carries the URL in its spec, so
+      # `kubectl get job -o yaml` shows no credentials). Fail-closed: without a
+      # database there is no migration to gate on, and guessing a default would
+      # be far worse than stopping.
+      - name: Seed the migration Job's database Secret
+        env:
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MIGRATION_DATABASE_URL:-}" ]; then
+            echo "::error::The MIGRATION_DATABASE_URL secret is missing from the 'staging' GitHub Environment. It must be the DIRECT (non-pooler) connection string — Prisma's schema declares only url = env("DATABASE_URL"), so this is the migration's directUrl by contract. The rollout stays halted. See prisma/migrations/README.md § Required repository configuration."
+            exit 1
+          fi
+          # Created here rather than assumed to pre-exist in the cluster, so
+          # the gate needs exactly one piece of cluster state: a namespace.
+          # --dry-run=client piped into apply keeps it declarative and
+          # idempotent across re-runs.
+          printf 'DATABASE_URL=%s' "$MIGRATION_DATABASE_URL" \
+            | kubectl create secret generic vortex-migration-db \
+                --namespace "$MIGRATION_NAMESPACE" \
+                --from-file=DATABASE_URL=/dev/stdin \
+                --dry-run=client -o yaml \
+            | kubectl apply --namespace "$MIGRATION_NAMESPACE" -f -
+
+      # ── Render the Job with this run's verified digest ──────────────────────
+      # Deploy-by-digest, same as every other deploy step in this file: the
+      # Job migrates exactly the bytes `verify` signed and re-checked.
+      - name: Render deploy/k8s/migration-job.yaml
+        id: render
+        env:
+          IMAGE_REF: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+          JOB_NAME: vortex-migrate-${{ github.run_id }}-${{ github.run_attempt }}
+          LOCK_WAIT_SECONDS: "600"
+          DB_SECRET_NAME: vortex-migration-db
+        run: |
+          set -euo pipefail
+          RENDERED="$RUNNER_TEMP/migration-job.yaml"
+          # sed with a '|' delimiter: image refs and URLs contain '/' and ':'
+          # but never '|', so no escaping is needed and no value can be
+          # interpreted as a regex (the s command's replacement side is literal).
+          sed \
+            -e "s|__JOB_NAME__|${JOB_NAME}|g" \
+            -e "s|__IMAGE__|${IMAGE_REF}|g" \
+            -e "s|__GIT_SHA__|${GITHUB_SHA}|g" \
+            -e "s|__RUN_URL__|${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}|g" \
+            -e "s|__LOCK_WAIT_SECONDS__|${LOCK_WAIT_SECONDS}|g" \
+            -e "s|__DB_SECRET_NAME__|${DB_SECRET_NAME}|g" \
+            deploy/k8s/migration-job.yaml > "$RENDERED"
+          # A placeholder that survived rendering would produce a Job that is
+          # syntactically valid but deploys garbage (e.g. image ":__IMAGE__").
+          # Fail loudly instead.
+          if grep -qE '__[A-Z_]+__' "$RENDERED"; then
+            echo "::error::Unrendered placeholder left in the migration Job manifest:"
+            grep -nE '__[A-Z_]+__' "$RENDERED" || true
+            exit 1
+          fi
+          echo "RENDERED=$RENDERED" >> "$GITHUB_ENV"
+          echo "JOB_NAME=$JOB_NAME" >> "$GITHUB_ENV"
+          echo "Rendered migration Job $JOB_NAME (image $IMAGE_REF)."
+
+      # ── Apply the Job and wait for it ──────────────────────────────────────
+      # `kubectl wait --for=condition=complete` returns non-zero on timeout;
+      # because backoffLimit is 0 a real failure flips condition=failed within
+      # seconds, so the follow-up wait returns almost immediately and we can
+      # print the evidence instead of burning the whole timeout.
+      - name: Apply the migration Job and wait for completion
+        run: |
+          set -euo pipefail
+          kubectl apply --namespace "$MIGRATION_NAMESPACE" -f "$RENDERED"
+          if kubectl wait --namespace "$MIGRATION_NAMESPACE" \
+              --for=condition=complete "job/${JOB_NAME}" --timeout=1200s; then
+            echo "::notice::Migration Job ${JOB_NAME} completed — the rollout may proceed."
+            exit 0
+          fi
+
+          echo "----- Job status -----"
+          kubectl get --namespace "$MIGRATION_NAMESPACE" "job/${JOB_NAME}" -o wide || true
+          kubectl wait --namespace "$MIGRATION_NAMESPACE" \
+            --for=condition=failed "job/${JOB_NAME}" --timeout=60s || true
+          echo "----- Job events -----"
+          kubectl describe --namespace "$MIGRATION_NAMESPACE" "job/${JOB_NAME}" | tail -n 60 || true
+          echo "----- Migration logs -----"
+          kubectl logs --namespace "$MIGRATION_NAMESPACE" "job/${JOB_NAME}" \
+            --all-containers=true --tail=400 || true
+          echo "::error::Database migration Job ${JOB_NAME} failed or timed out. The rollout is halted (staging/production skip while this job fails). Diagnose from the logs above, then follow RUNBOOK_BACKUP_RESTORE.md § 11 (Migration rollback) — do not re-run blindly; the advisory lock is released and a retry will apply again."
+          exit 1
+
+      # ── Notify (never masks the failure) ───────────────────────────────────
+      # `secrets` cannot be referenced in `if:`, hence the env indirection.
+      # An unset webhook degrades to a ::notice::, so a repo without Slack
+      # configured still gets a green *notification step* on a red job.
+      - name: Notify the on-call channel that the migration gate failed
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -uo pipefail
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "::notice::Migration gate failed, but no SLACK_WEBHOOK_URL secret is configured on the 'staging' Environment — notification skipped. See prisma/migrations/README.md § Required repository configuration."
+            exit 0
+          fi
+          jq -n --arg text "🔴 Vortex CD: staging migration gate FAILED — rollout halted. ${RUN_URL}" \
+            '{text: $text}' \
+            | curl --fail --silent --show-error -X POST \
+                -H 'Content-Type: application/json' -d @- \
+                "$SLACK_WEBHOOK_URL" >/dev/null \
+            || echo "::warning::Could not deliver the Slack notification."
+
+  staging:
+    name: Deploy to staging
+    # `migrate` is the gate this issue exists for (issue #497): the rollout
+    # steps below do not start until the schema has been migrated by a Job in
+    # the cluster, and a failed migration skips this job outright (a skipped
+    # dependency skips its dependents), so "misordered migrations and app
+    # versions" cannot happen from this workflow.
+    needs: [build, verify, migrate]
+    # Runs for a manual `target: staging` dispatch as well as for a push to main.
+    #
+    # It also has to run for `target: production`: `production` needs this job,
+    # and a job whose dependency was skipped is itself skipped. Gating staging on
+    # `push` only (as an earlier revision of this file did) meant production was
+    # unreachable on every run — the manual dispatch skipped staging, so
+    # production was skipped in turn. Re-running the smoke test against the same
+    # digest immediately before production is also the stronger guarantee: the
+    # exact bytes about to go out are the bytes that just started cleanly.
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      # Deploy by digest, never by tag. The tag is a convenience label; the
+      # digest is what the signature covers, so deploying the digest is what
+      # makes "we deployed what we signed" true.
+      - name: Pull the verified image by digest
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: docker pull "$IMAGE"
 
       - name: Run staging smoke test
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
         run: |
+          set -euo pipefail
+          cp .env.testnet.example .env
           docker run -d --rm --name vortex-backend-staging \
             -p 4000:4000 \
             --env-file .env \
             -e NODE_ENV=staging \
-            vortex-backend:staging
+            "$IMAGE"
 
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:4000/health; then
@@ -42,13 +688,253 @@ jobs:
           echo "Staging smoke test failed" >&2
           exit 1
 
-  production:
-    name: Deploy to production
-    needs: staging
-    if: github.event_name == 'workflow_dispatch'
+  # ── Pre-deploy migration gate — production (issue #497) ────────────────────
+  # Same design as `migrate` (read that comment first); the differences are
+  # deliberate and only about blast radius:
+  #   * gated on an explicit production dispatch, because that is the only way
+  #     `production` runs at all;
+  #   * `needs: migrate` as well — the staging migration is the cheap first
+  #     proof that the SQL applies, and a staging migration failure must stop
+  #     a production migration rather than race it (they share one database
+  #     image family and one PR's migration set);
+  #   * `environment: production` so every credential (kubeconfig/OIDC vars,
+  #     MIGRATION_DATABASE_URL, SLACK_WEBHOOK_URL) is the production one and
+  #     can be protected by Environment required-reviewers.
+  migrate-production:
+    name: Migrate production database (gate)
+    needs: [build, verify, migrate]
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'production'
     runs-on: ubuntu-latest
     environment: production
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      # Only for KUBE_AUTH_MODE=oidc — see the note on `migrate`.
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - name: Build production image
-        run: docker build -t vortex-backend:production .
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Authenticate to the cluster (fail closed if unconfigured)
+        env:
+          KUBE_AUTH_MODE: ${{ vars.KUBE_AUTH_MODE }}
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG }}
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_EKS_CLUSTER: ${{ vars.AWS_EKS_CLUSTER }}
+          NAMESPACE: ${{ vars.MIGRATION_NAMESPACE || 'default' }}
+        run: |
+          set -euo pipefail
+          MODE="${KUBE_AUTH_MODE:-kubeconfig}"
+          KUBECONFIG_FILE="$RUNNER_TEMP/kubeconfig"
+          case "$MODE" in
+            kubeconfig)
+              if [ -z "${KUBECONFIG_B64:-}" ]; then
+                echo "::error::No cluster credential for the 'production' GitHub Environment. Set the base64-encoded kubeconfig as the KUBECONFIG secret (echo kubeconfig | base64 -w0), or set KUBE_AUTH_MODE=oidc plus AWS_ROLE_ARN/AWS_REGION/AWS_EKS_CLUSTER variables. The migration gate cannot run, so the production rollout stays halted. See prisma/migrations/README.md § Required repository configuration."
+                exit 1
+              fi
+              umask 077
+              printf '%s' "$KUBECONFIG_B64" | base64 --decode > "$KUBECONFIG_FILE"
+              ;;
+            oidc)
+              MISSING=""
+              [ -n "${AWS_ROLE_ARN:-}" ] || MISSING="$MISSING AWS_ROLE_ARN"
+              [ -n "${AWS_REGION:-}" ] || MISSING="$MISSING AWS_REGION"
+              [ -n "${AWS_EKS_CLUSTER:-}" ] || MISSING="$MISSING AWS_EKS_CLUSTER"
+              if [ -n "$MISSING" ]; then
+                echo "::error::KUBE_AUTH_MODE=oidc but these repo variables are unset:$MISSING. The migration gate cannot run, so the production rollout stays halted. See prisma/migrations/README.md § Required repository configuration."
+                exit 1
+              fi
+              AUDIENCE="sts.amazonaws.com"
+              ID_TOKEN=$(curl --fail --silent --show-error --request POST \
+                --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                --header "Content-Type: application/json" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" | jq -r '.value')
+              if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
+                echo "::error::Could not mint an OIDC id_token (is id-token: write granted?). The migration gate cannot run, so the production rollout stays halted."
+                exit 1
+              fi
+              read -r AKID SECRET SESSION < <(aws sts assume-role-with-web-identity \
+                --role-arn "$AWS_ROLE_ARN" \
+                --role-session-name "cd-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                --web-identity-token "$ID_TOKEN" \
+                --duration-seconds 3600 \
+                --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+                --output text)
+              export AWS_ACCESS_KEY_ID="$AKID" AWS_SECRET_ACCESS_KEY="$SECRET" AWS_SESSION_TOKEN="$SESSION"
+              aws eks update-kubeconfig --region "$AWS_REGION" --name "$AWS_EKS_CLUSTER" \
+                --kubeconfig "$KUBECONFIG_FILE" >/dev/null
+              ;;
+            *)
+              echo "::error::Unknown KUBE_AUTH_MODE '$MODE' (expected 'kubeconfig' or 'oidc'). The migration gate cannot run, so the production rollout stays halted."
+              exit 1
+              ;;
+          esac
+          if ! kubectl cluster-info >/dev/null 2>&1; then
+            echo "::error::kubectl cannot reach the cluster with the supplied credential (KUBE_AUTH_MODE=$MODE). The migration gate cannot run, so the production rollout stays halted."
+            exit 1
+          fi
+          if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+            echo "::error::Namespace '$NAMESPACE' does not exist or is not visible to this credential (set MIGRATION_NAMESPACE). The migration gate cannot run, so the production rollout stays halted."
+            exit 1
+          fi
+          echo "KUBECONFIG=$KUBECONFIG_FILE" >> "$GITHUB_ENV"
+          echo "MIGRATION_NAMESPACE=$NAMESPACE" >> "$GITHUB_ENV"
+          echo "Authenticated to the cluster (mode=$MODE, namespace=$NAMESPACE)."
+
+      # Production snapshot policy is the same switch as staging's: one repo
+      # variable (MIGRATION_PGDUMP) decides whether a logical dump is taken,
+      # so staging rehearses exactly the production procedure.
+      - name: Pre-migration logical snapshot (pg_dump)
+        if: vars.MIGRATION_PGDUMP == 'true'
+        env:
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MIGRATION_DATABASE_URL:-}" ]; then
+            echo "::error::MIGRATION_PGDUMP=true but the MIGRATION_DATABASE_URL secret is missing from the 'production' Environment. Refusing to migrate without the configured snapshot."
+            exit 1
+          fi
+          if ! command -v pg_dump >/dev/null 2>&1; then
+            echo "::error::pg_dump is not available on this runner image; refusing to migrate without the configured snapshot. Install postgresql-client or disable MIGRATION_PGDUMP."
+            exit 1
+          fi
+          OUT="pre-migration-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.dump"
+          pg_dump --format=custom --compress=6 --file="$OUT" "$MIGRATION_DATABASE_URL"
+          echo "Pre-migration snapshot written: $OUT ($(stat -c%s "$OUT") bytes)."
+          echo "Restore procedure: RUNBOOK_BACKUP_RESTORE.md § 7."
+      - name: Upload the pre-migration snapshot
+        if: vars.MIGRATION_PGDUMP == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pre-migration-dump-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pre-migration-*.dump
+          if-no-files-found: error
+          retention-days: 30
+      - name: Note that only the checkpoint marker will be recorded
+        if: vars.MIGRATION_PGDUMP != 'true'
+        run: |
+          echo "::notice::MIGRATION_PGDUMP is not enabled for this repository — the pre-migration checkpoint marker in _migration_checkpoints (written by the Job before any DDL) is the recorded snapshot for this production deploy. Enable the variable for a full logical dump."
+
+      - name: Seed the migration Job's database Secret
+        env:
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MIGRATION_DATABASE_URL:-}" ]; then
+            echo "::error::The MIGRATION_DATABASE_URL secret is missing from the 'production' GitHub Environment. It must be the DIRECT (non-pooler) connection string — Prisma's schema declares only url = env("DATABASE_URL"), so this is the migration's directUrl by contract. The production rollout stays halted. See prisma/migrations/README.md § Required repository configuration."
+            exit 1
+          fi
+          printf 'DATABASE_URL=%s' "$MIGRATION_DATABASE_URL" \
+            | kubectl create secret generic vortex-migration-db \
+                --namespace "$MIGRATION_NAMESPACE" \
+                --from-file=DATABASE_URL=/dev/stdin \
+                --dry-run=client -o yaml \
+            | kubectl apply --namespace "$MIGRATION_NAMESPACE" -f -
+
+      - name: Render deploy/k8s/migration-job.yaml
+        id: render
+        env:
+          IMAGE_REF: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+          JOB_NAME: vortex-migrate-${{ github.run_id }}-${{ github.run_attempt }}
+          LOCK_WAIT_SECONDS: "600"
+          DB_SECRET_NAME: vortex-migration-db
+        run: |
+          set -euo pipefail
+          RENDERED="$RUNNER_TEMP/migration-job.yaml"
+          sed \
+            -e "s|__JOB_NAME__|${JOB_NAME}|g" \
+            -e "s|__IMAGE__|${IMAGE_REF}|g" \
+            -e "s|__GIT_SHA__|${GITHUB_SHA}|g" \
+            -e "s|__RUN_URL__|${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}|g" \
+            -e "s|__LOCK_WAIT_SECONDS__|${LOCK_WAIT_SECONDS}|g" \
+            -e "s|__DB_SECRET_NAME__|${DB_SECRET_NAME}|g" \
+            deploy/k8s/migration-job.yaml > "$RENDERED"
+          if grep -qE '__[A-Z_]+__' "$RENDERED"; then
+            echo "::error::Unrendered placeholder left in the migration Job manifest:"
+            grep -nE '__[A-Z_]+__' "$RENDERED" || true
+            exit 1
+          fi
+          echo "RENDERED=$RENDERED" >> "$GITHUB_ENV"
+          echo "JOB_NAME=$JOB_NAME" >> "$GITHUB_ENV"
+          echo "Rendered migration Job $JOB_NAME (image $IMAGE_REF)."
+
+      - name: Apply the migration Job and wait for completion
+        run: |
+          set -euo pipefail
+          kubectl apply --namespace "$MIGRATION_NAMESPACE" -f "$RENDERED"
+          if kubectl wait --namespace "$MIGRATION_NAMESPACE" \
+              --for=condition=complete "job/${JOB_NAME}" --timeout=1200s; then
+            echo "::notice::Production migration Job ${JOB_NAME} completed — the rollout may proceed."
+            exit 0
+          fi
+
+          echo "----- Job status -----"
+          kubectl get --namespace "$MIGRATION_NAMESPACE" "job/${JOB_NAME}" -o wide || true
+          kubectl wait --namespace "$MIGRATION_NAMESPACE" \
+            --for=condition=failed "job/${JOB_NAME}" --timeout=60s || true
+          echo "----- Job events -----"
+          kubectl describe --namespace "$MIGRATION_NAMESPACE" "job/${JOB_NAME}" | tail -n 60 || true
+          echo "----- Migration logs -----"
+          kubectl logs --namespace "$MIGRATION_NAMESPACE" "job/${JOB_NAME}" \
+            --all-containers=true --tail=400 || true
+          echo "::error::Production migration Job ${JOB_NAME} failed or timed out. The production rollout is halted. Diagnose from the logs above, then follow RUNBOOK_BACKUP_RESTORE.md § 11 (Migration rollback) — do not re-run blindly."
+          exit 1
+
+      - name: Notify the on-call channel that the migration gate failed
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -uo pipefail
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "::notice::Migration gate failed, but no SLACK_WEBHOOK_URL secret is configured on the 'production' Environment — notification skipped. See prisma/migrations/README.md § Required repository configuration."
+            exit 0
+          fi
+          jq -n --arg text "🔴 Vortex CD: PRODUCTION migration gate FAILED — rollout halted. ${RUN_URL}" \
+            '{text: $text}' \
+            | curl --fail --silent --show-error -X POST \
+                -H 'Content-Type: application/json' -d @- \
+                "$SLACK_WEBHOOK_URL" >/dev/null \
+            || echo "::warning::Could not deliver the Slack notification."
+
+  production:
+    name: Deploy to production
+    # `migrate-production` is the production counterpart of the `migrate` gate
+    # on `staging`: the production rollout waits on a successful migration of
+    # the production database, in the same run, with production credentials.
+    needs: [staging, verify, migrate-production]
+    # Manual only, and only when staging ran in this same run and passed — see
+    # the note on the `staging` job above for why that ordering matters.
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'production'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      # The policy-controller / Kyverno arm of the issue's acceptance criteria
+      # is the right long-term home for this check: a cluster-admission policy
+      # rejects unsigned images even from someone with `kubectl apply` access,
+      # which a pre-deploy step in this workflow cannot. This step is the
+      # portable half — it needs no cluster, so it protects the deploy this
+      # workflow performs. The cluster-side policy is the documented follow-up.
+      - name: Re-verify the signature immediately before deploying
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" \
+            --certificate-identity-regexp "$COSIGN_SUBJECT" \
+            "$IMAGE"
+
+      - name: Pull the verified image by digest
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          docker tag "$IMAGE" vortex-backend:production

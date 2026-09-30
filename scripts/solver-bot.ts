@@ -66,6 +66,7 @@ async function acceptIntent(intentId: string): Promise<boolean> {
   const message = buildAcceptMessage(intentId, SOLVER_ADDRESS);
   const signature = sign(message);
 
+  // eslint-disable-next-line no-restricted-syntax -- standalone script, no HttpEgressService in scope
   const res = await fetch(`${API_BASE}/api/v1/intents/${intentId}/accept`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -83,6 +84,7 @@ async function fillIntent(intentId: string, minDstAmount: string): Promise<void>
   const message = buildFillMessage(intentId, SOLVER_ADDRESS);
   const signature = sign(message);
 
+  // eslint-disable-next-line no-restricted-syntax -- standalone script, no HttpEgressService in scope
   const res = await fetch(`${API_BASE}/api/v1/intents/${intentId}/fill`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

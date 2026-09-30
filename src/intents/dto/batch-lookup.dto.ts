@@ -1,5 +1,6 @@
 import { ArrayMaxSize, IsArray, IsString } from "class-validator";
 import { ApiProperty } from "@nestjs/swagger";
+import { BATCH_LOOKUP_MAX_IDS } from "../../config/limits.config";
 
 /**
  * Body for `POST /api/v1/intents/batch` (issue #275).
@@ -9,17 +10,17 @@ import { ApiProperty } from "@nestjs/swagger";
  * against current server state in one call instead of N `GET /:id` requests.
  *
  * `intentIds` is capped with `@ArrayMaxSize` per the hardening pattern in
- * issue #24 so a single request can't fan out unbounded work.
+ * issue #476 so a single request can't fan out unbounded work.  The limit
+ * constant is defined in src/config/limits.config.ts.
  */
 export class BatchLookupDto {
   @ApiProperty({
     type: [String],
-    maxItems: 100,
-    description:
-      "Intent IDs to look up (max 100). IDs with no matching record are omitted from the response, not individually 404'd.",
+    maxItems: BATCH_LOOKUP_MAX_IDS,
+    description: `Intent IDs to look up (max ${BATCH_LOOKUP_MAX_IDS}). IDs with no matching record are omitted from the response, not individually 404'd.`,
   })
   @IsArray()
-  @ArrayMaxSize(100)
+  @ArrayMaxSize(BATCH_LOOKUP_MAX_IDS)
   @IsString({ each: true })
   intentIds!: string[];
 }

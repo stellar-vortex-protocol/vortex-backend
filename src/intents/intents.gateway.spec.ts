@@ -8,6 +8,45 @@ import { AppConfig } from "../config/configuration";
 import { InMemoryIntentsRepository } from "./intents.repository";
 import { logger } from "../common/logger";
 import { buildWsAuthMessage } from "../common/stellar-signature";
+import { ProtocolParamsService } from "../governance/params.service";
+import { IntentCapabilityIndex } from "./solver-intent-matcher";
+import { SolverRecord } from "../solvers/solvers.types";
+
+/**
+ * Full `SolverRecord` stand-in for the WS auth path.
+ *
+ * The gateway compiles a capability predicate from the record, so a bare
+ * `{ address, isActive }` stub would throw on `supportedTokens.map(...)` the
+ * moment auth succeeds and take the whole worker down with it.
+ */
+function makeSolverRecord(address: string, overrides: Partial<SolverRecord> = {}): SolverRecord {
+  return {
+    address,
+    name: "test-solver",
+    bondAmount: "1000",
+    fillsCompleted: 0,
+    fillsFailed: 0,
+    totalVolume: "0",
+    avgFillTime: 0,
+    isActive: true,
+    registeredAt: 0,
+    lastActiveAt: 0,
+    supportedChains: ["ethereum"],
+    supportedTokens: ["USDC"],
+    ...overrides,
+  };
+}
+
+/** Stub capability index: the gateway only reads eligible intents from it. */
+function makeIntentIndex(): IntentCapabilityIndex {
+  return {
+    rebuild: jest.fn().mockResolvedValue(undefined),
+    addIntent: jest.fn(),
+    removeIntent: jest.fn(),
+    getEligibleFor: jest.fn().mockReturnValue([]),
+  } as unknown as IntentCapabilityIndex;
+}
+import { IntentFeedService } from "./feed/intent-feed.service";
 
 jest.mock("../common/logger", () => ({
   logger: {
@@ -29,24 +68,48 @@ function makeIntentsService(): IntentsService {
     },
   } as unknown as PrismaService;
   const repo = new InMemoryIntentsRepository();
+  const protocolParams = {
+    snapshotForChain: jest.fn().mockReturnValue({ version: 0, feeBps: 30, deadlineSeconds: 1800, fillWindowSeconds: 600, capturedAt: new Date().toISOString() }),
+  } as unknown as ProtocolParamsService;
   return new IntentsService(
     repo,
     configService,
     {} as StellarTxService,
     prismaService,
+    protocolParams,
   );
 }
 
 function makeSolversService() {
   return {
-    get: jest.fn().mockResolvedValue({ address: "GTEST", isActive: true }),
+    get: jest.fn().mockResolvedValue(makeSolverRecord("GTEST")),
   } as any;
+}
+
+function makeIntentIndex(intentsService: IntentsService): IntentCapabilityIndex {
+  return new IntentCapabilityIndex(intentsService);
+}
+
+function makeFeed(
+  intentsService: IntentsService,
+  solversService: ReturnType<typeof makeSolversService>,
+  intentIndex: IntentCapabilityIndex,
+  ringBufferCapacity?: number,
+): IntentFeedService {
+  const feed = new IntentFeedService(intentsService, solversService, intentIndex);
+  if (ringBufferCapacity !== undefined) feed.setRingBufferCapacity(ringBufferCapacity);
+  return feed;
 }
 
 function createMockClient() {
   const listeners: Record<string, (...args: unknown[]) => void> = {};
   return {
+    // Real `ws` sockets expose OPEN as an instance property (== 1); ConnectionState
+    // reads `socket.OPEN`, so the double must mirror that or every send is treated
+    // as "not open" and silently dropped.
+    OPEN: 1,
     readyState: 1, // WebSocket.OPEN
+    bufferedAmount: 0,
     send: jest.fn(),
     ping: jest.fn(),
     terminate: jest.fn(),
@@ -129,7 +192,10 @@ describe("IntentsGateway heartbeat", () => {
     jest.clearAllMocks();
     intentsService = makeIntentsService();
     solversService = makeSolversService();
-    gateway = new IntentsGateway(intentsService, solversService);
+    gateway = new IntentsGateway(intentsService, solversService, makeIntentIndex());
+    const intentIndex = makeIntentIndex(intentsService);
+    const feed = makeFeed(intentsService, solversService, intentIndex);
+    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -218,7 +284,7 @@ describe("IntentsGateway heartbeat", () => {
     const keypair = Keypair.random();
     const client = createMockClient();
     const timestamp = Math.floor(Date.now() / 1000);
-    solversService.get = jest.fn().mockResolvedValue({ address: keypair.publicKey(), isActive: true });
+    solversService.get = jest.fn().mockResolvedValue(makeSolverRecord(keypair.publicKey()));
 
     gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
@@ -226,10 +292,17 @@ describe("IntentsGateway heartbeat", () => {
     const signature = keypair.sign(Buffer.from(message, "utf8")).toString("base64");
 
     await client._listeners.message(JSON.stringify({ type: "auth", solver: keypair.publicKey(), timestamp, signature }));
-    expect(client.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "auth_ok" }));
+    // auth_ok is followed by an eligible_snapshot frame, so assert the frame was
+    // sent rather than that it was the final one. ConnectionState passes a flush
+    // callback as a second argument, so match on the payload argument only.
+    expect(client.send.mock.calls.map((c: unknown[]) => c[0])).toContain(
+      JSON.stringify({ type: "auth_ok", method: "signature" }),
+    );
 
     await client._listeners.message(JSON.stringify({ type: "auth", solver: keypair.publicKey(), timestamp, signature: "bad" }));
-    expect(client.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }));
+    expect(client.send.mock.calls.map((c: unknown[]) => c[0])).toContain(
+      JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }),
+    );
   });
 });
 
@@ -245,7 +318,10 @@ describe("IntentsGateway logging", () => {
     jest.clearAllMocks();
     intentsService = makeIntentsService();
     solversService = makeSolversService();
-    gateway = new IntentsGateway(intentsService, solversService);
+    gateway = new IntentsGateway(intentsService, solversService, makeIntentIndex());
+    const intentIndex = makeIntentIndex(intentsService);
+    const feed = makeFeed(intentsService, solversService, intentIndex);
+    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -254,7 +330,8 @@ describe("IntentsGateway logging", () => {
   });
 
   it("logs heartbeat started on construction", () => {
-    expect(logger.info).toHaveBeenCalledWith("ws heartbeat started");
+    // The gateway now logs the backplane mode alongside the heartbeat banner.
+    expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/^ws heartbeat started/));
   });
 
   it("logs connection with subscriber count", () => {
@@ -278,8 +355,10 @@ describe("IntentsGateway logging", () => {
 
     await gateway.broadcast({ type: "intent_created", intent: { id: "123", secret: "data" } });
 
+    // Sequencing/broadcast logging moved to the transport-agnostic feed service
+    // (issue #433); the log line must not include the event payload.
     expect(logger.debug).toHaveBeenCalledWith(
-      expect.stringMatching(/ws broadcast type=intent_created/),
+      expect.stringMatching(/feed broadcast type=intent_created/),
     );
   });
 
@@ -305,7 +384,11 @@ describe("IntentsGateway — chain subscription filtering (#257)", () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = makeIntentsService();
-    gateway = new IntentsGateway(intentsService, makeSolversService());
+    gateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
+    const solversService = makeSolversService();
+    const intentIndex = makeIntentIndex(intentsService);
+    const feed = makeFeed(intentsService, solversService, intentIndex);
+    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -462,7 +545,11 @@ describe("IntentsGateway — event replay (#258)", () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = makeIntentsService();
-    gateway = new IntentsGateway(intentsService, makeSolversService());
+    gateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
+    const solversService = makeSolversService();
+    const intentIndex = makeIntentIndex(intentsService);
+    const feed = makeFeed(intentsService, solversService, intentIndex);
+    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -499,9 +586,13 @@ describe("IntentsGateway — event replay (#258)", () => {
 
   it("returns replay_too_old when fromSeq has been evicted from the buffer", async () => {
     // Use a tiny ring buffer (capacity 2) to force eviction
-    const tinyGateway = new IntentsGateway(intentsService, makeSolversService());
+    const tinyGateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
     // @ts-expect-error – accessing private field for test setup
     tinyGateway.ringBuffer["capacity"] = 2;
+    const solversService = makeSolversService();
+    const intentIndex = makeIntentIndex(intentsService);
+    const feed = makeFeed(intentsService, solversService, intentIndex, 2);
+    const tinyGateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
 
     const client = createMockClient();
     tinyGateway.handleConnection(client as unknown as import("ws").WebSocket);
@@ -576,7 +667,9 @@ describe("IntentsGateway — event replay (#258)", () => {
 
     await gateway.broadcast({ type: "test_buffered" });
 
+    // The replay buffer now lives in the transport-agnostic feed service
+    // (issue #433); the gateway delegates replay to it.
     // @ts-expect-error – accessing private for assertion
-    expect(gateway.ringBuffer.size()).toBe(1);
+    expect(gateway.feed.replaySince(0, null as never).events).toHaveLength(1);
   });
 });

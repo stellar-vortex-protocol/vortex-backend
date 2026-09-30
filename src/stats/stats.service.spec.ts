@@ -33,6 +33,7 @@ function baseSolver(overrides: Partial<SolverRecord> = {}): SolverRecord {
     avgFillTime: 30,
     isActive: true,
     registeredAt: 900_000,
+    lastActiveAt: 900_000,
     supportedChains: ["stellar"],
     supportedTokens: ["USDC"],
     ...overrides,

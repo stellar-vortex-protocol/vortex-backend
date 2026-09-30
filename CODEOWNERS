@@ -9,3 +9,12 @@
 /src/common/stellar-signature.ts     @vortex-protocol/security-reviewers
 /prisma/schema.prisma                @vortex-protocol/security-reviewers
 /src/soroban/signer.service.ts       @vortex-protocol/security-reviewers
+
+# Supply chain (issue #467). A workflow change is a change to what runs with
+# this repository's credentials and OIDC identity: the signing identity in
+# .github/workflows/cd.yml is the *only* thing standing between a maintainer
+# account compromise and an attacker-signed production image. CODEOWNERS is
+# what makes a swapped action SHA, a widened `permissions:` block or a new
+# `id-token: write` a review question rather than a diff line.
+.github/workflows/                  @vortex-protocol/security-reviewers
+/.github/dependabot.yml              @vortex-protocol/security-reviewers

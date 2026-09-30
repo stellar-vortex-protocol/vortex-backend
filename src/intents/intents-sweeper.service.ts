@@ -5,6 +5,13 @@ import { SolversService } from "../solvers/solvers.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { logger } from "../common/logger";
 import { MetricsService } from "../metrics/metrics.service";
+import { KillSwitchService } from "../killswitch/killswitch.service";
+import { Intent } from "./intents.types";
+import {
+  CHAIN_FILL_WINDOW_DEFAULTS,
+  DEFAULT_FILL_WINDOW_SECONDS,
+} from "../config/configuration";
+import { LeaderElectionService, Singleton } from "../common/leader-election";
 
 const SWEEP_INTERVAL_MS = 30_000;
 
@@ -12,9 +19,12 @@ const SWEEP_INTERVAL_MS = 30_000;
 export interface SweepResult {
   expiredCount: number;
   slashedCount: number;
+  /** Intents whose fill window was pushed out because a pause blocked fills. */
+  extendedDeadlines: number;
   durationMs: number;
 }
 
+@Singleton("sweeper")
 @Injectable()
 export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(IntentsSweeperService.name);
@@ -26,9 +36,28 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     private readonly solversService: SolversService,
     private readonly solverRegistryService: SolverRegistryService,
     private readonly metricsService: MetricsService,
+    private readonly killSwitch: KillSwitchService,
+    private readonly leaderElection: LeaderElectionService,
   ) {}
 
   onModuleInit() {
+    this.leaderElection.registerWorker("sweeper", (isLeader, _token) => {
+      if (isLeader) {
+        this.logger.log("[sweeper] became leader — starting interval");
+        this.startInterval();
+      } else {
+        this.logger.log("[sweeper] lost leadership — stopping interval");
+        this.stopInterval();
+      }
+    });
+  }
+
+  onModuleDestroy() {
+    this.stopInterval();
+  }
+
+  private startInterval(): void {
+    if (this.interval) return; // already running
     this.interval = setInterval(() => {
       this.sweep().catch((err) => {
         logger.error(`[sweeper] sweep failed: ${err instanceof Error ? err.message : err}`);
@@ -36,8 +65,11 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     }, SWEEP_INTERVAL_MS);
   }
 
-  onModuleDestroy() {
-    if (this.interval) clearInterval(this.interval);
+  private stopInterval(): void {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = undefined;
+    }
   }
 
   async sweep(): Promise<SweepResult> {
@@ -45,6 +77,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     const now = Math.floor(startMs / 1000);
     let expiredCount = 0;
     let slashedCount = 0;
+    let extendedDeadlines = 0;
 
     for (const intent of await this.intentsService.getByState("open")) {
       if (intent.deadline <= now) {
@@ -82,11 +115,56 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     );
 
     for (const intent of missedFills) {
-      await this.slashMissedFill(intent.intentId, intent.solver, now);
-      slashedCount++;
+      // Issue #477 — an emergency pause must not punish solvers for a pause we
+      // imposed. When the fill path is paused for this intent's scope, extend
+      // its window instead of slashing; the intent becomes fillable again on
+      // resume. Evaluated per intent because a pause may be scoped to a single
+      // chain or token.
+      const deadline = this.pausedFillDeadline(intent, now);
+      if (deadline !== null) {
+        const extended = await this.intentsService.extendDeadlineIfAccepted(
+          intent.intentId,
+          deadline,
+        );
+        if (extended) {
+          extendedDeadlines++;
+          this.logger.warn(
+            `[sweeper] intent ${intent.intentId} fill is paused by a kill-switch — ` +
+              `slashing suppressed and deadline extended to ${deadline}`,
+          );
+        }
+        continue;
+      }
+
+      const slashed = await this.slashMissedFill(intent.intentId, intent.solver, now);
+      if (slashed) slashedCount++;
     }
 
-    return { expiredCount, slashedCount, durationMs: Date.now() - startMs };
+    return {
+      expiredCount,
+      slashedCount,
+      extendedDeadlines,
+      durationMs: Date.now() - startMs,
+    };
+  }
+
+  /**
+   * Returns the new deadline to grant when fills are paused for this intent, or
+   * null when slashing should proceed.
+   *
+   * Grants a full fill window from now rather than a fixed bump, so an intent
+   * caught by a long pause still gets a fair window once the pause lifts.
+   */
+  private pausedFillDeadline(intent: Intent, now: number): number | null {
+    const decision = this.killSwitch.evaluateTarget({
+      chain: intent.srcChain,
+      token: intent.srcToken?.address,
+      operation: "fill",
+    });
+    if (!decision.paused) return null;
+
+    const window = CHAIN_FILL_WINDOW_DEFAULTS[intent.srcChain] ?? DEFAULT_FILL_WINDOW_SECONDS;
+    return now + window;
   }
 
   /**
@@ -123,23 +201,27 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     intentId: string,
     solver: string | undefined,
     now: number,
-  ) {
+  ): Promise<boolean> {
     const reason = "accepted intent not filled before deadline";
 
     // Atomic guard: a concurrent solver fill() may have already transitioned
-    // this intent out of "accepted" — skip slashing if so.
+    // this intent out of "accepted" — skip slashing if so (fill wins).
     const slashed = await this.intentsService.slashIfAccepted(intentId, {
       slashedAt: now,
       slashReason: reason,
     });
-    if (!slashed) return;
+    if (!slashed) return false;
+    this.intentsService.appendAuditEntry(intentId, "slashed", "system", reason, {
+      solver,
+      slashedAt: now,
+    });
     await this.intentsGateway.broadcast({ type: "intent_slashed", intentId, solver, reason });
 
     if (!solver) {
       // Shouldn't happen in practice — an "accepted" intent always has a
       // solver — but don't let a bad record throw the whole sweep cycle.
       logger.error(`[sweeper] intent ${intentId} was accepted with no solver on record`);
-      return;
+      return true;
     }
 
     await this.solversService.recordFailedFill(solver, intentId);
@@ -153,5 +235,6 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     console.log(
       `[sweeper] slashed solver=${solver} for intent=${intentId}: ${result.detail} slashId=${slashRecord?.slashId ?? "unknown"}`,
     );
+    return true;
   }
 }

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: vortex-canary
+description: Synthetic end-to-end canary for the Vortex intent lifecycle (issue #496)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

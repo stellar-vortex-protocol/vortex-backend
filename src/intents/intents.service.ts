@@ -2,14 +2,14 @@ import {
   Inject,
   Injectable,
   Logger,
-  OnModuleDestroy,
+  Optional,
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { v4 as uuidv4 } from "uuid";
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Intent, IntentAuditEntry, IntentState } from "./intents.types";
-import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
+import { INTENTS_REPOSITORY, IIntentsRepository, IntentSearchQuery, IntentSearchResult } from "./intents.repository";
 import { AppConfig } from "../config/configuration";
 import {
   CHAIN_DEADLINE_DEFAULTS,
@@ -18,13 +18,63 @@ import {
   DEFAULT_FILL_WINDOW_SECONDS,
 } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
+import { ShadowService, type ShadowObservationRequest } from "../soroban/shadow.service";
+import { SHADOW_TRANSITIONS, type ShadowTransition } from "../soroban/shadow.types";
+import { MetricsService } from "../metrics/metrics.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { ProtocolParamsService } from "../governance/params.service";
+import { FeatureFlagService } from "../flags/feature-flag.service";
 
-const STORE_SIZE_LOG_INTERVAL_MS = 60_000;
 const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slashed"];
+
+/**
+ * Sentinel `from_state` for the transition into "open".
+ *
+ * Not an {@link IntentState}: creation has no prior state, and inventing one
+ * would put a value in the `from_state` label that no lifecycle edge can
+ * produce. Bounded (one extra series), and it keeps the funnel's denominator
+ * honest.
+ */
+const NONE_STATE = "none";
+
+/**
+ * Runtime check that `transition` is one of the five the shadow monitor models.
+ *
+ * A mis-wired call site is logged and dropped rather than thrown on, so a shadow
+ * bug can never become a 500 on the intent path, and so an unknown label can
+ * never create a new Prometheus series.
+ */
+function isKnownShadowTransition(transition: ShadowTransition): boolean {
+  return (SHADOW_TRANSITIONS as readonly string[]).includes(transition);
+}
 
 /** How long a completed idempotency-key result stays replayable. */
 const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
+
+/**
+ * Compute the USD value of a base-unit amount at a given token price (issue #440).
+ *
+ * Uses integer arithmetic for the amount (BigInt) so large base-unit values do
+ * not lose precision before the float conversion; the price is scaled to 1e8
+ * to keep the multiplication in integer space.  Returns `undefined` when the
+ * price is unknown — historical rows are never backfilled with fabricated
+ * values.
+ */
+function computeUsdValue(
+  srcAmount: string,
+  decimals: number,
+  priceUsd: number | undefined,
+): number | undefined {
+  if (priceUsd === undefined || priceUsd === null || !Number.isFinite(priceUsd)) return undefined;
+  try {
+    const amount = BigInt(srcAmount);
+    const scale = 10n ** BigInt(decimals);
+    const scaled = amount * BigInt(Math.round(priceUsd * 1e8));
+    return Number(scaled / (scale * 100_000_000n));
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Maximum number of simultaneously open (state = "open" | "accepted") intents
@@ -52,7 +102,7 @@ export const MAX_OPEN_INTENTS_PER_USER = 50;
  * (in-memory ↔ Prisma) without touching this service or anything above it.
  */
 @Injectable()
-export class IntentsService implements OnModuleDestroy {
+export class IntentsService {
   private readonly logger = new Logger(IntentsService.name);
 
   /**
@@ -78,29 +128,42 @@ export class IntentsService implements OnModuleDestroy {
    */
   private readonly auditLog = new Map<string, IntentAuditEntry[]>();
 
-  private readonly sizeLogTimer: ReturnType<typeof setInterval>;
-
   constructor(
     @Inject(INTENTS_REPOSITORY)
     private readonly repo: IIntentsRepository,
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly stellarTxService: StellarTxService,
     private readonly prisma: PrismaService,
-  ) {
-    const sweepMs = Number(this.configService.get("intentRetentionSweepMs", { infer: true }) ?? STORE_SIZE_LOG_INTERVAL_MS);
-    this.sizeLogTimer = setInterval(() => this.logStoreSize(), sweepMs || STORE_SIZE_LOG_INTERVAL_MS);
-    // Allow the process to exit even if the timer is still active.
-    this.sizeLogTimer.unref?.();
-  }
-
-  onModuleDestroy() {
-    clearInterval(this.sizeLogTimer);
-  }
+    private readonly protocolParamsService: ProtocolParamsService,
+    /**
+     * Shadow-mode divergence monitor (issue #401).
+     *
+     * Injected `@Optional()` on purpose: the monitor is observability, not a
+     * correctness dependency, and the intent path must keep working — including
+     * in the unit-test harnesses that construct this service directly — when
+     * the soroban module is not in the graph.
+     */
+    @Optional() private readonly shadowService?: ShadowService,
+    /**
+     * SLO counters for the intent funnel (issue #481).
+     *
+     * `@Optional()` for the same reason as the shadow monitor: the dashboards
+     * are observability, and a unit harness that constructs this service
+     * directly must not have to provide a metrics registry. `MetricsModule` is
+     * `@Global()` and registered in `AppModule`, so in the running application
+     * this is always present.
+     */
+    @Optional() private readonly metricsService?: MetricsService,
+    @Optional() private readonly flags?: FeatureFlagService,
+  ) {}
 
   /**
    * Logs the store size and evicts stale terminal intents from the in-memory
    * adapter when it is the active backend. This keeps the memory footprint
    * bounded without affecting on-chain or durable storage paths.
+   *
+   * Runs as the `intents.store-size` background job (see
+   * intents-maintenance.jobs.ts, issue #494) rather than a local timer.
    */
   async logStoreSize(): Promise<void> {
     const evicted = await this.evictTerminalIntents();
@@ -201,20 +264,40 @@ export class IntentsService implements OnModuleDestroy {
   ): Promise<Intent> {
     const now = Math.floor(Date.now() / 1000);
 
+    // Snapshot governance-controlled parameters at creation time so in-flight
+    // intents are evaluated against the rules that were active when the user
+    // submitted (issue #500).
+    const paramsSnapshot = this.protocolParamsService.snapshotForChain(data.srcChain);
+    const defaultDeadline = data.deadline ?? now + paramsSnapshot.deadlineSeconds;
+
     const intent: Intent = {
       ...data,
       intentId: uuidv4(),
       state: "open",
       createdAt: now,
-      deadline:
-        data.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[data.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
+      deadline: defaultDeadline,
+      paramsVersion: paramsSnapshot.version,
+      usdValueAtCreate: computeUsdValue(data.srcAmount, data.srcToken.decimals, data.srcToken.priceUSD),
     };
 
-    if (this.configService.get("onchainIntentsEnabled", { infer: true })) {
+    // ONCHAIN_INTENTS_ENABLED is the default; the `onchain-intents-enabled`
+    // runtime flag (issue #495) can roll it out per chain / percentage.
+    const onchain = this.flags
+      ? await this.flags.getBooleanValue("onchain-intents-enabled", {
+          targetingKey: intent.intentId,
+          chain: intent.srcChain,
+        })
+      : this.configService.get("onchainIntentsEnabled", { infer: true });
+    if (onchain) {
       await this.registerOnChain(intent);
     }
 
     await this.repo.save(intent);
+    // Creation is the entry edge of the funnel: the `vortex:intent:*` recording
+    // rules count transitions *into* each state, so without this the intent
+    // dashboard would start every conversion ratio from zero. `from_state` is
+    // the sentinel "none" — an intent that does not exist yet has no state.
+    this.countTransition(NONE_STATE, "open");
     return intent;
   }
 
@@ -261,6 +344,110 @@ export class IntentsService implements OnModuleDestroy {
     ];
   }
 
+  // ---------------------------------------------------------------------------
+  // Shadow-mode divergence monitoring (issue #401)
+  // ---------------------------------------------------------------------------
+  //
+  // Every state transition the off-chain path commits is handed to
+  // ShadowService, which simulates the equivalent contract call on a background
+  // queue and records the (expected, simulated) pair. The call here is
+  // synchronous, allocation-light and never awaited — see the latency
+  // guarantee on ShadowService.observe.
+  //
+  // Both outcomes are reported, not just successes: a transition the off-chain
+  // path *refused* is the interesting negative case, because a contract that
+  // would have accepted it is a real divergence.
+
+  /**
+   * Report one off-chain transition to the shadow monitor.
+   *
+   * Callers MUST gate on {@link beginShadowObservation} first: that is where
+   * the disabled check and the sampling draw happen, so a sampled-out
+   * transition costs one `Math.random()` and no repository I/O, no XDR encoding
+   * and no timer work.
+   *
+   * The whole body is wrapped: the monitor is observability, so a bug in it can
+   * never surface as a failed intent transition.
+   */
+  private reportShadow(
+    transition: ShadowTransition,
+    intentId: string,
+    committed: boolean,
+    method: string,
+    args: xdr.ScVal[],
+  ): void {
+    try {
+      if (!this.shadowService) return;
+      if (!isKnownShadowTransition(transition)) {
+        // A mis-wired call site must be visible but must not throw into the
+        // request path, and must not create an unbounded Prometheus label.
+        this.logger.error(`[shadow] dropping observation with unknown transition "${transition}"`);
+        return;
+      }
+      const request: ShadowObservationRequest = { transition, intentId, committed, method, args };
+      this.shadowService.observe(request);
+    } catch (err) {
+      this.logger.error(`[shadow] reportShadow failed, discarding: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Ask the shadow monitor whether it wants to observe the transition that is
+   * about to happen, before any shadow-only work is done.
+   *
+   * Returns false when the monitor is absent, disabled, or has sampled this
+   * transition out. Sampling happens here rather than inside `observe()` so
+   * the extra repository read and XDR encoding the cancel/expire/slash hooks
+   * need are only paid for transitions that will actually be simulated.
+   */
+  private beginShadowObservation(): boolean {
+    try {
+      return this.shadowService?.shouldObserve() === true;
+    } catch (err) {
+      this.logger.error(`[shadow] shouldObserve failed: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Build the contract arguments for a transition, tolerating a record that
+   * cannot be encoded.
+   *
+   * A malformed intent (a non-integer amount, an unparseable address) must not
+   * be able to break the shadow path — the whole point of the monitor is to
+   * gather evidence, and an encoding failure is evidence in itself. It is
+   * therefore reported as an "empty" argument list, which simulates against the
+   * contract's arity check and surfaces as an `outcome_mismatch`.
+   */
+  private safeArgs(build: () => xdr.ScVal[]): xdr.ScVal[] {
+    try {
+      return build();
+    } catch (err) {
+      this.logger.warn(
+        `[shadow] could not encode contract args for simulation: ${(err as Error).message}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Count one committed lifecycle transition (issue #481).
+   *
+   * `vortex_intent_state_transitions_total{from_state,to_state}` is the only
+   * input to the `vortex:intent:*` recording rules, i.e. to the intent-funnel
+   * dashboard and to the `VortexIntentsNotTerminating` /
+   * `VortexSolverFillRateLow` alerts. It is counted here, once, immediately
+   * after the conditional write won — the same place the state actually moves,
+   * so a lost race is never counted.
+   */
+  private countTransition(from: string, to: string): void {
+    try {
+      this.metricsService?.incIntentStateTransition(from, to);
+    } catch (err) {
+      this.logger.error(`[metrics] could not record transition ${from}->${to}: ${(err as Error).message}`);
+    }
+  }
+
   async get(id: string): Promise<Intent | undefined> {
     return this.repo.findById(id);
   }
@@ -275,6 +462,18 @@ export class IntentsService implements OnModuleDestroy {
 
   async getByUser(user: string): Promise<Intent[]> {
     return this.repo.findByUser(user);
+  }
+
+  /**
+   * Advanced search with filtering, sorting and pagination (issue #440).
+   *
+   * Delegates to the repository's `search` so the filtering/sorting/pagination
+   * is pushed into the storage adapter (SQL for Prisma, in-memory for the
+   * dev/test backend). When no filters are present the result is identical to
+   * `getAll()` paginated — the default sort is `createdAt` descending.
+   */
+  async search(query: IntentSearchQuery): Promise<IntentSearchResult> {
+    return this.repo.search(query);
   }
 
   /**
@@ -314,40 +513,128 @@ export class IntentsService implements OnModuleDestroy {
     ).length;
   }
 
+  /**
+   * Patch an intent without going through a lifecycle edge.
+   *
+   * Production callers only patch non-state fields (`quotedDstAmount`), which is
+   * why this stays a plain repository call. A `state` in the patch is an
+   * unconditional write that bypasses the guarded `*If*` methods, and therefore
+   * also bypasses the funnel counters, the audit trail and the shadow monitor —
+   * it is used by test setup only. It is logged so that a future production
+   * caller is caught in review rather than silently skewing the dashboards.
+   */
   async update(id: string, patch: Partial<Intent>): Promise<Intent | null> {
+    if (patch.state !== undefined) {
+      this.logger.warn(
+        `[state-machine] update(${id}) carries a state patch ("${patch.state}"); ` +
+          `this bypasses the guarded transitions and their observers`,
+      );
+    }
     return this.repo.update(id, patch);
   }
 
   /**
-   * Atomically accept an intent only if it is currently "open".
-   * Delegates to the repository so both in-memory and Prisma adapters can
-   * apply the conditional write atomically.
+   * Atomically accept an intent only if it is currently "open" with a future
+   * deadline (issue #473). Delegates to the repository so both in-memory and
+   * Prisma adapters apply the conditional write atomically.
    *
-   * The new deadline is set to now + CHAIN_FILL_WINDOW_DEFAULTS[srcChain]
-   * so solvers on slower-settling chains get a proportionally longer window
-   * and are not unfairly slashed for a deadline that was never realistic.
-   * Returns null when the intent is not found or is not in the "open" state.
+   * The new deadline is set to now + fill window from governance params (or
+   * CHAIN_FILL_WINDOW_DEFAULTS[srcChain] as fallback) so solvers on
+   * slower-settling chains get a proportionally longer window and are not
+   * unfairly slashed for a deadline that was never realistic.
+   * Returns null when the intent is not found, not open, or past deadline.
    */
-  async acceptIfOpen(id: string, solver: string): Promise<Intent | null> {
+  async acceptIfOpen(
+    id: string,
+    solver: string,
+    now?: number,
+    acceptedDstAmount?: string,
+  ): Promise<Intent | null> {
     const intent = await this.repo.findById(id);
     if (!intent) return null;
-    const now = Math.floor(Date.now() / 1000);
+    const nowSec = now ?? Math.floor(Date.now() / 1000);
     const fillWindow =
       CHAIN_FILL_WINDOW_DEFAULTS[intent.srcChain] ?? DEFAULT_FILL_WINDOW_SECONDS;
-    return this.repo.acceptIfOpen(id, solver, now + fillWindow);
+    const updated = await this.repo.acceptIfOpen(
+      id,
+      solver,
+      nowSec + fillWindow,
+      nowSec,
+      acceptedDstAmount,
+    );
+    if (updated !== null) this.countTransition("open", "accepted");
+    if (this.beginShadowObservation()) {
+      this.observeAccept(updated ?? intent, solver, updated !== null);
+    }
+    return updated;
+  }
+
+  /** Shadow hook for `accept` — reported whether or not the conditional write won. */
+  private observeAccept(intent: Intent, solver: string, committed: boolean): void {
+    this.reportShadow(
+      "accept",
+      intent.intentId,
+      committed,
+      "accept_intent",
+      this.safeArgs(() => [
+        nativeToScVal(intent.intentId, { type: "string" }),
+        new Address(solver).toScVal(),
+        nativeToScVal(intent.deadline, { type: "u64" }),
+      ]),
+    );
   }
 
   /**
-   * Atomically fill an intent only if it is currently "accepted" by the given solver.
-   * Returns null when the intent is not found, not accepted, or assigned to a
-   * different solver.
+   * Atomically fill an intent only if it is currently "accepted" by the given
+   * solver with a future deadline (issue #473).
+   * Returns null when the intent is not found, not accepted, assigned to a
+   * different solver, or past the fill window (sweeper wins).
    */
   async fillIfAccepted(
     id: string,
     solver: string,
     patch: Omit<Partial<Intent>, "state" | "solver">,
+    now?: number,
   ): Promise<Intent | null> {
-    return this.repo.fillIfAccepted(id, solver, patch);
+    const nowSec = now ?? Math.floor(Date.now() / 1000);
+    const updated = await this.repo.fillIfAccepted(id, solver, patch, nowSec);
+    if (updated !== null) this.countTransition("accepted", "filled");
+    if (this.beginShadowObservation()) {
+      // Report from `patch` rather than re-reading: on a lost race the stored
+      // record belongs to whoever won, so its fill amount is not the amount
+      // this call was asked to settle. The submitted values are the ones the
+      // contract would have been handed if the off-chain guard had not
+      // pre-empted it.
+      this.observeFill(id, solver, patch.fillAmount, patch.txHash, updated !== null);
+    }
+    return updated;
+  }
+
+  /** Reserve a tx hash once, atomically, before external verification begins. */
+  async reserveFillTxHash(id: string, solver: string, txHash: string): Promise<Intent | null> {
+    return this.repo.reserveFillTxHash(id, solver, txHash);
+  }
+
+  /** Shadow hook for `fill` — reported whether or not the conditional write won. */
+  private observeFill(
+    intentId: string,
+    solver: string,
+    fillAmount: string | undefined,
+    txHash: string | undefined,
+    committed: boolean,
+  ): void {
+    this.reportShadow(
+      "fill",
+      intentId,
+      committed,
+      "fill_intent",
+      this.safeArgs(() => [
+        nativeToScVal(intentId, { type: "string" }),
+        new Address(solver).toScVal(),
+        nativeToScVal(BigInt(fillAmount ?? "0"), { type: "i128" }),
+        nativeToScVal(txHash ?? "", { type: "string" }),
+      ]),
+    );
   }
 
   /**
@@ -356,7 +643,24 @@ export class IntentsService implements OnModuleDestroy {
    * (e.g. a concurrent accept() or sweeper expiry already transitioned it).
    */
   async cancelIfOpen(id: string): Promise<Intent | null> {
-    return this.repo.cancelIfOpen(id);
+    const updated = await this.repo.cancelIfOpen(id);
+    if (updated !== null) this.countTransition("open", "cancelled");
+    if (this.beginShadowObservation()) {
+      const subject = updated ?? (await this.repo.findById(id));
+      if (subject) {
+        this.reportShadow(
+          "cancel",
+          subject.intentId,
+          updated !== null,
+          "cancel_intent",
+          this.safeArgs(() => [
+            nativeToScVal(subject.intentId, { type: "string" }),
+            new Address(subject.user).toScVal(),
+          ]),
+        );
+      }
+    }
+    return updated;
   }
 
   /**
@@ -365,7 +669,24 @@ export class IntentsService implements OnModuleDestroy {
    * always wins the race.
    */
   async expireIfOpen(id: string): Promise<Intent | null> {
-    return this.repo.expireIfOpen(id);
+    const updated = await this.repo.expireIfOpen(id);
+    if (updated !== null) this.countTransition("open", "expired");
+    if (this.beginShadowObservation()) {
+      const subject = updated ?? (await this.repo.findById(id));
+      if (subject) {
+        this.reportShadow(
+          "expire",
+          subject.intentId,
+          updated !== null,
+          "expire_intent",
+          this.safeArgs(() => [
+            nativeToScVal(subject.intentId, { type: "string" }),
+            nativeToScVal(subject.deadline, { type: "u64" }),
+          ]),
+        );
+      }
+    }
+    return updated;
   }
 
   /**
@@ -376,7 +697,43 @@ export class IntentsService implements OnModuleDestroy {
     id: string,
     patch: { slashedAt: number; slashReason: string },
   ): Promise<Intent | null> {
-    return this.repo.slashIfAccepted(id, patch);
+    const updated = await this.repo.slashIfAccepted(id, patch);
+    if (updated !== null) this.countTransition("accepted", "slashed");
+    if (this.beginShadowObservation()) {
+      const subject = updated ?? (await this.repo.findById(id));
+      // An "accepted" intent always carries a solver. A record without one is
+      // corrupt, so skip the simulation rather than encoding a null address —
+      // the sweep loop already logs that case loudly.
+      const slashedSolver = subject?.solver;
+      if (subject && slashedSolver) {
+      const solver = subject?.solver;
+      if (solver && subject) {
+        this.reportShadow(
+          "slash",
+          subject.intentId,
+          updated !== null,
+          "slash_intent",
+          this.safeArgs(() => [
+            nativeToScVal(subject.intentId, { type: "string" }),
+            new Address(slashedSolver).toScVal(),
+            new Address(solver).toScVal(),
+            nativeToScVal(patch.slashReason, { type: "string" }),
+            nativeToScVal(patch.slashedAt, { type: "u64" }),
+          ]),
+        );
+      }
+    }
+    return updated;
+  }
+
+  /**
+   * Issue #477 — extend an accepted intent's fill window, used by the sweeper
+   * while an emergency pause blocks fills so the solver is not slashed for a
+   * pause it did not cause. Returns null when the intent is no longer accepted
+   * or already has a later deadline.
+   */
+  async extendDeadlineIfAccepted(id: string, newDeadline: number): Promise<Intent | null> {
+    return this.repo.extendDeadlineIfAccepted(id, newDeadline);
   }
 
   // ---------------------------------------------------------------------------

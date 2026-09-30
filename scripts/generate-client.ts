@@ -157,6 +157,11 @@ async function main(): Promise<void> {
   ].join("\n");
 
   fs.writeFileSync(typesPath, fileHeader + typesSource, "utf8");
+
+  // Issue #446 — the solver SDK ships the same generated REST types.
+  const sdkTypesPath = path.resolve(__dirname, "../packages/solver-sdk/src/generated/api-types.ts");
+  fs.mkdirSync(path.dirname(sdkTypesPath), { recursive: true });
+  fs.writeFileSync(sdkTypesPath, fileHeader + typesSource, "utf8");
   console.log(`✅  API types     → ${path.relative(process.cwd(), typesPath)}`);
 
   // ── 7. Write a re-export index.ts as the SDK entry point ─────────────────
