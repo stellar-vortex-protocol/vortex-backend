@@ -1,0 +1,31 @@
+# Image built from the Dockerfile's `canary` target:
+#   docker build --target canary -t <registry>/vortex-canary:<tag> .
+image:
+  repository: ghcr.io/stellar-vortex-protocol/vortex-canary
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# One lifecycle run per schedule tick. Keep `interval` (seconds) in sync with
+# the schedule — alerts fire after 3 intervals without a success.
+schedule: "*/5 * * * *"
+interval: 300
+
+network: testnet            # testnet | mainnet
+apiBase: http://vortex-backend:4000
+pushgatewayUrl: http://prometheus-pushgateway:9091
+
+# Strict value caps (stroops of XLM). Mainnet is additionally hard-capped at
+# 1 XLM per run in code.
+fillAmount: "1000000"
+maxFillAmount: "1000000"
+settleOnchain: true
+minBalanceXlm: 5
+dailyBudgetXlm: 1
+
+# Existing Secret with keys CANARY_USER_SECRET and CANARY_SOLVER_SECRET.
+# The matching public keys must be in the backend's CANARY_ADDRESSES.
+existingSecret: vortex-canary-keys
+
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits: { cpu: 250m, memory: 256Mi }

@@ -1,4 +1,17 @@
-# Migration rollback convention
+# Prisma migrations
+
+Three CI jobs and one CD gate guard every migration in this directory:
+
+| Stage | Checks |
+|-------|--------|
+| `migration-lint` (CI) | Migrations the PR adds or changes contain no unsafe DDL and each ships a `down.sql` (see [Migration lint](#migration-lint)) |
+| `migration-rollback` (CI) | `down.sql` reverses `migration.sql` against a real Postgres (see [Rollback convention](#rollback-convention)) |
+| `migration-compat` (CI) | The **previous** revision's app runs against **this** revision's migrated schema (see [Compatibility: N-1 against N](#compatibility-n-1-against-n)) |
+| `migrate` / `migrate-production` (CD) | `prisma migrate deploy` runs as a locked, checkpointed Kubernetes Job **before** the rollout; a failure halts the deploy (see [Gated CD stage](#gated-cd-stage)) |
+
+---
+
+## Rollback convention
 
 Prisma does not generate "down" migrations automatically. To allow a targeted
 rollback of a single bad migration (instead of a full backup/restore), every
@@ -11,26 +24,212 @@ prisma/migrations/<timestamp>_<name>/
   down.sql        # hand-authored rollback for migration.sql (this convention)
 ```
 
-## Authoring a down.sql
+### Authoring a down.sql
 
 - `down.sql` must reverse exactly what `migration.sql` in the same directory
   does — dropping tables/columns/types/indexes it created, restoring anything
   it dropped, etc.
 - Prefer `IF EXISTS` / `IF NOT EXISTS` guards so the script is safe to re-run.
 - If a forward migration is destructive (e.g. drops a column with data), the
-  down.sql cannot restore lost data — note that limitation in a comment at
-  the top of the file.
+  down.sql cannot restore lost data — note that limitation in a comment at the
+  top of the file.
 
-## CI verification
+### CI verification
 
 `.github/workflows/ci.yml` runs a `migration-rollback` job that, for every
 migration directory containing a `down.sql`, applies `migration.sql` then
 `down.sql` against a fresh Postgres instance and diffs the resulting schema
 against the pre-migration (empty) schema, failing the build if they differ.
 
+---
+
+## Migration lint
+
+The `migration-lint` CI job runs a self-contained checker
+(`scripts/check-migrations.ts`, a "squawk-equivalent" — no external binary)
+over the migrations a PR adds or modifies. It **only lints changed migrations**,
+so older migrations can never fail retroactively.
+
+### Unsafe-DDL rules
+
+A migration fails lint when any changed `migration.sql` contains:
+
+| Rule id | Trigger | Why it's unsafe |
+|---------|---------|-----------------|
+| `create-index-without-concurrently` | `CREATE [UNIQUE] INDEX` without `CONCURRENTLY` | Blocks writes on the table for the full build |
+| `drop-index-without-concurrently` | `DROP INDEX` without `CONCURRENTLY` | Takes an exclusive lock |
+| `column-type-rewrite` | `ALTER COLUMN … TYPE` / `SET DATA TYPE` | Rewrites the whole table under `ACCESS EXCLUSIVE` |
+| `not-null-without-default` | `SET NOT NULL`, or `ADD COLUMN … NOT NULL` without `DEFAULT` | Fails on existing NULL rows and locks the table |
+| `lock-table` | `LOCK TABLE` | Explicit table lock blocking concurrent access |
+
+### `down.sql` required
+
+Every changed migration directory must include a `down.sql`. (The init
+migration already does; migrations written before this rule may not — they are
+only required when a change touches them.)
+
+### Suppressing a rule
+
+A migration may suppress a specific rule with a `-- squawk-ignore <rule>`
+comment placed **immediately above** the offending statement. The override is
+rejected unless it is paired with a `-- justification:` comment (same line or
+the line below), and the justification must also be repeated in the PR
+description:
+
+```sql
+-- squawk-ignore create-index-without-concurrently
+-- justification: intents is empty at this point in the rollout
+CREATE INDEX "intents_src_chain_idx" ON "intents"("src_chain");
+```
+
+Or on a single line:
+
+```sql
+-- squawk-ignore lock-table -- justification: table is read-only during this maintenance window
+LOCK TABLE "intents" IN ACCESS EXCLUSIVE MODE;
+```
+
+The `down.sql` requirement can be suppressed the same way, by placing the
+directive at the top of `migration.sql` (for genuinely irreversible, one-way
+data migrations):
+
+```sql
+-- squawk-ignore missing-down-sql -- justification: one-way data migration, cannot be reversed
+```
+
+A `-- squawk-ignore` without a `-- justification:` **fails the build** — it is
+treated as an error, not a silent override.
+
+### Running locally
+
+```bash
+npm run check:migrations          # lint migrations changed since HEAD^1
+npm run check:migrations -- --base <sha>   # lint migrations changed since <sha>
+npm run test:scripts              # run the checker's fixture-based tests
+```
+
+---
+
+## Gated CD stage (issue #497)
+
+Applying migrations used to be manual (`npm run db:migrate:prod`) and not
+coordinated with deploys, so an app could reach a database whose schema it was
+not built for. `.github/workflows/cd.yml` now makes migrations a first-class,
+gated stage:
+
+```
+build ──► verify ──► migrate ──► staging (rollout + smoke test)
+                          │
+                          └──► migrate-production ──► production (rollout)
+```
+
+* `staging` and `production` list the migration job(s) in `needs`. GitHub
+  skips a job whose dependency was skipped **or failed**, so a failed migration
+  means the rollout jobs never run — halting the deploy is structural, not a
+  convention someone has to remember.
+* The migration itself runs **inside the cluster** as a Kubernetes Job
+  (`deploy/k8s/migration-job.yaml`), image-pinned to the digest this same run
+  built *and* signature-verified: the image that deploys is the image that
+  migrates.
+* The Job's entrypoint is `scripts/db-migrate-locked.js` (see its header for
+  the full rationale): advisory lock → checkpoint row → `prisma migrate deploy`
+  → outcome row → unlock.
+
+### Why a plain manifest and not a Helm hook
+
+The issue allows a Helm `pre-upgrade` hook or an Argo sync wave. This repo
+ships **no Helm release for the backend** (the only chart,
+`deploy/helm/vortex-canary`, is a CronJob), so a hook annotation would have
+nothing to fire on. The ordering the issue wants — "rollout waits on success" —
+is already expressed in this repo's native mechanism, the CD job graph, and a
+plain manifest keeps the gate visible as an ordinary CI check. The manifest's
+header comment records how to wrap the same object as a hook (`helm.sh/hook:
+pre-upgrade`) or `argocd.argoproj.io/sync-wave: "-1"` if/when a backend chart
+appears.
+
+### Two layers of serialisation (concurrent deploys)
+
+1. **Workflow layer** — `cd.yml`'s top-level
+   `concurrency: group: cd-${{ github.ref }}` with `cancel-in-progress: false`
+   queues CD runs that share a ref, so their migration jobs cannot overlap.
+2. **Database layer** — everything the workflow cannot see is serialised where
+   it actually matters, in Postgres: `scripts/db-migrate-locked.js` acquires
+   `pg_try_advisory_lock(classid = 0x56584d47 "VXMG", objid = MIGRATION_LOCK_KEY)`
+   with a **bounded wait** (`MIGRATION_LOCK_WAIT_SECONDS`, default 600s) and
+   *fails closed* on timeout, reporting which pid holds the lock. This covers
+   runs on different refs (a `main` push and a `v*` tag at the same time),
+   workflow re-runs, manual `kubectl run`, and the container-start path — the
+   Dockerfile's `CMD` runs migrations through the same locked entrypoint.
+
+Neither layer can be removed without reopening the race: the workflow group
+does not span refs, and a database lock cannot order GitHub jobs. Both are
+cheap, and they compose (a queued workflow usually finds the lock free).
+
+### Pre-migration checkpoint
+
+Before any DDL, the entrypoint records a row in `_migration_checkpoints`
+(`phase = 'pre'`, `status = 'started'`) carrying: timestamp, the last applied
+migration from `_prisma_migrations` (the schema version), the git SHA, the Job
+name, and the command being run. A `phase = 'post'` row records
+`succeeded`/`failed` afterwards. This is the always-on rollback marker — the
+runbook keys its failure triage off it.
+
+Optionally, the CD job also takes a **logical snapshot** (`pg_dump --format=custom`)
+*before* the Job is applied, gated on the `MIGRATION_PGDUMP` repository
+variable (fail-closed when enabled but not actually possible). The dump is
+uploaded as a workflow artifact with 30-day retention; object storage (S3,
+per `RUNBOOK_BACKUP_RESTORE.md`) remains the long-term home.
+
+### Compatibility: N-1 against N
+
+The `migration-compat` CI job applies *this* revision's migrations (schema N),
+checks the **previous** revision of the app out into a second worktree, and
+from there runs `prisma migrate deploy` (ordering/rewriting guard), a query
+through N-1's generated Prisma client (the e2e harness mocks PrismaService, so
+this is what makes the run schema-sensitive), and N-1's e2e smoke subset
+(`test/health.e2e-spec.ts`, `test/openapi-contract.e2e-spec.ts`, when they
+exist at that revision). "Previous" means `github.event.before` on pushes and
+the merge commit's first parent (base-branch tip) on pull requests; when no
+previous revision exists — first push of a ref — the job skips with an
+explicit `::notice::` instead of failing.
+
+### Failure path
+
+1. The Job fails or hits its `activeDeadlineSeconds` → the CD `migrate` job
+   prints the Job logs, emits `::error::`, and exits non-zero.
+2. `staging`/`production` are skipped: **the rollout is halted**.
+3. A notification is POSTed to `SLACK_WEBHOOK_URL` (Environment secret); when
+   the secret is unset the step degrades to a `::notice::` so the omission is
+   visible without inventing a second failure.
+4. Recovery is manual and documented: `RUNBOOK_BACKUP_RESTORE.md` § 11
+   (restore from the checkpoint/`pg_dump`, or reverse a single migration with
+   its `down.sql`). **Automatic data rollback is out of scope.**
+
+### Required repository configuration
+
+The gate **fails closed** when any of this is missing — deliberately: a
+migration stage that silently does nothing would let deploys keep shipping
+without it.
+
+| Where | Name | Needed for |
+|-------|------|-----------|
+| Environment `staging` / `production` | `MIGRATION_DATABASE_URL` (secret) | The **direct** (non-pooler) connection string handed to the Job. Prisma's schema declares only `url = env("DATABASE_URL")` — no `directUrl` field — so this secret *is* the migration's direct URL by contract. |
+| Environment `staging` / `production` | `KUBECONFIG` (secret, base64) | Default cluster auth mode. `echo kubeconfig \| base64 -w0`. |
+| Environment `staging` / `production` | `SLACK_WEBHOOK_URL` (secret, optional) | Failure notifications; unset ⇒ skipped with a `::notice::`. |
+| Repository `vars` | `KUBE_AUTH_MODE` | `kubeconfig` (default) or `oidc`. |
+| Repository `vars` | `AWS_ROLE_ARN`, `AWS_REGION`, `AWS_EKS_CLUSTER` | Only for `KUBE_AUTH_MODE=oidc`: GitHub OIDC → `sts assume-role-with-web-identity` → `aws eks update-kubeconfig`. The role's trust policy must allow `repo:stellar-vortex-protocol/vortex-backend:ref:refs/heads/main`. |
+| Repository `vars` | `MIGRATION_NAMESPACE` | Target namespace (default `default`). |
+| Repository `vars` | `MIGRATION_PGDUMP` | `true` to take the optional pre-migration `pg_dump`. |
+| Cluster | Secret `ghcr-pull` / SA pull rights, and a namespace | The Job pulls the digest image from `ghcr.io`. |
+
+---
+
 ## Out of scope
 
-This convention and its CI check only verify that `down.sql` reverses
-`migration.sql` in isolation. Running a `down.sql` against production is a
-manual, change-managed operation (same process as forward migrations) and is
-not automated here.
+* **Automatic data rollback.** Reversing DDL is scripted (`down.sql`) and
+  verified in CI; reversing *data* a migration already rewrote or dropped is
+  not automated anywhere and requires the manual restore in
+  `RUNBOOK_BACKUP_RESTORE.md` — which is why the pre-migration checkpoint
+  exists.
+* Running a `down.sql` against production. The CD stage automates the forward
+  path only; a rollback remains a change-managed, human-executed operation.

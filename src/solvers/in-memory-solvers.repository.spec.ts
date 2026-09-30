@@ -15,6 +15,7 @@ function makeSolver(overrides: Partial<SolverRecord> = {}): SolverRecord {
     avgFillTime: 10,
     isActive: true,
     registeredAt: now,
+    lastActiveAt: now,
     supportedChains: ["ethereum"],
     supportedTokens: ["USDC"],
     ...overrides,

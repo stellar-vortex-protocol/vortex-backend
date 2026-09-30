@@ -1,0 +1,12 @@
+{
+  "_comment": [
+    "Tests listed here are skipped by `scripts/ci/run-tests.mjs` in CI and locally.",
+    "Every entry must name an owner and a tracking issue, and `scripts/ci/check-quarantine.mjs`",
+    "fails the build if that is missing. See CONTRIBUTING.md -> Flaky tests and quarantine.",
+    "",
+    "Add an entry only after the flake has been observed at least twice; the auto-retry",
+    "report (`flake-report.md`, uploaded by every test job) is the evidence to attach to the issue."
+  ],
+  "staleAfterDays": 90,
+  "quarantined": []
+}

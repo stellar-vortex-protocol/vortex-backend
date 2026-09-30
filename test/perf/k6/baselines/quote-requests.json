@@ -1,0 +1,42 @@
+{
+  "_meta": {
+    "scenario": "quote-requests",
+    "description": "Baseline budgets for POST /api/v1/intents/quote",
+    "generatedAt": "2026-09-28T00:00:00.000Z",
+    "note": "Update this file by running: npm run perf:update-baselines",
+    "tolerancePercent": 15
+  },
+  "thresholds": {
+    "http_req_duration": {
+      "p95_ms": 200,
+      "p99_ms": 500
+    },
+    "perf_quote_duration": {
+      "p95_ms": 200,
+      "p99_ms": 500
+    },
+    "http_req_failed": {
+      "rate_max": 0.01
+    },
+    "perf_quotes_requested_total": {
+      "count_min": 50
+    }
+  },
+  "reference": {
+    "http_req_duration": {
+      "p50_ms": 8,
+      "p90_ms": 20,
+      "p95_ms": 30,
+      "p99_ms": 80,
+      "avg_ms": 10
+    },
+    "perf_quote_duration": {
+      "p50_ms": 8,
+      "p90_ms": 20,
+      "p95_ms": 30,
+      "p99_ms": 80
+    },
+    "http_req_failed_rate": 0,
+    "rps": 12
+  }
+}

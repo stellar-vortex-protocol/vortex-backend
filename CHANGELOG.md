@@ -54,12 +54,30 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
 - Typed Swagger response documentation for every `SorobanController` and
   `TokensController` route, including the account route's 400/429 responses
   (Closes #271)
+- `src/disputes/` — structured slash-dispute (appeal) workflow: authenticated
+  `POST /api/v1/solvers/disputes`, evidence auto-verification (fill-verifier),
+  reviewer lifecycle (`open → under_review → upheld | overturned`) with SLA
+  deadlines and RBAC (`ReviewerGuard`), treasury refund requests on overturn,
+  and public anonymised statistics (`docs/governance/dispute-reviewers.md`)
+- `src/analytics/` — analytics layer over TimescaleDB continuous aggregates
+  (ADR-0001) with `GET /api/v1/analytics/{volume,fees,latency,solver-share}`
+  endpoints (`interval`, `from`, `to`, `chain`, `token` params), idempotent
+  event-driven ingestion, 1m/1h/1d rollups with retention, and historical backfill
+- CI job `migration-lint` — lints the `prisma/migrations/**/migration.sql` a
+  change adds or modifies (via the `scripts/check-migrations.ts` squawk-equivalent
+  checker) for unsafe DDL: non-concurrent index builds/drops, column type
+  rewrites, `NOT NULL` without a default, and `LOCK TABLE`; also requires a
+  `down.sql` in every changed migration. Overrides use `-- squawk-ignore <rule>`
+  with a mandatory `-- justification:`; fixture tests run via
+  `npm run test:scripts` (see `prisma/migrations/README.md`)
 
 ### Fixed
 - `IntentsService.create()` idempotency-key handling is now race-safe — concurrent
   requests carrying the same key synchronously claim an in-flight slot before any
   `await`, so exactly one intent is created and the losers replay its result
   (Closes #274)
+- `.github/workflows/ci.yml` failed to parse because the `backend` job's
+  `runs-on` was on the same line as its `name`, so no CI job could run
 - `TokensModule` was missing `exports: [TokensService]` — `IntentsController`
   could not inject `TokensService` outside the Jest test environment
 - `IntentsModule` was missing `exports: [IntentsGateway]` — `StatsService`

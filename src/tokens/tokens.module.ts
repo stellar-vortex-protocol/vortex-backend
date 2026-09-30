@@ -12,10 +12,12 @@ import { PrismaTokensRepository } from "./prisma-tokens.repository";
     {
       provide: TOKENS_REPOSITORY,
       inject: [PrismaService],
-      useFactory: (prisma: PrismaService) => {
+      useFactory: async (prisma: PrismaService) => {
         const adapter = process.env.TOKENS_PERSISTENCE ?? "memory";
         if (adapter === "prisma") {
-          return new PrismaTokensRepository(prisma);
+          const repository = new PrismaTokensRepository(prisma);
+          await repository.init();
+          return repository;
         }
         return new InMemoryTokensRepository();
       },

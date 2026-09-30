@@ -44,3 +44,48 @@ npm run solver:demo      # in another, run the bot
 | `SOLVER_ADDRESS` | `SOLVER_ALPHA` | Solver identity used for accept/fill calls — must be a registered, active solver (`SOLVER_ALPHA`/`SOLVER_BETA`/`SOLVER_GAMMA` in the seed data) |
 | `SOLVER_CHAINS` | `stellar,ethereum,base,polygon,arbitrum,optimism,avalanche` | Comma-separated list of chain topics to filter WebSocket intent events |
 | `MIN_MARGIN_BPS` | `0` | Minimum margin threshold in basis points for filtering unviable intent fills |
+
+---
+
+# scripts/backfill-events.ts
+
+CLI script for historical event backfill after ledger gaps (#391).
+
+See [docs/runbooks/event-backfill.md](../docs/runbooks/event-backfill.md) for the full procedure.
+
+## Usage
+
+```bash
+# Check for gaps
+tsx scripts/backfill-events.ts --gap-check
+
+# Dry-run over a ledger range
+tsx scripts/backfill-events.ts --from 1000000 --to 1015000 --dry-run
+
+# Backfill (with optional resume on restart)
+tsx scripts/backfill-events.ts --from 1000000 --to 1015000 [--resume]
+```
+
+## Configuration (env vars)
+
+| Var | Required | Description |
+|---|---|---|
+| `SETTLEMENT_CONTRACT_ID` | Yes | Contract to backfill events for |
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `SOROBAN_RPC_URL` | Yes | Primary RPC endpoint |
+| `ARCHIVAL_RPC_URL` | No | Archival endpoint for deep-history gaps |
+
+## Fixture Regeneration
+
+Golden-file fixtures in `src/soroban/events/__fixtures__/events.json` document
+the expected decoded payload for each event topic. To regenerate from real
+testnet events:
+
+1. Point `SOROBAN_RPC_URL` + `SETTLEMENT_CONTRACT_ID` at a testnet deployment.
+2. Run the backfill with `VERBOSE=1 --dry-run` over a small ledger range.
+3. Copy the printed decoded event data into `__fixtures__/events.json`.
+4. Update `expectedPayload` fields to match your schema expectations.
+5. Commit the updated fixture file.
+
+The decoder unit tests in `src/soroban/events/*.spec.ts` load this file
+automatically — no test code changes needed when fixtures are refreshed.

@@ -1,7 +1,47 @@
 import { Injectable } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
-import { Intent, IntentState } from "./intents.types";
+import { Intent, IntentState, SupportedChain } from "./intents.types";
 import { buildSeedIntents } from "./intents.seed";
+
+/**
+ * Filter / sort / pagination parameters for advanced intent search (issue #440).
+ *
+ * All fields are optional; when none are present the search returns every
+ * intent sorted by `createdAt` descending — identical to the pre-existing
+ * default behaviour.
+ */
+export interface IntentSearchQuery {
+  state?: IntentState;
+  user?: string;
+  chain?: SupportedChain;
+  /** Minimum USD value at creation (inclusive). */
+  minAmountUsd?: number;
+  /** Maximum USD value at creation (inclusive). */
+  maxAmountUsd?: number;
+  /** Minimum creation time, unix epoch seconds (inclusive). */
+  createdFrom?: number;
+  /** Maximum creation time, unix epoch seconds (inclusive). */
+  createdTo?: number;
+  /** Source token symbol (case-insensitive). */
+  srcToken?: string;
+  /** Destination token symbol (case-insensitive). */
+  dstToken?: string;
+  /** Solver address that accepted/filled the intent. */
+  solver?: string;
+  /**
+   * Sort dimension and direction: `created` | `deadline` | `usd`, optionally
+   * with an `:asc` / `:desc` suffix. Defaults to `created:desc`.
+   */
+  sort?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** A page of search results plus the total number of matching intents. */
+export interface IntentSearchResult {
+  intents: Intent[];
+  total: number;
+}
 
 /**
  * NestJS injection token for the intents repository.
@@ -50,6 +90,19 @@ export interface IIntentsRepository {
   findByUser(user: string): Intent[] | Promise<Intent[]>;
 
   /**
+   * Advanced search with filtering, sorting and pagination (issue #440).
+   *
+   * Filtering and sorting are pushed into the storage adapter (SQL for the
+   * Prisma backend, in-memory for the dev/test backend) so no supported
+   * filter combination requires a full scan in the application layer.
+   *
+   * Returns the requested page plus the total number of matching intents so
+   * the caller can render pagination controls without a second count query'
+   * worth of work when the adapter can serve both from one pass.
+   */
+  search(query: IntentSearchQuery): IntentSearchResult | Promise<IntentSearchResult>;
+
+  /**
    * Apply a partial patch to an existing intent and return the updated record.
    * Returns `null` when no record with the given id exists.
    */
@@ -63,32 +116,47 @@ export interface IIntentsRepository {
 
   /**
    * Atomically transition an intent from `open` → `accepted` only if it is
-   * currently in the `open` state.  Mirrors the DB pattern:
+   * currently in the `open` state AND its deadline is still in the future.
+   * Mirrors the DB pattern:
    *   UPDATE intents SET state='accepted', solver=$2, deadline=$3
-   *   WHERE intent_id=$1 AND state='open'
+   *   WHERE intent_id=$1 AND state='open' AND deadline > $4
    *   RETURNING *
    * Returns the updated intent on success, `null` when the intent is not
-   * found or is not in the `open` state (already taken by another solver).
+   * found, already taken, or past deadline (sweeper wins the race).
+   *
+   * Lock ordering (issue #473): callers holding a per-solver advisory lock
+   * must acquire it BEFORE invoking this method; this method itself only
+   * touches the single intent row so no lock inversion is possible.
    */
   acceptIfOpen(
     id: string,
     solver: string,
     newDeadline: number,
+    now?: number,
+    acceptedDstAmount?: string,
   ): Intent | null | Promise<Intent | null>;
 
   /**
    * Atomically transition an intent from `accepted` → `filled` only if it is
-   * currently accepted by the specified solver.  Mirrors the DB pattern:
+   * currently accepted by the specified solver AND the fill window has not
+   * elapsed. Mirrors the DB pattern:
    *   UPDATE intents SET state='filled', ...patch
-   *   WHERE intent_id=$1 AND state='accepted' AND solver=$2
+   *   WHERE intent_id=$1 AND state='accepted' AND solver=$2 AND deadline > $3
    *   RETURNING *
    * Returns the updated intent on success, `null` on any guard failure.
+   * The `minDstAmount` invariant (fill >= minDst) is enforced by the
+   * controller/service layer with bigint comparison before this write; the
+   * state+deadline predicates here make the write itself race-free.
    */
   fillIfAccepted(
     id: string,
     solver: string,
     patch: Omit<Partial<Intent>, "state" | "solver">,
+    now?: number,
   ): Intent | null | Promise<Intent | null>;
+
+  /** Atomically reserves one transaction hash for one accepted intent. */
+  reserveFillTxHash(id: string, solver: string, txHash: string): Intent | null | Promise<Intent | null>;
 
   /**
    * Atomically transition an intent from `open` → `cancelled` only if it is
@@ -107,6 +175,27 @@ export interface IIntentsRepository {
    * a concurrent user cancel() or solver accept() on the same intent.
    */
   expireIfOpen(id: string): Intent | null | Promise<Intent | null>;
+
+  /**
+   * Atomically push an accepted intent's deadline out to at least `newDeadline`,
+   * only while it is still in the `accepted` state.  Mirrors the DB pattern:
+   *   UPDATE intents SET deadline=$2
+   *   WHERE intent_id=$1 AND state='accepted' AND deadline < $2
+   *   RETURNING *
+   *
+   * Issue #477: while an emergency pause covers `fill`, the sweeper cannot slash
+   * missed fills — but leaving the deadline untouched would expire those intents
+   * on the next cycle anyway and penalise the solver for a pause they did not
+   * cause.  The `deadline < $2` guard makes this idempotent and never shortens
+   * a window, and the state predicate means a concurrent fill or slash wins.
+   *
+   * Returns the updated intent, or `null` when the intent is no longer accepted
+   * or already has a later deadline.
+   */
+  extendDeadlineIfAccepted(
+    id: string,
+    newDeadline: number,
+  ): Intent | null | Promise<Intent | null>;
 
   /**
    * Atomically transition an intent from `accepted` → `slashed` only if it is
@@ -156,6 +245,65 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     return this.findAll().filter((i) => i.user.toLowerCase() === user.toLowerCase());
   }
 
+  search(query: IntentSearchQuery): IntentSearchResult {
+    let results = this.findAll();
+
+    if (query.state !== undefined) results = results.filter((i) => i.state === query.state);
+    if (query.user !== undefined) {
+      const needle = query.user.toLowerCase();
+      results = results.filter((i) => i.user.toLowerCase() === needle);
+    }
+    if (query.chain !== undefined) results = results.filter((i) => i.srcChain === query.chain);
+    if (query.solver !== undefined) {
+      const needle = query.solver.toLowerCase();
+      results = results.filter((i) => i.solver !== undefined && i.solver.toLowerCase() === needle);
+    }
+    if (query.minAmountUsd !== undefined) {
+      results = results.filter(
+        (i) => i.usdValueAtCreate !== undefined && i.usdValueAtCreate >= query.minAmountUsd!,
+      );
+    }
+    if (query.maxAmountUsd !== undefined) {
+      results = results.filter(
+        (i) => i.usdValueAtCreate !== undefined && i.usdValueAtCreate <= query.maxAmountUsd!,
+      );
+    }
+    if (query.createdFrom !== undefined) results = results.filter((i) => i.createdAt >= query.createdFrom!);
+    if (query.createdTo !== undefined) results = results.filter((i) => i.createdAt <= query.createdTo!);
+    if (query.srcToken !== undefined) {
+      const needle = query.srcToken.toLowerCase();
+      results = results.filter((i) => i.srcToken.symbol.toLowerCase() === needle);
+    }
+    if (query.dstToken !== undefined) {
+      const needle = query.dstToken.toLowerCase();
+      results = results.filter((i) => i.dstToken.symbol.toLowerCase() === needle);
+    }
+
+    // Sorting — default createdAt desc (preserves pre-existing behaviour).
+    const [dimension, direction] = (query.sort ?? "created:desc").split(":");
+    const dir = direction === "asc" ? 1 : -1;
+    results.sort((a, b) => {
+      switch (dimension) {
+        case "deadline":
+          return (a.deadline - b.deadline) * dir;
+        case "usd": {
+          const av = a.usdValueAtCreate ?? 0;
+          const bv = b.usdValueAtCreate ?? 0;
+          return (av - bv) * dir;
+        }
+        case "created":
+        default:
+          return (a.createdAt - b.createdAt) * dir;
+      }
+    });
+
+    const total = results.length;
+    const offset = query.offset ?? 0;
+    const limit = query.limit ?? 20;
+    const page = results.slice(offset, offset + limit);
+    return { intents: page, total };
+  }
+
   update(id: string, patch: Partial<Intent>): Intent | null {
     const existing = this.store.get(id);
     if (!existing) return null;
@@ -168,10 +316,26 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     return this.store.delete(id);
   }
 
-  acceptIfOpen(id: string, solver: string, newDeadline: number): Intent | null {
+  acceptIfOpen(
+    id: string,
+    solver: string,
+    newDeadline: number,
+    now?: number,
+    acceptedDstAmount?: string,
+  ): Intent | null {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "open") return null;
-    const updated: Intent = { ...existing, state: "accepted", solver, deadline: newDeadline };
+    // Deadline predicate pushed into the atomic check (issue #473): a solver
+    // racing the sweeper past expiry must lose even in-process.
+    const nowSec = now ?? Math.floor(Date.now() / 1000);
+    if (existing.deadline <= nowSec) return null;
+    const updated: Intent = {
+      ...existing,
+      state: "accepted",
+      solver,
+      deadline: newDeadline,
+      ...(acceptedDstAmount !== undefined ? { acceptedDstAmount } : {}),
+    };
     this.store.set(id, updated);
     return updated;
   }
@@ -180,12 +344,30 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     id: string,
     solver: string,
     patch: Omit<Partial<Intent>, "state" | "solver">,
+    now?: number,
   ): Intent | null {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "accepted" || existing.solver !== solver) return null;
+    const nowSec = now ?? Math.floor(Date.now() / 1000);
+    if (existing.deadline <= nowSec) return null;
     const updated: Intent = { ...existing, ...patch, state: "filled" };
     this.store.set(id, updated);
     return updated;
+  }
+
+  reserveFillTxHash(id: string, solver: string, txHash: string): Intent | null {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "accepted" || existing.solver !== solver) return null;
+    if (existing.txHash && existing.txHash !== txHash) return null;
+    if (this.findAll().some((intent) => intent.intentId !== id && intent.txHash === txHash)) return null;
+    const reserved = {
+      ...existing,
+      txHash,
+      fillVerificationState: "pending" as const,
+      fillVerificationReason: undefined,
+    };
+    this.store.set(id, reserved);
+    return reserved;
   }
 
   cancelIfOpen(id: string): Intent | null {
@@ -211,6 +393,17 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "accepted") return null;
     const updated: Intent = { ...existing, ...patch, state: "slashed" };
+    this.store.set(id, updated);
+    return updated;
+  }
+
+  extendDeadlineIfAccepted(id: string, newDeadline: number): Intent | null {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "accepted") return null;
+    // Never shorten: a later deadline is left untouched so repeated sweeps are
+    // no-ops rather than a countdown.
+    if (existing.deadline >= newDeadline) return null;
+    const updated: Intent = { ...existing, deadline: newDeadline };
     this.store.set(id, updated);
     return updated;
   }

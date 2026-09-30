@@ -2,6 +2,14 @@ import { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import WebSocket from "ws";
 import { createTestApp } from "./utils/create-test-app";
+import { SEED_SOLVER_KEYPAIRS } from "../src/solvers/solvers.seed";
+import { buildAcceptMessage } from "../src/common/stellar-signature";
+
+const ALPHA_KP = SEED_SOLVER_KEYPAIRS.ALPHA;
+
+function sign(kp: typeof ALPHA_KP, msg: string): string {
+  return kp.sign(Buffer.from(msg, "utf8")).toString("base64");
+}
 
 const validCreateBody = {
   user: "GE2ETESTUSER1234567",
@@ -22,6 +30,9 @@ describe("IntentsGateway WebSocket (e2e)", () => {
 
   beforeAll(async () => {
     app = await createTestApp();
+    // supertest never leaves the HTTP server listening; bind it so the WS
+    // clients below have a port to dial.
+    await app.listen(0);
     httpServer = app.getHttpServer();
   });
 
@@ -100,16 +111,17 @@ describe("IntentsGateway WebSocket (e2e)", () => {
 
       if (messages.length === 3 && msg.type === "intent_created") {
         intentId = msg.intent.intentId;
+        const acceptSig = sign(ALPHA_KP, buildAcceptMessage(intentId, ALPHA_KP.publicKey()));
         setTimeout(() => {
           request(httpServer)
             .post(`/api/v1/intents/${intentId}/accept`)
-            .send({ solver: "SOLVER_ALPHA" })
+            .send({ solver: ALPHA_KP.publicKey(), signature: acceptSig })
             .catch(done);
         }, 100);
       }
 
       if (msg.type === "intent_accepted" && msg.intentId === intentId) {
-        expect(msg.solver).toBe("SOLVER_ALPHA");
+        expect(msg.solver).toBe(ALPHA_KP.publicKey());
         ws.close();
         done();
       }

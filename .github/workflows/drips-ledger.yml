@@ -1,0 +1,179 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Drips Wave Contributor Ledger Pipeline (#501)
+#
+# Triggered on every merged PR to `main`.  Workflow:
+#  1. Parses the PR body for `Closes #N`.
+#  2. Fetches the linked issue and reads its complexity label.
+#  3. Validates eligibility (no duplicate, label present, not reverted).
+#  4. Appends a row to docs/DRIPS_WAVE_LEDGER.md on branch
+#     `automated/drips-ledger-update`, opening or updating a single
+#     batched "ledger update" PR.
+#
+# Requires:
+#   LEDGER_BOT_TOKEN — fine-grained PAT with `contents: write` and
+#   `pull-requests: write` scoped to this repository.  When absent the
+#   workflow exits cleanly so forks never fail on a missing secret.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Drips Ledger – Auto-update
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+# Only one ledger-update run at a time to prevent race conditions when two
+# PRs merge in quick succession.
+concurrency:
+  group: drips-ledger-update
+  cancel-in-progress: false
+
+jobs:
+  update-ledger:
+    name: Append ledger row
+    # Only run when the PR was actually merged (not just closed/abandoned)
+    if: github.event.pull_request.merged == true
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Read the repository contents to fetch the current ledger file.
+      contents: read
+      # Read pull-request details (body, author) — already available via
+      # the event payload, but we need it for the API call to list PRs.
+      pull-requests: read
+
+    steps:
+      # ── 0. Guard: skip if LEDGER_BOT_TOKEN is absent (fork safety) ─────────
+      - name: Check for bot token
+        id: token-check
+        run: |
+          if [ -z "${{ secrets.LEDGER_BOT_TOKEN }}" ]; then
+            echo "LEDGER_BOT_TOKEN is not set — skipping ledger update (fork or secret not configured)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.token-check.outputs.skip == 'false'
+        with:
+          # We need the full history to correctly reconstruct merge dates and
+          # detect revert PRs in the recent commit log.
+          fetch-depth: 50
+          # Use the bot token so subsequent git pushes are authenticated.
+          token: ${{ secrets.LEDGER_BOT_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        if: steps.token-check.outputs.skip == 'false'
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.token-check.outputs.skip == 'false'
+        run: npm ci
+
+      # ── 1. Run the ledger-append script ────────────────────────────────────
+      - name: Append ledger row
+        if: steps.token-check.outputs.skip == 'false'
+        id: append
+        env:
+          GITHUB_TOKEN: ${{ secrets.LEDGER_BOT_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          REPO: ${{ github.repository }}
+        run: |
+          tsx scripts/append-ledger-row.ts
+
+      # ── 2. Commit & push to the ledger update branch ───────────────────────
+      - name: Push ledger branch
+        if: |
+          steps.token-check.outputs.skip == 'false' &&
+          steps.append.outputs.row_appended == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.LEDGER_BOT_TOKEN }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="automated/drips-ledger-update"
+
+          # Fetch the existing ledger branch if it exists (don't fail if absent).
+          git fetch origin "$BRANCH" 2>/dev/null || true
+
+          # Check out the branch (create if needed), based on main.
+          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null 2>&1; then
+            git checkout "$BRANCH"
+            # Re-apply our local change on top of the remote ledger branch.
+            git checkout main -- docs/DRIPS_WAVE_LEDGER.md
+          else
+            git checkout -b "$BRANCH"
+          fi
+
+          git add docs/DRIPS_WAVE_LEDGER.md
+          git commit -m "chore(drips): append ledger row for PR #${{ github.event.pull_request.number }} [skip ci]"
+          git push origin "$BRANCH" --force-with-lease
+
+      # ── 3. Open or update the batched ledger-update PR ─────────────────────
+      - name: Open or update ledger PR
+        if: |
+          steps.token-check.outputs.skip == 'false' &&
+          steps.append.outputs.row_appended == 'true'
+        uses: actions/github-script@v7
+        env:
+          LEDGER_PR_BODY: ${{ steps.append.outputs.pr_body }}
+        with:
+          github-token: ${{ secrets.LEDGER_BOT_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const head  = 'automated/drips-ledger-update';
+            const base  = 'main';
+
+            // Search for an already-open ledger update PR from this branch.
+            const { data: prs } = await github.rest.pulls.list({
+              owner, repo, state: 'open', head: `${owner}:${head}`,
+            });
+
+            const prBody = process.env.LEDGER_PR_BODY ||
+              'Automated ledger update — see individual commits for details.';
+
+            if (prs.length > 0) {
+              // Update existing PR description to include the new row summary.
+              await github.rest.pulls.update({
+                owner, repo,
+                pull_number: prs[0].number,
+                body: prs[0].body
+                  ? prs[0].body + '\n' + prBody
+                  : prBody,
+              });
+              core.info(`Updated existing ledger PR #${prs[0].number}`);
+            } else {
+              const { data: newPr } = await github.rest.pulls.create({
+                owner, repo,
+                title: 'chore(drips): automated ledger update',
+                head, base,
+                body: [
+                  '## Automated Drips Wave Ledger Update',
+                  '',
+                  'This PR is maintained automatically by the `drips-ledger` workflow.',
+                  'It accumulates ledger rows from merged wave-issue PRs.',
+                  'Review, approve, and merge to keep `docs/DRIPS_WAVE_LEDGER.md` up to date.',
+                  '',
+                  '---',
+                  '',
+                  prBody,
+                ].join('\n'),
+              });
+              core.info(`Opened new ledger PR #${newPr.number}`);
+            }
+
+      # ── 4. Annotate the run when a row was skipped ─────────────────────────
+      - name: Report skip reason
+        if: |
+          steps.token-check.outputs.skip == 'false' &&
+          steps.append.outputs.row_appended != 'true'
+        run: |
+          echo "::notice::Ledger row was NOT appended: ${{ steps.append.outputs.skip_reason }}"

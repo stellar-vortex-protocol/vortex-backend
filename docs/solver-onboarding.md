@@ -190,11 +190,23 @@ This transitions the intent state from `open` to `accepted` and assigns the solv
 {
   "solver": "GBCW6A5K76DMT5Y55LVTG62W4VRV5L45I2N374X63P3V...",
   "fillAmount": "1000000",
-  "txHash": "0xabc123...",
+  "txHash": "64-character Stellar transaction hash",
   "signature": "base64EncodedSignatureOverFillMessage=="
 }
 ```
-This transitions the intent state to `filled`.
+The backend checks the transaction through Horizon before it transitions the intent to `filled`.
+The transaction must be successful, carry a text memo equal to the intent UUID, and contain
+a matching payment to the intent's Stellar user in the configured destination asset. Path
+payments are credited using `destination_amount`; the submitted `fillAmount` is not used as
+the protocol credit amount. Transactions not indexed yet remain pending and the solver may
+retry the same hash. The hash is reserved to one intent by a database unique index.
+
+**Current verification boundary:** classic Horizon `payment` and strict-send/strict-receive
+path-payment operations are supported. Soroban `invoke_host_function` transfer events are
+not yet verified, so SAC transfers submitted through contract invocation are rejected as
+having no matching payment.
+The current solver lifecycle still uses `isActive`; probation, bond verification, automatic
+promotion/suspension, and SLA digests are not implemented by this change.
 
 ---
 

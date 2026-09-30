@@ -1,0 +1,42 @@
+{
+  "_meta": {
+    "scenario": "solver-polling",
+    "description": "Baseline budgets for GET /api/v1/intents/open solver polling",
+    "generatedAt": "2026-09-28T00:00:00.000Z",
+    "note": "Update this file by running: npm run perf:update-baselines",
+    "tolerancePercent": 15
+  },
+  "thresholds": {
+    "http_req_duration": {
+      "p95_ms": 150,
+      "p99_ms": 300
+    },
+    "perf_solver_poll_duration": {
+      "p95_ms": 150,
+      "p99_ms": 300
+    },
+    "http_req_failed": {
+      "rate_max": 0.005
+    },
+    "perf_solver_poll_total": {
+      "count_min": 100
+    }
+  },
+  "reference": {
+    "http_req_duration": {
+      "p50_ms": 3,
+      "p90_ms": 8,
+      "p95_ms": 12,
+      "p99_ms": 25,
+      "avg_ms": 4
+    },
+    "perf_solver_poll_duration": {
+      "p50_ms": 3,
+      "p90_ms": 8,
+      "p95_ms": 12,
+      "p99_ms": 25
+    },
+    "http_req_failed_rate": 0,
+    "rps": 8
+  }
+}

@@ -1,17 +1,48 @@
 import { inspect } from "node:util";
-import { ConfigService } from "@nestjs/config";
-import { Account, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Account, FeeBumpTransaction, Keypair, Networks, Operation, Transaction, TransactionBuilder, xdr } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 import { SignerService } from "./signer.service";
 import { SorobanService } from "./soroban.service";
+import { ISigner } from "./signers/signer.interface";
+import { LocalKeypairSigner } from "./signers/local-keypair.signer";
 import { findSensitiveKeyMaterial } from "./redaction";
 
-function configWith(signerSecretKey: string, network: AppConfig["stellar"]["network"] = "testnet") {
+/**
+ * Builds a local-keypair signing backend over a stubbed config, i.e. the same
+ * ISigner the SIGNER_TOKEN provider hands to SignerService in the app.
+ */
+function signerWith(signerSecretKey: string, network: AppConfig["stellar"]["network"] = "testnet"): ISigner {
   const values: Record<string, unknown> = {
     "stellar.signingKey": signerSecretKey,
     "stellar.network": network,
   };
-  return { get: (path: string) => values[path] } as ConfigService<AppConfig, true>;
+  const configService = { get: (path: string) => values[path] } as ConfigService<AppConfig, true>;
+  return new LocalKeypairSigner(configService);
+import { findSensitiveKeyMaterial } from "./redaction";
+
+/**
+ * Build a mock ISigner backed by an optional keypair.
+ *
+ * SignerService was refactored (issue #400) to delegate to an ISigner backend,
+ * so the tests construct it with a mock backend rather than a ConfigService.
+ */
+function fakeSigner(keypair?: Keypair, network: AppConfig["stellar"]["network"] = "testnet") {
+  const passphrase =
+    network === "mainnet" ? Networks.PUBLIC : network === "futurenet" ? Networks.FUTURENET : Networks.TESTNET;
+  return {
+    // Mirrors LocalKeypairSigner: an unconfigured backend has no public key and
+    // throws a clear, secret-free error when one is requested.
+    publicKey: () => {
+      if (!keypair) throw new Error("Signer is not configured: no signing key is available");
+      return keypair.publicKey();
+    },
+    networkPassphrase: () => passphrase,
+    signTransaction: async <T extends Transaction | FeeBumpTransaction>(tx: T): Promise<T> => {
+      if (keypair) tx.sign(keypair);
+      return tx;
+    },
+    signAuthEntry: async (entry: xdr.SorobanAuthorizationEntry): Promise<xdr.SorobanAuthorizationEntry> => entry,
+  } as unknown as ISigner;
 }
 
 function fakeSorobanService(startingSequence = "100") {
@@ -22,18 +53,30 @@ function fakeSorobanService(startingSequence = "100") {
 
 describe("SignerService", () => {
   it("reports unconfigured when no secret is set", () => {
-    const service = new SignerService(configWith(""), fakeSorobanService());
+    const service = new SignerService(signerWith(""), fakeSorobanService());
+    const service = new SignerService(fakeSigner(), fakeSorobanService());
     expect(service.isConfigured()).toBe(false);
   });
 
   it("throws a clear, secret-free error when signing without a configured key", () => {
-    const service = new SignerService(configWith(""), fakeSorobanService());
-    expect(() => service.getPublicKey()).toThrow(/SOROBAN_SIGNER_SECRET_KEY/);
+    const service = new SignerService(signerWith(""), fakeSorobanService());
+    expect(() => service.getPublicKey()).toThrow(/SOROBAN_SIGNING_KEY/);
+    const service = new SignerService(fakeSigner(), fakeSorobanService());
+    expect(() => service.getPublicKey()).toThrow(/not configured|signing key/i);
+    // The message must stay secret-free (no strkey / seed shape).
+    let message = "";
+    try {
+      service.getPublicKey();
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).not.toMatch(/^S[A-Z2-7]{55}$/);
   });
 
   it("derives the public key from the configured secret", () => {
     const keypair = Keypair.random();
-    const service = new SignerService(configWith(keypair.secret()), fakeSorobanService());
+    const service = new SignerService(signerWith(keypair.secret()), fakeSorobanService());
+    const service = new SignerService(fakeSigner(keypair), fakeSorobanService());
 
     expect(service.isConfigured()).toBe(true);
     expect(service.getPublicKey()).toBe(keypair.publicKey());
@@ -41,14 +84,18 @@ describe("SignerService", () => {
 
   it("maps network config to the right passphrase", () => {
     const soroban = fakeSorobanService();
-    expect(new SignerService(configWith("", "testnet"), soroban).getNetworkPassphrase()).toBe(Networks.TESTNET);
-    expect(new SignerService(configWith("", "futurenet"), soroban).getNetworkPassphrase()).toBe(Networks.FUTURENET);
-    expect(new SignerService(configWith("", "mainnet"), soroban).getNetworkPassphrase()).toBe(Networks.PUBLIC);
+    expect(new SignerService(signerWith("", "testnet"), soroban).getNetworkPassphrase()).toBe(Networks.TESTNET);
+    expect(new SignerService(signerWith("", "futurenet"), soroban).getNetworkPassphrase()).toBe(Networks.FUTURENET);
+    expect(new SignerService(signerWith("", "mainnet"), soroban).getNetworkPassphrase()).toBe(Networks.PUBLIC);
+    expect(new SignerService(fakeSigner(undefined, "testnet"), soroban).getNetworkPassphrase()).toBe(Networks.TESTNET);
+    expect(new SignerService(fakeSigner(undefined, "futurenet"), soroban).getNetworkPassphrase()).toBe(Networks.FUTURENET);
+    expect(new SignerService(fakeSigner(undefined, "mainnet"), soroban).getNetworkPassphrase()).toBe(Networks.PUBLIC);
   });
 
-  it("signs a transaction with the configured key", () => {
+  it("signs a transaction with the configured key", async () => {
     const keypair = Keypair.random();
-    const service = new SignerService(configWith(keypair.secret()), fakeSorobanService());
+    const service = new SignerService(signerWith(keypair.secret()), fakeSorobanService());
+    const service = new SignerService(fakeSigner(keypair), fakeSorobanService());
 
     const account = new Account(keypair.publicKey(), "1");
     const tx = new TransactionBuilder(account, { fee: "100", networkPassphrase: Networks.TESTNET })
@@ -57,13 +104,14 @@ describe("SignerService", () => {
       .build();
 
     expect(tx.signatures).toHaveLength(0);
-    const signed = service.sign(tx);
+    const signed = await service.sign(tx);
     expect(signed.signatures).toHaveLength(1);
   });
 
   it("never includes the raw secret in string/JSON/inspect representations", () => {
     const keypair = Keypair.random();
-    const service = new SignerService(configWith(keypair.secret()), fakeSorobanService());
+    const service = new SignerService(signerWith(keypair.secret()), fakeSorobanService());
+    const service = new SignerService(fakeSigner(keypair), fakeSorobanService());
 
     const secret = keypair.secret();
     expect(String(service)).not.toContain(secret);
@@ -88,7 +136,8 @@ describe("SignerService", () => {
     it("fetches the starting sequence once and increments it locally", async () => {
       const keypair = Keypair.random();
       const soroban = fakeSorobanService("100");
-      const service = new SignerService(configWith(keypair.secret()), soroban);
+      const service = new SignerService(signerWith(keypair.secret()), soroban);
+      const service = new SignerService(fakeSigner(keypair), soroban);
 
       const first = await service.withNextSequence(async (sequence) => sequence);
       const second = await service.withNextSequence(async (sequence) => sequence);
@@ -101,7 +150,8 @@ describe("SignerService", () => {
     it("hands out a distinct, gap-free sequence to every concurrent caller", async () => {
       const keypair = Keypair.random();
       const soroban = fakeSorobanService("0");
-      const service = new SignerService(configWith(keypair.secret()), soroban);
+      const service = new SignerService(signerWith(keypair.secret()), soroban);
+      const service = new SignerService(fakeSigner(keypair), soroban);
 
       const results = await Promise.all(
         Array.from({ length: 20 }, () => service.withNextSequence(async (sequence) => sequence)),
@@ -114,7 +164,8 @@ describe("SignerService", () => {
 
     it("runs callers strictly one at a time, in call order", async () => {
       const keypair = Keypair.random();
-      const service = new SignerService(configWith(keypair.secret()), fakeSorobanService("0"));
+      const service = new SignerService(signerWith(keypair.secret()), fakeSorobanService("0"));
+      const service = new SignerService(fakeSigner(keypair), fakeSorobanService("0"));
       const order: number[] = [];
 
       const slow = service.withNextSequence(async () => {
@@ -132,7 +183,8 @@ describe("SignerService", () => {
     it("drops the cached sequence after a failure so the next call re-syncs from the network", async () => {
       const keypair = Keypair.random();
       const soroban = fakeSorobanService("100");
-      const service = new SignerService(configWith(keypair.secret()), soroban);
+      const service = new SignerService(signerWith(keypair.secret()), soroban);
+      const service = new SignerService(fakeSigner(keypair), soroban);
 
       await expect(
         service.withNextSequence(async () => {
@@ -147,7 +199,8 @@ describe("SignerService", () => {
 
     it("does not let a failed caller block callers queued behind it", async () => {
       const keypair = Keypair.random();
-      const service = new SignerService(configWith(keypair.secret()), fakeSorobanService("0"));
+      const service = new SignerService(signerWith(keypair.secret()), fakeSorobanService("0"));
+      const service = new SignerService(fakeSigner(keypair), fakeSorobanService("0"));
 
       const failing = service.withNextSequence(async () => {
         throw new Error("boom");

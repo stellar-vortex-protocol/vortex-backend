@@ -81,14 +81,14 @@ export interface TokenInfo {
   decimals: number;
   chain: SupportedChain;
   logoURI?: string;
-  priceUSD?: number;
+  priceUSD?: number | null;
 }
 
 export interface StellarToken {
   contract: string;
   symbol: string;
   decimals: number;
-  priceUSD?: number;
+  priceUSD?: number | null;
 }
 
 export interface ProtocolStats {

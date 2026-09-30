@@ -12,9 +12,12 @@ import { Test } from "@nestjs/testing";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { ValidationPipe } from "@nestjs/common";
 import request from "supertest";
+import { Keypair } from "@stellar/stellar-sdk";
 import { AppModule } from "../src/app.module";
 import { SorobanService } from "../src/soroban/soroban.service";
 import { HttpExceptionFilter } from "../src/common/http-exception.filter";
+import { PrismaService } from "../src/prisma/prisma.service";
+import { MockPrismaService } from "./utils/create-test-app";
 
 // ---------------------------------------------------------------------------
 // Stable mock responses matching the shape returned by @stellar/stellar-sdk
@@ -34,8 +37,13 @@ const mockNetwork = {
   protocolVersion: 21,
 };
 
+// The route validates :publicKey with StrKey, so the fixture must be a real
+// ed25519 public key rather than a made-up G… string.
+const KNOWN_PUBLIC_KEY = Keypair.random().publicKey();
+const OTHER_PUBLIC_KEY = Keypair.random().publicKey();
+
 const mockAccount = {
-  id: "GABC1234567890TESTPUBLICKEY000000000000000000000000000000",
+  id: KNOWN_PUBLIC_KEY,
   sequence: "987654321",
   balances: [
     { balance: "9999.9999800", asset_type: "native" },
@@ -59,6 +67,8 @@ describe("SorobanController (e2e)", () => {
     })
       .overrideProvider(SorobanService)
       .useValue(sorobanService)
+      .overrideProvider(PrismaService)
+      .useClass(MockPrismaService)
       .compile();
 
     app = moduleRef.createNestApplication();
@@ -101,8 +111,8 @@ describe("SorobanController (e2e)", () => {
         .get("/api/v1/chain/health")
         .expect(500);
 
-      // NestJS wraps unhandled errors in a standard error body
-      expect(res.body).toHaveProperty("statusCode", 500);
+      // HttpExceptionFilter normalises unhandled errors to { error }
+      expect(res.body.error).toBe("RPC unreachable");
     });
   });
 
@@ -155,7 +165,7 @@ describe("SorobanController (e2e)", () => {
   // -------------------------------------------------------------------------
 
   describe("GET /api/v1/chain/account/:publicKey", () => {
-    const publicKey = "GABC1234567890TESTPUBLICKEY000000000000000000000000000000";
+    const publicKey = KNOWN_PUBLIC_KEY;
 
     it("returns 200 with account data for a known public key", async () => {
       const res = await request(app.getHttpServer())
@@ -170,7 +180,7 @@ describe("SorobanController (e2e)", () => {
     });
 
     it("forwards the public key parameter correctly to the service", async () => {
-      const anotherKey = "GBTEST9999111122223333444455556666777788889999AAAA";
+      const anotherKey = OTHER_PUBLIC_KEY;
       sorobanService.getAccount.mockResolvedValue({ ...mockAccount, id: anotherKey });
 
       const res = await request(app.getHttpServer())

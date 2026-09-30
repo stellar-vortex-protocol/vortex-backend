@@ -4,12 +4,13 @@ import * as sentryModule from "./sentry";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-function makeHost(json: jest.Mock): ArgumentsHost {
+function makeHost(json: jest.Mock, requestId?: string): ArgumentsHost {
   return {
     switchToHttp: () => ({
       getResponse: () => ({
         status: (_code: number) => ({ json }),
       }),
+      getRequest: () => (requestId ? { requestId } : {}),
     }),
   } as unknown as ArgumentsHost;
 }
@@ -85,6 +86,42 @@ describe("HttpExceptionFilter", () => {
       const host = makeHost(json);
       filter.catch(null, host);
       expect(json).toHaveBeenCalledWith({ error: "Unknown error" });
+    });
+
+    it("propagates an express error's own numeric status instead of masking with 500", () => {
+      const host = makeHost(json);
+      const payloadTooLarge = Object.assign(new Error("request entity too large"), { status: 413 });
+
+      filter.catch(payloadTooLarge, host);
+
+      expect(json).toHaveBeenCalledWith({ error: "request entity too large" });
+    });
+  });
+
+  describe("requestId propagation", () => {
+    it("echoes requestId back on an HttpException when the request has one", () => {
+      const host = makeHost(json, "req-abc-123");
+
+      filter.catch(new HttpException("Not found", HttpStatus.NOT_FOUND), host);
+
+      expect(json).toHaveBeenCalledWith({ error: "Not found", requestId: "req-abc-123" });
+    });
+
+    it("omits requestId entirely when the request has none", () => {
+      const host = makeHost(json);
+
+      filter.catch(new HttpException("Not found", HttpStatus.NOT_FOUND), host);
+
+      expect(json).toHaveBeenCalledWith({ error: "Not found" });
+      expect(json.mock.calls[0][0]).not.toHaveProperty("requestId");
+    });
+
+    it("does not add requestId to the 500 branch", () => {
+      const host = makeHost(json, "req-abc-123");
+
+      filter.catch(new Error("boom"), host);
+
+      expect(json).toHaveBeenCalledWith({ error: "boom" });
     });
   });
 });

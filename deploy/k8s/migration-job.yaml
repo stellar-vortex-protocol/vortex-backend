@@ -1,0 +1,137 @@
+# ─── Pre-deploy database migration Job (issue #497) ─────────────────────────
+#
+# A plain Kubernetes Job manifest, deliberately NOT a Helm pre-upgrade hook:
+#
+#   * This repository ships no Helm release for the backend itself — the only
+#     chart in `deploy/helm/` is `vortex-canary`, a CronJob. A hook annotation
+#     only fires during `helm upgrade` of a release that exists; with no
+#     backend chart there is nothing to hook into, and inventing one just for
+#     the migration would duplicate the (missing) deployment manifest.
+#   * The gate the issue asks for — "rollout waits on success" — is expressed
+#     where this repo already expresses ordering: the CD job graph
+#     (`.github/workflows/cd.yml`: `staging`/`production` `needs: migrate`).
+#     A plain manifest applied by that job fails closed *and* is visible as a
+#     normal CI check, which an in-cluster hook is not.
+#   * The file stays declarative and reviewable: `helm template` output
+#     committed to git is the same thing with extra steps.
+#
+# If/when a backend Helm chart or Argo CD application appears, the equivalent
+# in-cluster ordering is `helm.sh/hook: pre-upgrade` (weight 0) or
+# `argocd.argoproj.io/sync-wave: "-1"` — the manifest below can be wrapped
+# unchanged. That migration is tracked as follow-up work in
+# prisma/migrations/README.md.
+#
+# ─── Placeholders ────────────────────────────────────────────────────────────
+# `.github/workflows/cd.yml` renders this file with `sed` (values are
+# non-secret by construction — the database URL never appears here, it comes
+# from the `vortex-migration-db` Secret created by the same job):
+#
+#   __JOB_NAME__            unique per run (run id + attempt) so concurrent
+#                           applies cannot fight over a single immutable
+#                           Job spec, and so two runs never share a Job
+#   __IMAGE__               `ghcr.io/…/vortex-backend@sha256:…` — the digest
+#                           built AND signature-verified earlier in this run
+#   __GIT_SHA__             recorded on the Job and in the checkpoint row
+#   __RUN_URL__             back-link to the CD run in the Kubernetes events
+#   __LOCK_WAIT_SECONDS__   bounded wait for the PostgreSQL advisory lock
+#   __DB_SECRET_NAME__      Secret (created by the CD job) holding DATABASE_URL
+#
+# Auth, namespace, timeouts and the "did it succeed?" wait all live in the
+# workflow, next to the failure/notification handling.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __JOB_NAME__
+  labels:
+    # Same label vocabulary as deploy/helm/vortex-canary so cluster-side tooling
+    # can select migration Jobs alongside the rest of the fleet.
+    app.kubernetes.io/name: vortex-migration
+    app.kubernetes.io/managed-by: github-actions-cd
+    vortex.io/git-sha: __GIT_SHA__
+  annotations:
+    # Human-facing provenance: `kubectl describe job` shows which CD run owns
+    # this Job without anyone having to correlate names by hand.
+    vortex.io/cd-run: "__RUN_URL__"
+    vortex.io/issue: "497"
+spec:
+  # No automatic retry. A migration that failed may have applied half of its
+  # SQL; re-running it blind is a human decision (see RUNBOOK_BACKUP_RESTORE.md),
+  # not something a backoff counter should do on our behalf. This mirrors
+  # `backoffLimit: 0` in the vortex-canary CronJob for the same reason.
+  backoffLimit: 0
+
+  # Hard ceiling: even if nobody is watching `kubectl wait`, a Job stuck on the
+  # advisory lock or on a table lock cannot hold the deploy queue for ever.
+  activeDeadlineSeconds: 900
+
+  # Let the cluster GC finished Jobs so re-runs (name includes the run id) do
+  # not accumulate objects; failed Jobs still survive for a day for triage.
+  ttlSecondsAfterFinished: 86400
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vortex-migration
+    spec:
+      # Exit code is the signal (the workflow reads `condition=complete`), so a
+      # restart would just repeat a failed migration. The entrypoint's bounded
+      # advisory lock already handles "another run is migrating" by waiting.
+      restartPolicy: Never
+      securityContext:
+        # The runtime image's default user is `node` (uid 1000); running as
+        # non-root with the runtime default seccomp profile is the floor for a
+        # pod that executes DDL against production.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # The image lives in (private) ghcr.io. A missing secret here only warns
+      # and kubelets fall back to the namespace service account's credentials —
+      # cluster-side pull configuration is documented in
+      # prisma/migrations/README.md rather than assumed to exist.
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: migrate
+          image: __IMAGE__
+          # Digest-pinned, so the pull policy only affects whether the already
+          # verified bytes come from the node cache or the registry.
+          imagePullPolicy: IfNotPresent
+          # The locked entrypoint: advisory lock → checkpoint row →
+          # `prisma migrate deploy` → outcome row → unlock. See the long header
+          # comment in scripts/db-migrate-locked.js for why each step exists.
+          command: ["node", "scripts/db-migrate-locked.js"]
+          env:
+            # DIRECT connection string. Prisma's schema declares only
+            # `url = env("DATABASE_URL")` (no `directUrl` field), so the "direct
+            # URL" contract is expressed here: the CD job seeds this Secret from
+            # the environment's MIGRATION_DATABASE_URL, which must point at the
+            # primary — never a transaction pooler (prisma migrate + pgbouncer
+            # transaction mode is unsupported, same rule as leader election).
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: __DB_SECRET_NAME__
+                  key: DATABASE_URL
+            - name: MIGRATION_LOCK_WAIT_SECONDS
+              value: "__LOCK_WAIT_SECONDS__"
+            # Provenance recorded in `_migration_checkpoints` for the runbook.
+            - name: MIGRATION_GIT_SHA
+              value: "__GIT_SHA__"
+            - name: MIGRATION_JOB_NAME
+              value: "__JOB_NAME__"
+          resources:
+            # `migrate deploy` is mostly schema-engine work with short bursts of
+            # memory while parsing migrations; keep the footprint bounded but
+            # comfortably above what the CLI needs.
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # readOnlyRootFilesystem is intentionally NOT set: the pinned Prisma
+            # CLI and npx fallback both write under $HOME (npm cache, prisma
+            # engines). Enabling it would need an emptyDir mounted at /home/node
+            # — a worthwhile follow-up, not something to assert untested here.

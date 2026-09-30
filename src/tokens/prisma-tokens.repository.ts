@@ -1,36 +1,38 @@
 import { Injectable } from "@nestjs/common";
-import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { SupportedChain } from "../intents/intents.types";
 import { ITokensRepository, TokenRecord } from "./tokens.repository";
 
 @Injectable()
 export class PrismaTokensRepository implements ITokensRepository {
+  private records: TokenRecord[] = [];
+
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(): Promise<TokenRecord[]> {
+  async init(): Promise<void> {
     const rows = await this.prisma.token.findMany();
-    return rows.map((row) => this.fromRow(row));
+    this.records = rows.map((row) => this.fromRow(row));
   }
 
-  async findByChain(chain: SupportedChain | string): Promise<TokenRecord[]> {
-    const rows = await this.prisma.token.findMany({
-      where: { chain: (chain as SupportedChain) ?? "stellar" },
-    });
-    return rows.map((row) => this.fromRow(row));
+  findAll(): TokenRecord[] {
+    return this.records.map((record) => ({ ...record }));
   }
 
-  async findByAddressAndChain(
-    address: string,
-    chain: SupportedChain | string,
-  ): Promise<TokenRecord | undefined> {
-    const row = await this.prisma.token.findFirst({
-      where: {
-        address,
-        chain: chain as SupportedChain,
-      },
-    });
-    return row ? this.fromRow(row) : undefined;
+  findByChain(chain: SupportedChain | string): TokenRecord[] {
+    const normalized = String(chain).toLowerCase();
+    return this.records
+      .filter((record) => record.chain === normalized || record.chain === chain)
+      .map((record) => ({ ...record }));
+  }
+
+  findByAddressAndChain(address: string, chain: SupportedChain | string): TokenRecord | undefined {
+    const normalizedAddress = address.trim().toLowerCase();
+    const chainName = String(chain).toLowerCase();
+    const match = this.records.find(
+      (record) =>
+        record.address.toLowerCase() === normalizedAddress && record.chain === chainName,
+    );
+    return match ? { ...match } : undefined;
   }
 
   private fromRow(row: {

@@ -14,6 +14,19 @@ export interface SolverRecord {
   lastActiveAt: number;
   supportedChains: SupportedChain[];
   supportedTokens: string[];
+  /**
+   * Data source for this record (issue #399).
+   * "api"   — created / updated via REST POST /solvers.
+   * "chain" — projected from solver-registry contract events.
+   */
+  source?: "api" | "chain";
+  /**
+   * Ledger sequence of the most recent on-chain event applied to this row.
+   * Null when source="api" (no on-chain event has been observed yet).
+   * Used to resolve out-of-order events: events with a lower ledger than
+   * this value are ignored during replay.
+   */
+  chainUpdatedLedger?: number | null;
 }
 
 /**

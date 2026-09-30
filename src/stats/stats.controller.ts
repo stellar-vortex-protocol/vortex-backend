@@ -12,6 +12,16 @@ export class StatsController {
     return this.statsService.getProtocolStats();
   }
 
+  @Get("public")
+  getPublicStats() {
+    return this.statsService.getPublicStats();
+  }
+
+  @Get("public/history")
+  getPublicStatsHistory() {
+    return this.statsService.getPublicStatsHistory();
+  }
+
   @Get("treasury")
   getTreasuryStats() {
     return this.statsService.getTreasuryStats();

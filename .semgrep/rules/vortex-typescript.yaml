@@ -1,0 +1,92 @@
+rules:
+  - id: no-number-money
+    languages: [typescript]
+    severity: ERROR
+    message: "Do not use Number()/parseFloat on monetary amounts — amounts are bigint-as-string. Use BigInt()/parseBaseUnits()."
+    patterns:
+      - pattern-either:
+          - pattern: Number($X)
+          - pattern: parseFloat($X)
+          - pattern: parseInt($X)
+      - metavariable-regex:
+          metavariable: $X
+          regex: "(?i).*(amount|fee|price|balance|volume).*"
+    paths:
+      include: ["src/**/*.ts"]
+  - id: no-float-fee-math
+    languages: [typescript]
+    severity: ERROR
+    message: "Fee math must stay in bigint base units — Number(fee) loses precision."
+    patterns:
+      - pattern-either:
+          - pattern: Number($FEE, ...)
+          - pattern: $FEE / Math.pow(...)
+    paths:
+      include: ["src/**/*.ts"]
+  - id: no-config-logging
+    languages: [typescript]
+    severity: WARNING
+    message: "Do not log config objects — may leak secrets (SOROBAN_SIGNING_KEY, DATABASE_URL)."
+    patterns:
+      - pattern-either:
+          - pattern: console.log($CFG, ...)
+          - pattern: logger.log($CFG, ...)
+          - pattern: this.logger.log($CFG, ...)
+    paths:
+      include: ["src/**/*.ts"]
+  - id: unguarded-admin-route
+    languages: [typescript]
+    severity: ERROR
+    message: "Admin routes must carry an auth guard (@UseGuards). Add explicit guard or suppress with justification."
+    patterns:
+      - pattern: |
+          @Controller($PATH)
+          ...
+          @$METHOD(...)
+          $FN(...) {...}
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: ".*admin.*"
+    paths:
+      include: ["src/**/*.ts"]
+  - id: no-direct-state-mutation
+    languages: [typescript]
+    severity: ERROR
+    message: "Intent state must only change via acceptIfOpen/fillIfAccepted/cancelIfOpen/expireIfOpen/slashIfAccepted — never via update({state: ...})."
+    patterns:
+      - pattern-either:
+          - pattern: update($ID, {..., state: $S, ...})
+          - pattern: .update($ID, {state: $S})
+    paths:
+      include: ["src/**/*.ts"]
+  - id: no-query-raw-unsafe
+    languages: [typescript]
+    severity: ERROR
+    message: "Raw $queryRawUnsafe is forbidden — use parameterized $queryRaw or Prisma query builder."
+    patterns:
+      - pattern: $DB.$queryRawUnsafe(...)
+    paths:
+      include: ["src/**/*.ts"]
+  - id: require-signature-verify
+    languages: [typescript]
+    severity: WARNING
+    message: "Mutating intent endpoints (accept/fill/cancel) must call verifyStellarSignature."
+    patterns:
+      - pattern: |
+          @Post($ROUTE)
+          ...
+          $FN(...) {...}
+      - metavariable-regex:
+          metavariable: $ROUTE
+          regex: ".*(accept|fill|cancel).*"
+    paths:
+      include: ["src/intents/*.ts"]
+  - id: no-txhash-log
+    languages: [typescript]
+    severity: WARNING
+    message: "Avoid interpolating tx hashes / secrets into plain log strings; use structured metadata."
+    patterns:
+      - pattern-either:
+          - pattern: console.log(`...${$TX}...`, ...)
+    paths:
+      include: ["src/**/*.ts"]

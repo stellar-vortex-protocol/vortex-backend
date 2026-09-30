@@ -15,10 +15,7 @@ export interface TokenRecord {
 export const TOKENS_REPOSITORY = Symbol("TOKENS_REPOSITORY");
 
 export interface ITokensRepository {
-  findAll(): Promise<TokenRecord[]> | TokenRecord[];
-  findByChain(chain: SupportedChain | string): Promise<TokenRecord[]> | TokenRecord[];
-  findByAddressAndChain(
-    address: string,
-    chain: SupportedChain | string,
-  ): Promise<TokenRecord | undefined> | TokenRecord | undefined;
+  findAll(): TokenRecord[];
+  findByChain(chain: SupportedChain | string): TokenRecord[];
+  findByAddressAndChain(address: string, chain: SupportedChain | string): TokenRecord | undefined;
 }

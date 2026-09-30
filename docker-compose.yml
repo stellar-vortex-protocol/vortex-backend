@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # TimescaleDB is a PostgreSQL extension and a drop-in replacement; it powers
+    # the analytics continuous aggregates (docs/adr/0001-analytics-store.md).
+    image: timescale/timescaledb:2.16.1-pg16
     container_name: vortex-postgres
     restart: unless-stopped
     environment:
@@ -17,6 +19,18 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7-alpine
+    container_name: vortex-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   app:
     build:
       context: .
@@ -25,18 +39,187 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
+      redis:
+        condition: service_healthy
+    environment: &app-env
       NODE_ENV: development
       PORT: 4000
       DATABASE_URL: postgresql://vortex:vortex@postgres:5432/vortex?schema=public
       CORS_ORIGIN: "*"
       WS_MAX_CONNECTIONS: 1000
-      WS_BACKPLANE: memory
+      # Issue #454 — `WS_BACKPLANE=redis docker compose up` fans WS events out
+      # through the redis service.
+      WS_BACKPLANE: ${WS_BACKPLANE:-memory}
+      REDIS_URL: redis://redis:6379
+      # Issue #494 — single-process default: this service serves the API and
+      # runs queue workers. With the in-memory intents store the store-size
+      # job must run here, next to the data it evicts.
+      PROCESS_ROLE: all
+      JOBS_DRIVER: bullmq
+      FLAGS_PUBSUB: redis
+      ADMIN_API_KEYS: ${ADMIN_API_KEYS:-}
+      CANARY_ADDRESSES: ${CANARY_ADDRESSES:-}
     ports:
       - "4000:4000"
     volumes:
       - .:/app
     command: sh -c "npx prisma migrate deploy && npm run dev -- --host 0.0.0.0"
 
+  # ── Observability profile (issue #481) ─────────────────────────────────────
+  # Brought up with:  docker compose --profile observability up -d
+  #
+  # Grafana <http://localhost:3001> (anonymous viewing, admin/admin) serves the
+  # five committed dashboards in ops/grafana/dashboards. They are provisioned
+  # from disk with allowUiUpdates: false, so a panel edited in the UI is
+  # reverted on the next provisioning pass - edit ops/grafana/build.mjs instead.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: vortex-prometheus
+    restart: unless-stopped
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: vortex-grafana
+    restart: unless-stopped
+    profiles: ["observability"]
+    depends_on:
+      - prometheus
+      - loki
+    environment:
+      # Local viewing is intentionally unauthenticated. Do not copy this into a
+      # shared or public deployment - see ops/grafana/README.md.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: dark
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/etc/grafana/provisioning/dashboards/json:ro
+      - grafana-data:/var/lib/grafana
+
+  # Log aggregation. Nothing in the service emits spans yet, so Tempo is wired
+  # up but idle; the datasource is provisioned so turning tracing on later is a
+  # config change rather than a dashboard rebuild.
+  loki:
+    image: grafana/loki:3.1.1
+    container_name: vortex-loki
+    restart: unless-stopped
+    profiles: ["observability"]
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./ops/observability/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: vortex-tempo
+    restart: unless-stopped
+    profiles: ["observability"]
+    command: -config.file=/etc/tempo/tempo.yml
+    volumes:
+      - ./ops/observability/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo-data:/var/tempo
+
+  # ── Chaos test profile ────────────────────────────────────────────────────
+  # Brought up with:  docker compose --profile chaos up -d
+  #
+  # Toxiproxy fronts every external dependency so individual chaos scenarios
+  # can inject latency, packet loss, bandwidth throttling, and TCP resets
+  # without modifying the application or its configuration.
+  #
+  # The app-chaos service overrides dependency URLs to point at Toxiproxy
+  # endpoints instead of the real services.
+  #
+  # Admin API:  http://localhost:8474   (add/remove toxics)
+  # TCP proxies (see test/chaos/toxiproxy.json for full list):
+  #   postgres   → localhost:25432
+  #   redis      → localhost:26379
+  #   soroban    → localhost:28080
+  #   horizon    → localhost:28001
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: vortex-toxiproxy
+    restart: unless-stopped
+    profiles: ["chaos"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8474:8474"   # Toxiproxy HTTP API
+      - "25432:25432" # postgres proxy
+      - "26379:26379" # redis proxy
+      - "28080:28080" # soroban-rpc proxy
+      - "28001:28001" # horizon proxy
+    volumes:
+      - ./test/chaos/toxiproxy.json:/etc/toxiproxy/config.json:ro
+    command: ["-host=0.0.0.0", "-config=/etc/toxiproxy/config.json"]
+
+  app-chaos:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vortex-backend-chaos
+    profiles: ["chaos"]
+    depends_on:
+      toxiproxy:
+        condition: service_started
+    environment:
+      <<: *app-env
+      # Override connection URLs to route through Toxiproxy
+      DATABASE_URL: postgresql://vortex:vortex@toxiproxy:25432/vortex?schema=public
+      REDIS_URL: redis://toxiproxy:26379
+      SOROBAN_RPC_URL: http://toxiproxy:28080
+      HORIZON_URL: http://toxiproxy:28001
+      PORT: 4002
+      # Chaos tests are allowlisted to bypass abuse detection
+      ABUSE_ALLOWLIST: "GCHAOSTEST000000000000000000000000000000000000000000000000"
+    ports:
+      - "4002:4002"
+    volumes:
+      - .:/app
+    command: sh -c "npx prisma migrate deploy && npm run dev -- --host 0.0.0.0"
+
+  # Extra horizontally-scaled job worker: `docker compose --profile worker up`.
+  worker:
+    profiles: ["worker"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vortex-worker
+    depends_on:
+      app:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      PROCESS_ROLE: worker
+      PORT: 4001
+    volumes:
+      - .:/app
+    # Migrations are run by the app service.
+    command: npm run dev
+
 volumes:
   postgres-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  tempo-data:

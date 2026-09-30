@@ -19,8 +19,8 @@ export class StellarTokenDto {
   @ApiProperty({ example: 7 })
   decimals!: number;
 
-  @ApiProperty({ example: 0.1182 })
-  priceUSD!: number;
+  @ApiProperty({ example: 0.1182, nullable: true, required: false })
+  priceUSD!: number | null;
 }
 
 export class StellarTokensResponseDto {

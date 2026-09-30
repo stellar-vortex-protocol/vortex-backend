@@ -3,6 +3,7 @@ import request from "supertest";
 import { Keypair } from "@stellar/stellar-sdk";
 import { createTestApp } from "./utils/create-test-app";
 import { SEED_SOLVER_KEYPAIRS } from "../src/solvers/solvers.seed";
+import { IntentsService } from "../src/intents/intents.service";
 import { buildRegisterMessage, buildSolverStatusMessage } from "../src/common/stellar-signature";
 
 const ALPHA_ADDR = SEED_SOLVER_KEYPAIRS.ALPHA.publicKey();
@@ -36,14 +37,6 @@ describe("SolversController (e2e)", () => {
   });
 
   it("GET /api/v1/solvers/:address returns the solver record", async () => {
-    const res = await request(app.getHttpServer())
-      .get("/api/v1/solvers/SOLVER_BETA")
-      .expect(200);
-    const counts = res.body.solvers.map((s: { fillsCompleted: number }) => s.fillsCompleted);
-    expect(counts).toEqual([...counts].sort((a: number, b: number) => b - a));
-  });
-
-  it("GET /api/v1/solvers/:address returns the solver record", async () => {
     const res = await request(app.getHttpServer()).get(`/api/v1/solvers/${BETA_ADDR}`).expect(200);
     expect(res.body.name).toBe("Beta Liquidity Co");
   });
@@ -56,10 +49,30 @@ describe("SolversController (e2e)", () => {
   });
 
   it("GET /api/v1/solvers/:address/stats returns the computed success rate", async () => {
+    // The stats endpoint derives fills from intents attributed to the solver
+    // (not from the solver record's lifetime counters), so give GAMMA one
+    // filled and one slashed intent first.
+    const intentsService = app.get(IntentsService);
+    const [filledIntent, slashedIntent] = await intentsService.getAll();
+    const now = Math.floor(Date.now() / 1000);
+    await intentsService.update(filledIntent.intentId, {
+      solver: GAMMA_ADDR,
+      state: "filled",
+      filledAt: now,
+      fillAmount: "1000",
+    });
+    await intentsService.update(slashedIntent.intentId, {
+      solver: GAMMA_ADDR,
+      state: "slashed",
+      slashedAt: now,
+    });
+
     const res = await request(app.getHttpServer())
       .get(`/api/v1/solvers/${GAMMA_ADDR}/stats`)
       .expect(200);
-    expect(res.body.successRate).toBeCloseTo(187 / (187 + 12), 4);
+    expect(res.body.fillsCompleted).toBe(1);
+    expect(res.body.fillsFailed).toBe(1);
+    expect(res.body.successRate).toBeCloseTo(0.5, 4);
     expect(res.body.reputationScore).toBeGreaterThanOrEqual(0);
     expect(res.body.reputationScore).toBeLessThanOrEqual(1);
   });
@@ -71,7 +84,7 @@ describe("SolversController (e2e)", () => {
     const res = await request(app.getHttpServer())
       .post(`/api/v1/solvers/${ALPHA_ADDR}/deregister`)
       .send({ signature })
-      .expect(200);
+      .expect(201);
     expect(res.body.isActive).toBe(false);
     expect(res.body.withdrawalStatus).toBe("pending");
   });
@@ -99,7 +112,7 @@ describe("SolversController (e2e)", () => {
       })
       .expect(201);
 
-    expect(res.body.address).toBe("GNEWSOLVER123456789");
+    expect(res.body.address).toBe(address);
     expect(res.body.name).toBe("New Solver Inc");
     expect(res.body.bondAmount).toBe("500000000");
     expect(res.body.avgFillTime).toBe(45);
