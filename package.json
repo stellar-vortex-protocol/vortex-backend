@@ -75,7 +75,7 @@
     "viem": "^2.44.4",
     "winston": "^3.13.0",
     "ws": "^8.18.0",
-    "zod": "^3.23.8",
+    "zod": "^4.6.5",
     "@msgpack/msgpack": "^3.0.0"
   },
   "devDependencies": {
