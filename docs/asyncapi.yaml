@@ -42,11 +42,13 @@ info:
 
     * Every broadcast event carries a monotonically increasing `seq`. A client
       that misses frames sends `{ "type": "replay", "fromSeq": <last seen seq> }`
-      to fill the gap; `replay_too_old` means the gap is no longer buffered and
-      a fresh snapshot is required.
+      to fill the gap; `replay_too_old` means the gap is no longer retained
+      (the replay log keeps a bounded window — see `WS_REPLAY_MAX_EVENTS` /
+      `WS_REPLAY_MAX_AGE_MS`) and a fresh snapshot is required.
     * Per-connection server-side filters (`subscribe`) apply to the live feed
-      only; replayed frames are already sequenced events and are returned as
-      they were broadcast.
+      **and** to replayed frames: the replayed window is filtered before it is
+      written to the socket, and `replay_start` / `replay_end` report the
+      number of frames actually sent.
     * Protocol-level errors (`auth_error`, `subscribe_rejected`,
       `replay_too_old`) are delivered as frames — the socket stays open.
 

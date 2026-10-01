@@ -6,6 +6,7 @@ import { IntentsGateway } from "./intents.gateway";
 import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsMaintenanceJobs } from "./intents-maintenance.jobs";
 import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
+import { REPLAY_STORE, createReplayStore } from "./backplane/replay-store";
 import { PrismaIntentsRepository } from "./prisma-intents.repository";
 import { IntentCapabilityIndex } from "./solver-intent-matcher";
 import { SolversModule } from "../solvers/solvers.module";
@@ -45,6 +46,12 @@ import { GovernanceModule } from "../governance/governance.module";
         }
         return new InMemoryIntentsRepository();
       },
+    },
+    // WS replay log (issue #457) — WS_REPLAY_STORE picks the backend
+    // (memory for dev/test, redis for production where it survives restarts).
+    {
+      provide: REPLAY_STORE,
+      useFactory: () => createReplayStore(),
     },
     IntentsService,
     IntentCapabilityIndex,

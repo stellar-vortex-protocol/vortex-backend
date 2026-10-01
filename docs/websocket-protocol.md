@@ -70,9 +70,39 @@ server ── replay_start / intent_* … / replay_end            or replay_too_
 * Every broadcast event carries a monotonically increasing `seq`.
 * A client that misses frames sends `{ "type": "replay", "fromSeq": <last seen seq> }`
   to fill the gap.
-* `replay_too_old` means the gap is no longer buffered; take a fresh snapshot.
+* `replay_too_old` means the gap is no longer retained; take a fresh snapshot.
+  It is the **reset signal**: `oldestAvailableSeq - 1` is the newest `fromSeq`
+  the server can still satisfy.
 * Per-connection filters (`subscribe`) apply to the live feed **and** to
-  replayed events — replay never bypasses server-side filtering.
+  replayed events — filtering happens **server-side**, so a replayed window
+  never delivers events the connection did not ask for and `replay_start` /
+  `replay_end` `count`s report what was actually sent.
+
+#### Durable replay log (issue #457)
+
+Replayed events come from a pluggable `ReplayStore` rather than an
+in-process ring buffer:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `WS_REPLAY_STORE` | `memory` | `memory` — in-process, lost on restart (dev/test, single replica). `redis` — Redis Streams (`XADD`/`XRANGE`), shared sequence counter, durable across restarts and replica switches. |
+| `WS_REPLAY_MAX_EVENTS` | `500` | Count-based retention: keep at most N events, oldest trimmed first. |
+| `WS_REPLAY_MAX_AGE_MS` | `0` | Time-based retention: drop events older than this. `0` disables it. |
+
+Design notes:
+
+* **Sequence numbers are allocated by the store**, so replicas sharing a
+  Redis-backed log can never collide; `connected.seq` is restored from the
+  store after a restart so a reconnecting client can resume exactly where the
+  process left off.
+* **Retention is bounded by count and time** — infinite history is explicitly
+  out of scope; use the REST API for long-range queries.
+* **Replay is server-side filtered and window-bounded**: `since(fromSeq)` reads
+  only the retained window (Redis: paged `XRANGE`), then the connection's
+  filter is applied before anything is written to the socket.
+* **Store outages degrade replay, not the feed**: a failed `append` still
+  delivers the live event (logged loudly), and a failed replay read is logged
+  and dropped instead of crashing the fire-and-forget message dispatcher.
 
 ### Server-side filters and capability scoping
 

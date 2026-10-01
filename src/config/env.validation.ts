@@ -76,6 +76,17 @@ export const envValidationSchema = Joi.object({
   WS_BACKPLANE: Joi.string().valid("memory", "redis").default("memory"),
   REDIS_URL: Joi.string().uri({ scheme: ["redis", "rediss"] }).default("redis://localhost:6379"),
 
+  // ── WebSocket replay log (issue #457) ─────────────────────────────────────
+  // Backend for the sequenced replay log behind `ReplayStore`:
+  //   "memory" (default) — in-process ring, lost on restart (single replica).
+  //   "redis"            — Redis Streams, durable across restarts/replica
+  //                        switches. Requires REDIS_URL.
+  WS_REPLAY_STORE: Joi.string().valid("memory", "redis").default("memory"),
+  // Retention: keep at most this many sequenced events (count boundary).
+  WS_REPLAY_MAX_EVENTS: Joi.number().integer().min(1).default(500),
+  // Retention: drop events older than this many ms (time boundary). 0 = off.
+  WS_REPLAY_MAX_AGE_MS: Joi.number().integer().min(0).default(0),
+
   // ── Persistence adapter selection ─────────────────────────────────────────
   // Controls which repository adapter is used for intents and solvers.
   // "memory" (default) keeps everything in-process — no database required.

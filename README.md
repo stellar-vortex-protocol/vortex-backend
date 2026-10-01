@@ -176,6 +176,9 @@ from those that are safe to leave at their testnet/dev defaults.
 | `SOLVERS_PERSISTENCE` | Recommended | `memory` | Set to `prisma` to persist solver registry to Postgres; `memory` loses solver state on restart |
 | `SOROBAN_FEE_PERCENTILE` | Recommended | `p50` | Raise to `p90` on mainnet for better confirmation speed under load |
 | `WS_MAX_CONNECTIONS` | Recommended | `1000` | Tune to expected solver + frontend connection count |
+| `WS_REPLAY_STORE` | Recommended (multi-replica) | `memory` | Replay log backend for WS `replay` messages; set to `redis` so the sequence window survives restarts and replica switches (requires `REDIS_URL`) |
+| `WS_REPLAY_MAX_EVENTS` | Optional | `500` | Retention boundary for the replay log by count; requests older than the window get `replay_too_old` |
+| `WS_REPLAY_MAX_AGE_MS` | Optional | `0` | Retention boundary for the replay log by age in ms; `0` disables time-based expiry |
 | `SENTRY_DSN` | Recommended | — (Sentry disabled) | Set to your Sentry project DSN for error alerting |
 | `LOG_LEVEL` | Recommended | `debug` | Set to `info` in production — `debug` is too noisy |
 | `LEADER_ELECTION_ENABLED` | Recommended (multi-replica) | `false` | Set to `true` when running N > 1 replicas to ensure singleton workers run on exactly one pod. Requires `DATABASE_URL` to point at a live Postgres instance. **Do not use PgBouncer in transaction-pooling mode** — see [Leader Election runbook](./docs/runbooks/leader-election.md). |

@@ -10,6 +10,7 @@ import { AppConfig } from "../../src/config/configuration";
 import { HttpExceptionFilter } from "../../src/common/http-exception.filter";
 import { PrismaService } from "../../src/prisma/prisma.service";
 import { BODY_SIZE_LIMIT, JSON_MAX_DEPTH } from "../../src/config/limits.config";
+import { REPLAY_STORE, ReplayStore } from "../../src/intents/backplane/replay-store";
 
 /**
  * Minimal PrismaService stand-in for e2e tests.
@@ -30,13 +31,27 @@ export class MockPrismaService {
   };
 }
 
-export async function createTestApp(): Promise<INestApplication> {
-  const moduleRef = await Test.createTestingModule({
+export interface CreateTestAppOptions {
+  /**
+   * Replay log to inject into the gateway (issue #457). Tests pass an
+   * explicit store to simulate durability across an app restart or to set a
+   * small retention window; when omitted the configured default applies.
+   */
+  replayStore?: ReplayStore;
+}
+
+export async function createTestApp(options: CreateTestAppOptions = {}): Promise<INestApplication> {
+  let builder = Test.createTestingModule({
     imports: [AppModule],
   })
     .overrideProvider(PrismaService)
-    .useClass(MockPrismaService)
-    .compile();
+    .useClass(MockPrismaService);
+
+  if (options.replayStore) {
+    builder = builder.overrideProvider(REPLAY_STORE).useValue(options.replayStore);
+  }
+
+  const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication();
 

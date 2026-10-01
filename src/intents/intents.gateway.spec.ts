@@ -1,6 +1,7 @@
 import { ConfigService } from "@nestjs/config";
 import { Keypair } from "@stellar/stellar-sdk";
-import { IntentsGateway, EventRingBuffer } from "./intents.gateway";
+import { IntentsGateway } from "./intents.gateway";
+import { MemoryReplayStore } from "./backplane/memory-replay.store";
 import { IntentsService } from "./intents.service";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
@@ -105,59 +106,17 @@ function createMockClient() {
   };
 }
 
-// ── EventRingBuffer unit tests ─────────────────────────────────────────────
+// ── Replay-store plumbing helpers ──────────────────────────────────────────
 
-describe("EventRingBuffer", () => {
-  it("returns -1 for oldestSeq when empty", () => {
-    const buf = new EventRingBuffer(5);
-    expect(buf.oldestSeq()).toBe(-1);
-  });
-
-  it("returns 0 for latestSeq when empty", () => {
-    const buf = new EventRingBuffer(5);
-    expect(buf.latestSeq()).toBe(0);
-  });
-
-  it("tracks size", () => {
-    const buf = new EventRingBuffer(5);
-    buf.push({ seq: 1, type: "a" });
-    buf.push({ seq: 2, type: "b" });
-    expect(buf.size()).toBe(2);
-  });
-
-  it("evicts oldest when at capacity", () => {
-    const buf = new EventRingBuffer(3);
-    buf.push({ seq: 1, type: "a" });
-    buf.push({ seq: 2, type: "b" });
-    buf.push({ seq: 3, type: "c" });
-    buf.push({ seq: 4, type: "d" }); // evicts seq=1
-    expect(buf.oldestSeq()).toBe(2);
-    expect(buf.size()).toBe(3);
-  });
-
-  it("since returns only events after the given seq", () => {
-    const buf = new EventRingBuffer(10);
-    for (let i = 1; i <= 5; i++) buf.push({ seq: i, type: "e" });
-    const result = buf.since(3);
-    expect(result.map((e) => e.seq)).toEqual([4, 5]);
-  });
-
-  it("since returns empty array when fromSeq >= latestSeq", () => {
-    const buf = new EventRingBuffer(10);
-    buf.push({ seq: 1, type: "e" });
-    expect(buf.since(1)).toEqual([]);
-    expect(buf.since(99)).toEqual([]);
-  });
-
-  it("since returns all events when fromSeq < oldestSeq", () => {
-    const buf = new EventRingBuffer(3);
-    buf.push({ seq: 5, type: "e" });
-    buf.push({ seq: 6, type: "e" });
-    // fromSeq=1 is older than oldest (5), since() returns events with seq > 1 — all
-    const result = buf.since(1);
-    expect(result.map((e) => e.seq)).toEqual([5, 6]);
-  });
-});
+/**
+ * Drain the microtask queue so the now-async replay path
+ * (`handleMessage` → `handleReplay` → `ReplayStore` reads) has settled
+ * before the test inspects the mock client's send log. Native promise
+ * ticks keep running under `jest.useFakeTimers()`.
+ */
+async function flushAsync(turns = 20): Promise<void> {
+  for (let i = 0; i < turns; i++) await Promise.resolve();
+}
 
 // ── IntentsGateway heartbeat tests ────────────────────────────────────────
 
@@ -496,15 +455,23 @@ describe("IntentsGateway — chain subscription filtering (#257)", () => {
 
 // ── #258: Event replay ────────────────────────────────────────────────────
 
-describe("IntentsGateway — event replay (#258)", () => {
+describe("IntentsGateway — event replay (#258 / #457)", () => {
   let gateway: IntentsGateway;
   let intentsService: IntentsService;
+  let replayStore: MemoryReplayStore;
 
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = makeIntentsService();
-    gateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
+    replayStore = new MemoryReplayStore();
+    gateway = new IntentsGateway(
+      intentsService,
+      makeSolversService(),
+      makeIntentIndex(),
+      undefined,
+      replayStore,
+    );
   });
 
   afterEach(() => {
@@ -516,7 +483,7 @@ describe("IntentsGateway — event replay (#258)", () => {
     const client = createMockClient();
     gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
-    // Broadcast 3 events so they land in the ring buffer with seq 1, 2, 3
+    // Broadcast 3 events so they land in the replay store with seq 1, 2, 3
     await gateway.broadcast({ type: "e1" });
     await gateway.broadcast({ type: "e2" });
     await gateway.broadcast({ type: "e3" });
@@ -525,6 +492,7 @@ describe("IntentsGateway — event replay (#258)", () => {
 
     // Request replay from seq=1 (expect events with seq > 1 → seq 2 and 3)
     client._emit("message", Buffer.from(JSON.stringify({ type: "replay", fromSeq: 1 })));
+    await flushAsync();
 
     const calls = client.send.mock.calls.map((c) => JSON.parse(c[0] as string));
     const startMsg = calls.find((m) => m.type === "replay_start");
@@ -539,11 +507,16 @@ describe("IntentsGateway — event replay (#258)", () => {
     expect(endMsg.count).toBe(2);
   });
 
-  it("returns replay_too_old when fromSeq has been evicted from the buffer", async () => {
-    // Use a tiny ring buffer (capacity 2) to force eviction
-    const tinyGateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
-    // @ts-expect-error – accessing private field for test setup
-    tinyGateway.ringBuffer["capacity"] = 2;
+  it("returns replay_too_old when fromSeq has been evicted from the store", async () => {
+    // Use a tiny store (retention 2) to force eviction
+    const tinyStore = new MemoryReplayStore({ maxEvents: 2 });
+    const tinyGateway = new IntentsGateway(
+      intentsService,
+      makeSolversService(),
+      makeIntentIndex(),
+      undefined,
+      tinyStore,
+    );
 
     const client = createMockClient();
     tinyGateway.handleConnection(client as unknown as import("ws").WebSocket);
@@ -557,6 +530,7 @@ describe("IntentsGateway — event replay (#258)", () => {
 
     // seq=1 is now gone; oldest is seq=2. fromSeq=0 < oldest-1=1 → too_old
     client._emit("message", Buffer.from(JSON.stringify({ type: "replay", fromSeq: 0 })));
+    await flushAsync();
 
     const calls = client.send.mock.calls.map((c) => JSON.parse(c[0] as string));
     const tooOld = calls.find((m) => m.type === "replay_too_old");
@@ -577,6 +551,7 @@ describe("IntentsGateway — event replay (#258)", () => {
     client.send.mockClear();
 
     client._emit("message", Buffer.from(JSON.stringify({ type: "replay", fromSeq: lastSeq })));
+    await flushAsync();
 
     const calls = client.send.mock.calls.map((c) => JSON.parse(c[0] as string));
     const startMsg = calls.find((m) => m.type === "replay_start");
@@ -584,12 +559,13 @@ describe("IntentsGateway — event replay (#258)", () => {
     expect(startMsg.count).toBe(0);
   });
 
-  it("ignores replay with missing fromSeq", () => {
+  it("ignores replay with missing fromSeq", async () => {
     const client = createMockClient();
     gateway.handleConnection(client as unknown as import("ws").WebSocket);
     client.send.mockClear();
 
     client._emit("message", Buffer.from(JSON.stringify({ type: "replay" })));
+    await flushAsync();
 
     const calls = client.send.mock.calls.map((c) => JSON.parse(c[0] as string));
     expect(calls.find((m) => m.type === "replay_start")).toBeUndefined();
@@ -603,6 +579,7 @@ describe("IntentsGateway — event replay (#258)", () => {
 
     // Buffer is empty — oldestSeq() = -1, so the not-too-old path is taken
     client._emit("message", Buffer.from(JSON.stringify({ type: "replay", fromSeq: 0 })));
+    await flushAsync();
 
     const calls = client.send.mock.calls.map((c) => JSON.parse(c[0] as string));
     const startMsg = calls.find((m) => m.type === "replay_start");
@@ -612,13 +589,13 @@ describe("IntentsGateway — event replay (#258)", () => {
     expect(endMsg).toBeDefined();
   });
 
-  it("pushes broadcast events into the ring buffer before sending", async () => {
+  it("persists broadcast events in the replay store before sending", async () => {
     const client = createMockClient();
     gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
     await gateway.broadcast({ type: "test_buffered" });
 
-    // @ts-expect-error – accessing private for assertion
-    expect(gateway.ringBuffer.size()).toBe(1);
+    expect(await replayStore.size()).toBe(1);
+    expect(await replayStore.latestSeq()).toBe(1);
   });
 });

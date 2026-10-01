@@ -1,4 +1,4 @@
-import { OnModuleDestroy, Optional } from "@nestjs/common";
+import { Inject, OnModuleDestroy, Optional } from "@nestjs/common";
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
 import type { IncomingMessage } from "node:http";
 import { WebSocket } from "ws";
@@ -9,6 +9,12 @@ import { logger } from "../common/logger";
 import { SUPPORTED_CHAINS, SupportedChain } from "./intents.types";
 import { verifyStellarSignature, buildWsAuthMessage } from "../common/stellar-signature";
 import { buildMatchPredicate, IntentCapabilityIndex, SolverMatchPredicate } from "./solver-intent-matcher";
+import {
+  REPLAY_STORE,
+  type ReplayStore,
+  type SequencedEvent,
+} from "./backplane/replay-store";
+import { MemoryReplayStore } from "./backplane/memory-replay.store";
 import {
   negotiateFromRequest,
   selectWsSubprotocol,
@@ -23,23 +29,9 @@ import {
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
-/**
- * How many sequenced events to keep in the replay buffer.
- *
- * At typical broadcast volume (a few dozen events/minute in production),
- * 500 events covers many minutes of missed events — more than enough to
- * bridge a transient network blip or container restart without forcing a
- * full snapshot re-fetch. Increasing this beyond ~1 000 starts to add
- * non-trivial heap pressure for large event payloads; the current bound
- * is a deliberate memory vs. reconnect-gap tradeoff.
- */
-const REPLAY_BUFFER_SIZE = 500;
-
-export interface SequencedEvent {
-  seq: number;
-  type: string;
-  [key: string]: unknown;
-}
+// Re-exported for backwards compatibility — the type now lives next to the
+// ReplayStore abstraction (issue #457).
+export type { SequencedEvent } from "./backplane/replay-store";
 
 /**
  * Per-subscriber filter (issue #436).
@@ -61,49 +53,6 @@ interface SubscriberFilter {
   wantAll: boolean;
   /** Number of `subscribe` messages this connection has sent. */
   subscriptionCount: number;
-}
-
-/**
- * Fixed-size ring buffer that retains the last `capacity` events so
- * reconnecting clients can request a replay from a known sequence number.
- */
-export class EventRingBuffer {
-  private readonly buf: SequencedEvent[] = [];
-  private readonly capacity: number;
-
-  constructor(capacity = REPLAY_BUFFER_SIZE) {
-    this.capacity = capacity;
-  }
-
-  push(event: SequencedEvent): void {
-    if (this.buf.length >= this.capacity) {
-      this.buf.shift();
-    }
-    this.buf.push(event);
-  }
-
-  /**
-   * Return all buffered events whose seq is strictly greater than `fromSeq`.
-   * Returns an empty array when `fromSeq` is older than the earliest buffered
-   * event (the caller should request a fresh snapshot instead).
-   */
-  since(fromSeq: number): SequencedEvent[] {
-    return this.buf.filter((e) => e.seq > fromSeq);
-  }
-
-  /** Lowest seq still in the buffer, or -1 when empty. */
-  oldestSeq(): number {
-    return this.buf.length === 0 ? -1 : this.buf[0].seq;
-  }
-
-  /** Highest seq in the buffer, or 0 when empty. */
-  latestSeq(): number {
-    return this.buf.length === 0 ? 0 : this.buf[this.buf.length - 1].seq;
-  }
-
-  size(): number {
-    return this.buf.length;
-  }
 }
 
 /**
@@ -139,21 +88,34 @@ export class IntentsGateway
   private readonly authenticatedSolver = new WeakMap<WebSocket, string>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private heartbeatTimer: any;
-  private nextSeq = 1;
+
   private readonly backplane: null | {
     publish: (event: Record<string, unknown>) => void;
     subscribe: (handler: (event: Record<string, unknown>) => void) => void;
   } = null;
 
-  /** Ring buffer storing the last REPLAY_BUFFER_SIZE broadcast events. */
-  private readonly ringBuffer = new EventRingBuffer(REPLAY_BUFFER_SIZE);
+  /**
+   * Replay log (issue #457): memory by default, Redis Streams when
+   * `WS_REPLAY_STORE=redis` — see `./backplane/replay-store.ts`.
+   */
+  private readonly replayStore: ReplayStore;
+
+  /**
+   * Highest sequence number this process has seen (allocated locally, or
+   * observed on the backplane / restored from the store after a restart).
+   * Mirrored synchronously so `handleConnection` can report it in the
+   * `connected` frame without awaiting I/O.
+   */
+  private seqMirror = 0;
 
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
     private readonly intentIndex: IntentCapabilityIndex,
     @Optional() private readonly metricsService?: MetricsService,
+    @Optional() @Inject(REPLAY_STORE) replayStore?: ReplayStore,
   ) {
+    this.replayStore = replayStore ?? new MemoryReplayStore();
     this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
     this.backplane = this.createBackplane();
     if (this.backplane) {
@@ -163,7 +125,20 @@ export class IntentsGateway
         this.dispatchRemoteEvent(event as Record<string, unknown>);
       });
     }
+    // Restore the sequence position from the durable store (issue #457): after
+    // a restart the `connected` frame reports the real end of the log instead
+    // of 0, so clients can resume from where the process left off.
+    void this.primeSeqMirror();
     logger.info("ws heartbeat started");
+  }
+
+  private async primeSeqMirror(): Promise<void> {
+    try {
+      const latest = await this.replayStore.latestSeq();
+      if (latest > this.seqMirror) this.seqMirror = latest;
+    } catch (err) {
+      logger.warn(`ws replay store unavailable at startup: ${(err as Error).message}`);
+    }
   }
 
   private createBackplane(): null | {
@@ -227,6 +202,13 @@ export class IntentsGateway
     const type = typeof event.type === "string" ? event.type : "";
     if (!type || type === "connected" || type === "snapshot" || type === "subscribed") return;
 
+    // Keep the sequence mirror honest so `connected` reports a useful resume
+    // point even for events this replica only fanned out (issue #457).
+    const seq = event.seq;
+    if (typeof seq === "number" && Number.isFinite(seq) && seq > this.seqMirror) {
+      this.seqMirror = seq;
+    }
+
     const payload = JSON.stringify(event);
     const chain = this.getEventChainSync(event as { type: string; [key: string]: unknown });
     this.deliverToMatchingSubscribers(payload, chain, event as { type: string; [key: string]: unknown });
@@ -251,18 +233,62 @@ export class IntentsGateway
   }
 
   /**
-   * Deliver a pre-serialised event payload to every matching subscriber.
+   * Decide whether one subscriber should receive one event — the single
+   * source of truth for both the live feed and replays (issue #457), so a
+   * replayed window can never disagree with what was delivered live.
    *
    * Delivery rules (evaluated in order):
-   * 1. Client is not OPEN → skip.
-   * 2. Client set wantAll=true → always deliver.
-   * 3. Client has a solver capability predicate:
+   * 1. Client set wantAll=true → always deliver.
+   * 2. Client has a solver capability predicate:
    *    a. Event carries an inlined intent → apply predicate to that intent.
    *    b. Event is a state-transition (only intentId available) → deliver
    *       (we cannot efficiently look up the intent here; the solver would
    *       already have received the intent_created event through the filter).
-   * 4. Client has a plain chain filter (`chains != null`) → apply chain match.
-   * 5. No filter → full unfiltered feed (backward-compatible default).
+   * 3. Client has a plain chain filter (`chains != null`) → apply chain match.
+   * 4. No filter → full unfiltered feed (backward-compatible default).
+   *
+   * @param chain - Event chain resolved by the caller (`getEventChain` on the
+   *   live path, `getEventChainSync` when replaying); `null` when unknown,
+   *   which delivers rather than drops (safe default).
+   */
+  private matchesFilter(
+    filter: SubscriberFilter,
+    event: { type: string; [key: string]: unknown },
+    chain: SupportedChain | null = this.getEventChainSync(event),
+  ): boolean {
+    // Opt-out: solver requested full feed.
+    if (filter.wantAll) return true;
+
+    // Authenticated solver — apply capability predicate.
+    if (filter.solver !== null) {
+      const inlinedIntent = (event as { intent?: unknown }).intent;
+
+      // intent_created carries a full intent object we can test directly.
+      if (event.type === "intent_created" && inlinedIntent && typeof inlinedIntent === "object") {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return filter.solver.matches(inlinedIntent as any);
+      }
+
+      // State-transition events: the solver already filtered on intent_created,
+      // so we pass them through to keep the feed self-consistent.
+      return true;
+    }
+
+    // No filter set → full unfiltered feed (backward-compatible default).
+    if (filter.chains === null) return true;
+
+    // Chain couldn't be resolved → deliver to everyone (safe default).
+    if (chain === null) return true;
+
+    // Only send if the event's chain is in this subscriber's filter.
+    return filter.chains.has(chain);
+  }
+
+  /**
+   * Deliver a pre-serialised event payload to every matching subscriber.
+   *
+   * The match decision itself lives in {@link matchesFilter}; this loop only
+   * serialises sends and the solver delivered/filtered metrics.
    */
   private deliverToMatchingSubscribers(
     payload: string,
@@ -272,52 +298,26 @@ export class IntentsGateway
     for (const [client, filter] of this.subscribers) {
       if (client.readyState !== WebSocket.OPEN) continue;
 
-      // Opt-out: solver requested full feed.
-      if (filter.wantAll) {
-        client.send(payload);
-        continue;
-      }
+      const match = this.matchesFilter(filter, event, chain);
 
-      // Authenticated solver — apply capability predicate.
-      if (filter.solver !== null) {
-        const solverPredicate = filter.solver;
-        const inlinedIntent = (event as { intent?: unknown }).intent;
-
-        // intent_created carries a full intent object we can test directly.
-        if (event.type === "intent_created" && inlinedIntent && typeof inlinedIntent === "object") {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const matches = solverPredicate.matches(inlinedIntent as any);
-          if (matches) {
-            client.send(payload);
-            try { this.metricsService?.incWsDelivered(solverPredicate.solverAddress); } catch { /* noop */ }
-          } else {
-            try { this.metricsService?.incWsFiltered(solverPredicate.solverAddress); } catch { /* noop */ }
-          }
-          continue;
+      if (!match) {
+        // Only intent_created mismatches are attributable to the capability
+        // predicate (chain-filter drops were never metered — unchanged).
+        if (
+          filter.solver !== null &&
+          !filter.wantAll &&
+          event.type === "intent_created" &&
+          (event as { intent?: unknown }).intent !== undefined
+        ) {
+          try { this.metricsService?.incWsFiltered(filter.solver.solverAddress); } catch { /* noop */ }
         }
-
-        // State-transition events: the solver already filtered on intent_created,
-        // so we pass them through to keep the feed self-consistent.
-        client.send(payload);
-        try { this.metricsService?.incWsDelivered(solverPredicate.solverAddress); } catch { /* noop */ }
         continue;
       }
 
-      // No filter set → full unfiltered feed (backward-compatible default).
-      if (filter.chains === null) {
-        client.send(payload);
-        continue;
-      }
+      client.send(payload);
 
-      // Chain couldn't be resolved → deliver to everyone (safe default).
-      if (chain === null) {
-        client.send(payload);
-        continue;
-      }
-
-      // Only send if the event's chain is in this subscriber's filter.
-      if (filter.chains.has(chain)) {
-        client.send(payload);
+      if (filter.solver !== null && !filter.wantAll) {
+        try { this.metricsService?.incWsDelivered(filter.solver.solverAddress); } catch { /* noop */ }
       }
     }
   }
@@ -371,7 +371,7 @@ export class IntentsGateway
       );
     });
 
-    const currentSeq = this.nextSeq - 1;
+    const currentSeq = this.seqMirror;
 
     this.sendFrame(client, {
       type: "connected",
@@ -485,7 +485,7 @@ export class IntentsGateway
         this.handleSubscribe(client, msg);
         break;
       case "replay":
-        this.handleReplay(client, msg);
+        await this.handleReplay(client, msg);
         break;
       case "auth":
         await this.handleAuth(client, msg);
@@ -589,8 +589,15 @@ export class IntentsGateway
 
   /**
    * Process a `{ type: "replay", fromSeq: number }` message.
+   *
+   * Events are read from the {@link ReplayStore} (issue #457) and passed
+   * through this connection's filter **server-side** before being sent, so a
+   * replayed window respects chain/solver scoping exactly like the live feed
+   * and a client never receives events it did not subscribe to. The window is
+   * bounded by the store's retention — `replay_too_old` is the reset signal
+   * when `fromSeq` predates it.
    */
-  private handleReplay(client: WebSocket, msg: Record<string, unknown>): void {
+  private async handleReplay(client: WebSocket, msg: Record<string, unknown>): Promise<void> {
     const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : null;
     if (fromSeq === null || !Number.isInteger(fromSeq) || fromSeq < 0) {
       logger.debug("ws replay ignored: fromSeq missing or invalid");
@@ -599,7 +606,18 @@ export class IntentsGateway
 
     if (client.readyState !== WebSocket.OPEN) return;
 
-    const oldest = this.ringBuffer.oldestSeq();
+    let oldest: number;
+    try {
+      oldest = await this.replayStore.oldestSeq();
+    } catch (err) {
+      // Store outage: log and emit nothing. Emitting `replay_too_old` would
+      // need an `oldestAvailableSeq >= 1` we cannot honestly report (the
+      // documented minimum), and silently returning keeps the dispatcher —
+      // which is fire-and-forget — free of unhandled rejections. The live
+      // feed is unaffected; the client falls back to its snapshot.
+      logger.warn(`ws replay ignored: replay store unavailable (${(err as Error).message})`);
+      return;
+    }
 
     if (oldest !== -1 && fromSeq < oldest - 1) {
       this.sendFrame(client, {
@@ -611,28 +629,39 @@ export class IntentsGateway
       return;
     }
 
-    const events = this.ringBuffer.since(fromSeq);
+    let events: SequencedEvent[];
+    try {
+      events = await this.replayStore.since(fromSeq);
+    } catch (err) {
+      logger.warn(`ws replay ignored: replay store unavailable (${(err as Error).message})`);
+      return;
+    }
+
+    const filter = this.subscribers.get(client);
+    const matched = filter
+      ? events.filter((event) => this.matchesFilter(filter, event))
+      : events;
 
     this.sendFrame(client, {
       type: "replay_start",
       fromSeq,
-      count: events.length,
+      count: matched.length,
     });
 
     // Replayed events were schema-checked once when they were broadcast, so
     // they are sent directly here — re-validating a 10k-event burst per
     // client would dominate the replay budget (issue #457).
-    for (const event of events) {
+    for (const event of matched) {
       if (client.readyState !== WebSocket.OPEN) break;
       client.send(JSON.stringify(event));
     }
 
     this.sendFrame(client, {
       type: "replay_end",
-      count: events.length,
+      count: matched.length,
     });
 
-    logger.debug(`ws replay complete: fromSeq=${fromSeq} count=${events.length}`);
+    logger.debug(`ws replay complete: fromSeq=${fromSeq} count=${matched.length}`);
   }
 
   /**
@@ -776,8 +805,9 @@ export class IntentsGateway
   }
 
   /**
-   * Assign a monotonically increasing sequence number, push the event into
-   * the ring buffer, then deliver it to every subscriber whose filter matches.
+   * Assign a monotonically increasing sequence number, persist the event in
+   * the replay store (issue #457), then deliver it to every subscriber whose
+   * filter matches.
    *
    * For authenticated solvers without `all=true`, only intents matching their
    * capability predicate are delivered.  State-transition events (no inlined
@@ -789,15 +819,25 @@ export class IntentsGateway
    */
   async broadcast(event: { type: string; [key: string]: unknown }): Promise<void> {
     const enqueuedAt = Date.now();
-    const seq = this.nextSeq++;
-    const sequencedEvent: SequencedEvent = { ...event, seq };
+
+    // Assign the sequence number and persist the event in one step
+    // (issue #457). The store is the authority for `seq`, so replicas
+    // sharing a Redis-backed log never collide; a store outage degrades
+    // replay (logged loudly) instead of dropping the live feed.
+    let sequencedEvent: SequencedEvent;
+    try {
+      sequencedEvent = await this.replayStore.append(event);
+    } catch (err) {
+      sequencedEvent = { ...event, seq: this.seqMirror + 1 } as SequencedEvent;
+      logger.warn(
+        `ws replay store append failed — event delivered but not replayable: ${(err as Error).message}`,
+      );
+    }
+    if (sequencedEvent.seq > this.seqMirror) this.seqMirror = sequencedEvent.seq;
 
     // Update the capability index before delivery so a racing replay or
     // eligible-intents call sees fresh state.
     this.updateIndexForEvent(event);
-
-    // Push into replay buffer before sending.
-    this.ringBuffer.push(sequencedEvent);
 
     // Issue #456 — validate the sequenced event once per broadcast (not once
     // per subscriber) outside production. Advisory only: an event that no
@@ -813,7 +853,7 @@ export class IntentsGateway
       }
     }
 
-    logger.debug(`ws broadcast type=${event.type} seq=${seq} subscribers=${this.subscribers.size}`);
+    logger.debug(`ws broadcast type=${event.type} seq=${sequencedEvent.seq} subscribers=${this.subscribers.size}`);
 
     if (this.backplane) {
       this.backplane.publish(sequencedEvent as Record<string, unknown>);
@@ -895,5 +935,8 @@ export class IntentsGateway
       client.close(WS_CLOSE_GOING_AWAY, "Server shutting down");
       this.removeSubscriber(client);
     }
+    // Release the replay store's resources (no-op in memory mode; disconnects
+    // the Redis client when WS_REPLAY_STORE=redis — issue #457).
+    void this.replayStore.close?.();
   }
 }
