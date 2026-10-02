@@ -10,7 +10,7 @@ import { VersionConflict } from "./intents.repository";
  * endpoints; a mismatch yields `412 Precondition Failed` (RFC 9110 §13.1.1).
  */
 export function etagFor(intent: Pick<Intent, "version">): string {
-  return `"${intent.version}"`;
+  return `"${intent.version ?? 0}"`;
 }
 
 /**

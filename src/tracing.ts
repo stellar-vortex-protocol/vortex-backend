@@ -38,6 +38,7 @@ import {
   Link,
   Span,
   Context,
+  Attributes,
 } from "@opentelemetry/api";
 import {
   ParentBasedSampler,
@@ -88,7 +89,7 @@ class AlwaysSampleErrorsAndSlowSampler implements Sampler {
     traceId: string,
     spanName: string,
     spanKind: SpanKind,
-    attributes: Record<string, unknown>,
+    attributes: Attributes,
     links: Link[],
   ): SamplingResult {
     return this.fallback.shouldSample(ctx, traceId, spanName, spanKind, attributes, links);

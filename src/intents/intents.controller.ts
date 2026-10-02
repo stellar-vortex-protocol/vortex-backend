@@ -1,260 +1,16 @@
 import {
   BadRequestException,
   Body,
-  Controller,
-  Get,
-  HttpCode,
-  NotFoundException,
-  Param,
-  Post,
-  Query,
-  Res,
-} from "@nestjs/common";
-import { ApiHeader, ApiOperation, ApiParam, ApiQuery, ApiTags } from "@nestjs/swagger";
-import type { Response } from "express";
-import { IntentsService } from "./intents.service";
-import { BatchLookupDto } from "./dto/batch-lookup.dto";
-import { AcceptIntentDto } from "./dto/accept-intent.dto";
-import { ListIntentsDto } from "./dto/list-intents.dto";
-import { Intent } from "./intents.types";
-import {
-  PaginatedResponse,
-  encodeCursor,
-  decodeCursor,
-  hashFilter,
-  getCursorSecret,
-  DEFAULT_PAGE_SIZE,
-  MAX_OFFSET,
-} from "../common/pagination";
-
-/**
- * REST controller for intent lifecycle (#412 pagination, #410 FK columns).
- *
- * All list endpoints use keyset pagination.  Legacy `offset` params are still
- * accepted but deprecated: callers receive a `Deprecation` response header.
- */
-@ApiTags("intents")
-@Controller("api/v1/intents")
-export class IntentsController {
-  constructor(private readonly intentsService: IntentsService) {}
-
-  // ─── List intents ─────────────────────────────────────────────────────────
-
-  @Get()
-  @ApiOperation({ summary: "List intents (keyset-paginated)" })
-  async list(
-    @Query() query: ListIntentsDto,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<PaginatedResponse<Intent>> {
-    return this.listPage(query, res);
-  }
-
-  // ─── Get by user ──────────────────────────────────────────────────────────
-
-  @Get("user/:addr")
-  @ApiOperation({ summary: "List intents for a user (keyset-paginated)" })
-  @ApiParam({ name: "addr", description: "User Stellar or EVM address" })
-  async listByUser(
-    @Param("addr") addr: string,
-    @Query() query: ListIntentsDto,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<PaginatedResponse<Intent>> {
-    return this.listPage({ ...query, user: addr }, res);
-  }
-
-  // ─── Get single intent ────────────────────────────────────────────────────
-
-  @Get(":id")
-  @ApiOperation({ summary: "Get intent by ID" })
-  async getById(@Param("id") id: string): Promise<Intent> {
-    const intent = await this.intentsService.get(id);
-    if (!intent) throw new NotFoundException(`Intent ${id} not found`);
-    return intent;
-  }
-
-  // ─── Batch lookup ─────────────────────────────────────────────────────────
-
-  @Post("batch")
-  @HttpCode(200)
-  @ApiOperation({ summary: "Batch-fetch intents by IDs" })
-  async batchLookup(@Body() dto: BatchLookupDto): Promise<Intent[]> {
-    return this.intentsService.getMany(dto.intentIds);
-  }
-
-  // ─── Audit log ────────────────────────────────────────────────────────────
-
-  /**
-   * GET /api/v1/intents/:id/audit — keyset-paginated audit log (#412).
-   *
-   * Returns audit entries for the given intent in newest-first order.
-   * The `offset` param is deprecated; use `cursor` instead.
-   */
-  @Get(":id/audit")
-  @ApiOperation({ summary: "Intent audit log (keyset-paginated)" })
-  @ApiQuery({ name: "limit", required: false, type: Number })
-  @ApiQuery({ name: "cursor", required: false, type: String })
-  @ApiQuery({ name: "offset", required: false, type: Number, deprecated: true })
-  async getAuditLog(
-    @Param("id") id: string,
-    @Query("limit") rawLimit?: string,
-    @Query("cursor") cursor?: string,
-    @Query("offset") rawOffset?: string,
-    @Res({ passthrough: true }) res?: Response,
-  ): Promise<PaginatedResponse<unknown>> {
-    const intent = await this.intentsService.get(id);
-    if (!intent) throw new NotFoundException(`Intent ${id} not found`);
-
-    const limit = Math.min(parseInt(rawLimit ?? String(DEFAULT_PAGE_SIZE), 10) || DEFAULT_PAGE_SIZE, 100);
-    const offset = rawOffset !== undefined ? parseInt(rawOffset, 10) : undefined;
-
-    if (offset !== undefined && !Number.isNaN(offset)) {
-      if (offset > MAX_OFFSET) {
-        throw new BadRequestException(`offset exceeds maximum of ${MAX_OFFSET}; use cursor pagination`);
-      }
-      res?.setHeader("Deprecation", "true");
-      res?.setHeader("Link", `</api/v1/intents/${id}/audit>; rel="successor-version"`);
-    }
-
-    const allEntries = this.intentsService.getAuditLog(id);
-    const skip = cursor
-      ? this.auditCursorToOffset(cursor, id)
-      : (offset ?? 0);
-    const page = allEntries.slice(skip, skip + limit);
-    const hasMore = skip + limit < allEntries.length;
-    const nextCursor = hasMore
-      ? this.encodeAuditCursor(skip + limit, id)
-      : null;
-
-    return new PaginatedResponse(page, nextCursor);
-  }
-
-  // ─── Accept / Fill / Cancel ───────────────────────────────────────────────
-
-  @Post(":id/accept")
-  @HttpCode(200)
-  @ApiOperation({ summary: "Accept an intent" })
-  @ApiHeader({ name: "X-Idempotency-Key", required: false })
-  async accept(
-    @Param("id") id: string,
-    @Body() dto: AcceptIntentDto,
-  ): Promise<Intent> {
-    const updated = await this.intentsService.acceptIfOpen(id, dto.solver);
-    if (!updated) throw new BadRequestException("Intent is not open or past deadline");
-    return updated;
-  }
-
-  @Post(":id/cancel")
-  @HttpCode(200)
-  @ApiOperation({ summary: "Cancel an open intent" })
-  async cancel(@Param("id") id: string): Promise<Intent> {
-    const updated = await this.intentsService.cancelIfOpen(id);
-    if (!updated) throw new BadRequestException("Intent is not open");
-    return updated;
-  }
-
-  // ─── Private helpers ──────────────────────────────────────────────────────
-
-  /**
-   * Core list logic shared by GET /intents and GET /intents/user/:addr.
-   */
-  private async listPage(
-    query: ListIntentsDto & { user?: string },
-    res: Response,
-  ): Promise<PaginatedResponse<Intent>> {
-    const limit = Math.min(query.limit ?? DEFAULT_PAGE_SIZE, 100);
-    const secret = getCursorSecret();
-
-    // Build a filter fingerprint to bind the cursor.
-    const filterObj: Record<string, unknown> = {};
-    if (query.state) filterObj.state = query.state;
-    if (query.user) filterObj.user = query.user;
-    if (query.chain) filterObj.chain = query.chain;
-    const filterHash = hashFilter(filterObj);
-
-    // Deprecated offset fallback.
-    let offset: number | undefined;
-    if (query.offset !== undefined) {
-      if (query.offset > MAX_OFFSET) {
-        throw new BadRequestException(`offset exceeds maximum of ${MAX_OFFSET}; use cursor pagination`);
-      }
-      res.setHeader("Deprecation", "true");
-      res.setHeader("Link", "</api/v1/intents>; rel=\"successor-version\"");
-      offset = query.offset;
-    }
-
-    // Decode cursor position.
-    let cursorPayload: { createdAt: number; id: string } | undefined;
-    if (query.cursor) {
-      cursorPayload = decodeCursor(query.cursor, secret, filterHash);
-    }
-
-    // Fetch all matching intents (sorted createdAt DESC, intentId ASC).
-    let all: Intent[];
-    if (query.state) {
-      all = await this.intentsService.getByState(query.state);
-    } else if (query.user) {
-      all = await this.intentsService.getByUser(query.user);
-    } else {
-      all = await this.intentsService.getAll();
-    }
-
-    // Apply chain filter in-memory (fast path for in-memory adapter).
-    if (query.chain) {
-      all = all.filter((i) => i.srcChain === query.chain);
-    }
-
-    // Sort: createdAt DESC, intentId ASC (stable tie-breaker).
-    all.sort((a, b) => {
-      if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
-      return a.intentId.localeCompare(b.intentId);
-    });
-
-    // Seek to cursor position.
-    let startIdx = offset ?? 0;
-    if (cursorPayload) {
-      const pos = all.findIndex(
-        (i) => i.createdAt < cursorPayload!.createdAt ||
-          (i.createdAt === cursorPayload!.createdAt && i.intentId > cursorPayload!.id),
-      );
-      startIdx = pos === -1 ? all.length : pos;
-    }
-
-    const page = all.slice(startIdx, startIdx + limit);
-    const hasMore = startIdx + limit < all.length;
-
-    let nextCursor: string | null = null;
-    if (hasMore && page.length > 0) {
-      const last = page[page.length - 1];
-      nextCursor = encodeCursor({ createdAt: last.createdAt, id: last.intentId, filterHash }, secret);
-    }
-
-    return new PaginatedResponse(page, nextCursor);
-  }
-
-  /**
-   * Encode an audit-log offset as an opaque cursor.
-   * The cursor is intentId-scoped so it cannot be used against a different intent.
-   */
-  private encodeAuditCursor(offset: number, intentId: string): string {
-    const secret = getCursorSecret();
-    return encodeCursor({ createdAt: offset, id: intentId, filterHash: hashFilter({ intentId }) }, secret);
-  }
-
-  private auditCursorToOffset(cursor: string, intentId: string): number {
-    const secret = getCursorSecret();
-    const filterHash = hashFilter({ intentId });
-    const payload = decodeCursor(cursor, secret, filterHash);
-    return payload.createdAt; // createdAt field holds the offset for audit log cursors
   ConflictException,
   Controller,
   ForbiddenException,
   Get,
   GoneException,
   NotFoundException,
-  Optional,
   Param,
   Post,
   Query,
+  UnprocessableEntityException,
   UseGuards,
 } from "@nestjs/common";
 import {
@@ -268,28 +24,35 @@ import {
   ApiTooManyRequestsResponse,
   ApiOperation,
   ApiServiceUnavailableResponse,
+  ApiUnprocessableEntityResponse,
 } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
-import { SolverGriefingService } from "../solvers/solver-griefing.service";
 import { TokensService } from "../tokens/tokens.service";
 import { RoutingService } from "../routing/routing.service";
-import { MAX_OPEN_INTENTS_PER_USER } from "./intents.service";
+import { MAX_OPEN_INTENTS_PER_USER, NewIntentData } from "./intents.service";
 import { CreateIntentDto } from "./dto/create-intent.dto";
 import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
+import { AmendIntentDto } from "./dto/amend-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
 import { QuoteResponseDto } from "./dto/quote-response.dto";
 import { ListIntentsDto } from "./dto/list-intents.dto";
 import { BatchLookupDto } from "./dto/batch-lookup.dto";
+import {
+  BatchCreateIntentsDto,
+  BatchCreateIntentsResponseDto,
+} from "./dto/batch-create-intents.dto";
+import { BATCH_CREATE_MAX_INTENTS } from "../config/limits.config";
 import { UserThrottlerGuard } from "./user-throttler.guard";
 import {
   verifyStellarSignature,
   buildAcceptMessage,
+  buildAmendMessage,
   buildCancelMessage,
   buildFillMessage,
 } from "../common/stellar-signature";
@@ -313,12 +76,11 @@ import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
 
 @ApiTags("intents")
-@Controller("api/v1/intents")
+@Controller({ path: "intents", version: "1" })
 export class IntentsController {
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
-    @Optional() private readonly griefingService: SolverGriefingService | null,
     private readonly intentsGateway: IntentsGateway,
     private readonly tokensService: TokensService,
     private readonly routingService: RoutingService,
@@ -575,6 +337,88 @@ export class IntentsController {
     return { intents, count: intents.length };
   }
 
+  /**
+   * POST /api/v1/intents/batch-create
+   *
+   * Issue #429 — Atomic batch intent creation endpoint.
+   * Creates up to N intents atomically (all-or-nothing) with per-item validation errors.
+   */
+  @Post("batch-create")
+  @UseGuards(UserThrottlerGuard, KillSwitchGuard)
+  @KillSwitchGate({ operation: "create" })
+  @ApiOperation({
+    summary: "Create multiple intents atomically",
+    description:
+      "Creates up to 50 intents in a single atomic (all-or-nothing) request. " +
+      "If any item fails validation or exceeds open intent limits, zero intents are created " +
+      "and per-item errors are reported.",
+  })
+  @ApiOkResponse({ type: BatchCreateIntentsResponseDto })
+  @ApiBadRequestResponse({ description: "Invalid request payload or empty batch" })
+  @ApiUnprocessableEntityResponse({ description: "Per-item validation errors or limits exceeded" })
+  async batchCreate(@Body() dto: BatchCreateIntentsDto) {
+    if (!dto.intents || !Array.isArray(dto.intents) || dto.intents.length === 0) {
+      throw new BadRequestException("Intents array must contain at least 1 item");
+    }
+
+    if (dto.intents.length > BATCH_CREATE_MAX_INTENTS) {
+      throw new BadRequestException(
+        `Batch size exceeds maximum allowed limit of ${BATCH_CREATE_MAX_INTENTS}`,
+      );
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const items: NewIntentData[] = [];
+
+    for (let i = 0; i < dto.intents.length; i++) {
+      const itemDto = dto.intents[i];
+      const srcToken = await this.tokensService.resolveSrcTokenOrThrow(
+        itemDto.srcChain as SupportedChain,
+        itemDto.srcTokenAddress,
+      );
+      const dstToken = await this.tokensService.resolveDstTokenOrThrow(itemDto.dstTokenContract);
+
+      items.push({
+        user: itemDto.user,
+        srcChain: itemDto.srcChain,
+        srcToken: {
+          address: itemDto.srcTokenAddress,
+          symbol: itemDto.srcTokenSymbol,
+          name: itemDto.srcTokenSymbol,
+          decimals: itemDto.srcTokenDecimals,
+          chain: itemDto.srcChain,
+          priceUSD: srcToken?.priceUSD,
+        },
+        srcAmount: itemDto.srcAmount,
+        dstToken: {
+          contract: itemDto.dstTokenContract,
+          symbol: itemDto.dstTokenSymbol,
+          decimals: itemDto.dstTokenDecimals,
+          priceUSD: dstToken?.priceUSD,
+        },
+        minDstAmount: itemDto.minDstAmount,
+        deadline: itemDto.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[itemDto.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
+      });
+    }
+
+    const result = await this.intentsService.createBatch(items);
+
+    if (result.errors.length > 0) {
+      throw new UnprocessableEntityException({
+        statusCode: 422,
+        message: "Batch intent creation failed validation",
+        created: [],
+        errors: result.errors,
+      });
+    }
+
+    for (const intent of result.created) {
+      this.intentsGateway.broadcast({ type: "intent_created", intent });
+    }
+
+    return { created: result.created, errors: [] };
+  }
+
   @Post(":id/accept")
   @UseGuards(KillSwitchGuard)
   @KillSwitchGate({ operation: "accept" })
@@ -616,16 +460,6 @@ export class IntentsController {
     if (this.solversService.isSuspended(dto.solver)) {
       throw new ForbiddenException("Solver is suspended by an active guardian action");
     }
-    // Anti-griefing enforcement (issue #453): check rolling unfilled-accept
-    // ratio before allowing the accept.  Canary solvers are exempt — their
-    // fills are synthetic and must not inflate the enforcement counters.
-    if (!this.canary.has(dto.solver) && this.griefingService) {
-      const currentOpenAccepts = await this.intentsService.getAcceptedCountBySolver(dto.solver);
-      const griefingCheck = this.griefingService.checkAcceptAllowed(dto.solver, currentOpenAccepts, now);
-      if (!griefingCheck.allowed) {
-        throw new ForbiddenException(griefingCheck.reason ?? "Solver is blocked by anti-griefing controls");
-      }
-    }
     // Canary intents pair only with canary solvers (issue #496) so synthetic
     // traffic never affects real solvers' stats or real users' fills.
     if (isCanaryIntent(intent, this.canary) !== this.canary.has(dto.solver)) {
@@ -645,10 +479,6 @@ export class IntentsController {
     this.intentsService.appendAuditEntry(id, "accepted", dto.solver, "solver accepted", {
       deadline: updated.deadline,
     });
-    // Anti-griefing: record the accept in the rolling window (issue #453).
-    if (!this.canary.has(dto.solver) && this.griefingService) {
-      this.griefingService.recordAccept(dto.solver, id, now);
-    }
     this.intentsGateway.broadcast({
       type: "intent_accepted",
       intentId: id,
@@ -762,6 +592,55 @@ export class IntentsController {
 
     this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
     return updated;
+  }
+
+  /**
+   * Issue #569 — amend the terms of an open intent.
+   *
+   * Replaces `minDstAmount` and `deadline` on an intent that is still `open`
+   * and whose deadline has not passed. Both replacement values are covered by
+   * the creator's Ed25519 signature (see `buildAmendMessage`), so neither can
+   * change without the owner's consent. The write itself goes through
+   * `amendIfOpen`, whose state + deadline predicates make it race-free against
+   * a concurrent accept, and it deliberately does not bump `version` —
+   * widening the user's terms does not compete with solver writes.
+   */
+  @Post(":id/amend")
+  @ApiNotFoundResponse({ description: "Intent not found" })
+  @ApiForbiddenResponse({ description: "Unauthorized" })
+  @ApiConflictResponse({ description: "Intent is not amendable" })
+  async amend(@Param("id") id: string, @Body() dto: AmendIntentDto): Promise<Intent> {
+    const intent = await this.intentsService.get(id);
+    if (!intent) throw new NotFoundException("Intent not found");
+    if (intent.user.toLowerCase() !== dto.user.toLowerCase()) {
+      throw new ForbiddenException("Unauthorized");
+    }
+
+    // The signature must cover the replacement values themselves, so a
+    // tampered minDstAmount or deadline fails verification before any write.
+    verifyStellarSignature(
+      dto.user,
+      buildAmendMessage(id, dto.user, dto.minDstAmount, dto.deadline),
+      dto.signature,
+    );
+
+    const amended = await this.intentsService.amendIfOpen(id, {
+      minDstAmount: dto.minDstAmount,
+      deadline: dto.deadline,
+    });
+    if (!amended) {
+      const current = await this.intentsService.get(id);
+      throw new ConflictException(`Cannot amend intent in state: ${current?.state ?? "unknown"}`);
+    }
+
+    this.intentsService.appendAuditEntry(id, "open", dto.user, "user amended", {
+      previousMinDstAmount: intent.minDstAmount,
+      minDstAmount: dto.minDstAmount,
+      previousDeadline: intent.deadline,
+      deadline: dto.deadline,
+    });
+
+    return amended;
   }
 
   /**

@@ -106,7 +106,7 @@ export class ArchivalService {
     let cursor: string | undefined;
     let fileIndex = 0;
 
-    while (true) {
+    for (;;) {
       const batch = await this.prisma.withStatsTimeout((tx) =>
         (tx as unknown as typeof this.prisma).intent.findMany({
           where: {
@@ -204,7 +204,7 @@ export class ArchivalService {
       let auditCursor = 0n;
       let auditFileIndex = 0;
 
-      while (true) {
+      for (;;) {
         const auditBatch = await this.prisma.withStatsTimeout((tx) =>
           (tx as unknown as typeof this.prisma).intentAuditLog.findMany({
             where: {

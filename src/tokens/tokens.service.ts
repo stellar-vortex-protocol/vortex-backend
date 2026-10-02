@@ -1,7 +1,7 @@
 import { BadRequestException, Inject, Injectable } from "@nestjs/common";
 import { SUPPORTED_TOKENS, StellarToken } from "./tokens.data";
 import { SupportedChain } from "../intents/intents.types";
-import { ITokensRepository, TOKENS_REPOSITORY, TokenRecord } from "./tokens.repository";
+import { ITokensRepository, TOKENS_REPOSITORY, TokenRecord, TokenStatus } from "./tokens.repository";
 
 /**
  * A resolved source-chain (EVM or Stellar source) token — always has a
@@ -68,15 +68,7 @@ export class TokensService {
   async resolveSrcToken(chain: SupportedChain, address: string): Promise<ResolvedSrcToken | undefined> {
     const token = await this.repo.findByAddressAndChain(address, chain);
     if (!token) return undefined;
-    return {
-      kind: "src",
-      address: token.address,
-      symbol: token.symbol,
-      name: token.name,
-      decimals: token.decimals,
-      chain,
-      priceUSD: token.priceUsd ?? 0,
-    };
+    return this.toResolvedSrcToken(token, chain);
   }
 
   /**
@@ -102,20 +94,42 @@ export class TokensService {
    * returning `undefined` when the chain + address does not resolve to a token
    * in the configured registry (issue #276).
    *
-   * Use this on the write path (intent creation) where an unrecognised token
-   * must be rejected outright rather than silently stored with no priceUSD.
+   * Also rejects paused and delisted tokens: this sits on the write path
+   * (intent creation, quoting), where a token that admins have taken out of
+   * rotation must not spawn new activity. Deliberately *not* used on the
+   * fill/settlement path — an already-created intent keeps working against
+   * its copied srcToken after its registry entry is delisted.
    */
   async resolveSrcTokenOrThrow(
     chain: SupportedChain,
     address: string,
   ): Promise<ResolvedSrcToken> {
-    const token = await this.resolveSrcToken(chain, address);
-    if (!token) {
+    const record = await this.repo.findByAddressAndChain(address, chain);
+    if (!record) {
       throw new BadRequestException(
         `Unknown source token '${address}' for chain '${chain}' in the configured token registry`,
       );
     }
-    return token;
+    const status = record.status ?? "active";
+    if (status !== "active") {
+      throw new BadRequestException(
+        `Source token '${address}' for chain '${chain}' is ${status}; ${status} tokens cannot be used for new intents or quotes`,
+      );
+    }
+    return this.toResolvedSrcToken(record, chain);
+  }
+
+  /** Normalise a stored source-chain token record into the public shape. */
+  private toResolvedSrcToken(token: TokenRecord, chain: SupportedChain): ResolvedSrcToken {
+    return {
+      kind: "src",
+      address: token.address,
+      symbol: token.symbol,
+      name: token.name,
+      decimals: token.decimals,
+      chain,
+      priceUSD: token.priceUsd ?? 0,
+    };
   }
 
   /**
@@ -153,6 +167,16 @@ export class TokensService {
   }
 
   /**
+   * Delisted entries disappear from the registry listing — they stay
+   * resolvable for intents created before the delist (see
+   * {@link resolveSrcToken}), but must not appear in discovery results.
+   * Paused tokens remain visible: under review, not retired.
+   */
+  private hideDelisted<T extends { status?: TokenStatus }>(records: T[]): T[] {
+    return records.filter((record) => (record.status ?? "active") !== "delisted");
+  }
+
+  /**
    * Return the supported token registry, optionally narrowed to one chain.
    *
    * - `chain="stellar"` → `{ tokens: StellarToken[], chain: "stellar" }`
@@ -167,7 +191,7 @@ export class TokensService {
     const requested = chain?.toLowerCase();
 
     if (requested === "stellar") {
-      const records = await this.repo.findByChain("stellar");
+      const records = this.hideDelisted(await this.repo.findByChain("stellar"));
       return {
         tokens: records.map((record) => this.toApiToken(record)),
         chain: "stellar",
@@ -175,7 +199,7 @@ export class TokensService {
     }
 
     if (requested && requested in SUPPORTED_TOKENS) {
-      const records = await this.repo.findByChain(requested);
+      const records = this.hideDelisted(await this.repo.findByChain(requested));
       return {
         tokens: records
           .filter((record) => record.chain === requested)
@@ -184,7 +208,7 @@ export class TokensService {
       };
     }
 
-    const all = await this.repo.findAll();
+    const all = this.hideDelisted(await this.repo.findAll());
 
     // Bucket by chain, pre-seeding a key for every chain the static registry
     // declares so a chain with no rows still appears as an empty array rather

@@ -14,7 +14,7 @@
  * @module soroban/events/decoders
  */
 
-import { Address, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { Address, StrKey, scValToNative, xdr } from "@stellar/stellar-sdk";
 import type { SorobanRpc } from "@stellar/stellar-sdk";
 import {
   BondUpdatedPayloadV1,
@@ -69,6 +69,19 @@ function addressToStrkey(scVal: xdr.ScVal): string {
 }
 
 /**
+ * Extract the dst token strkey from the event body. The contract publishes
+ * the address inline, which `scValToNative` already turns into a "G…"/"C…"
+ * strkey string (matching the golden fixtures); older ledgers encoded it as a
+ * base64 XDR ScVal, so that shape is still accepted.
+ */
+function dstTokenToStrkey(raw: unknown): string {
+  if (typeof raw === "string" && (StrKey.isValidEd25519PublicKey(raw) || StrKey.isValidContract(raw))) {
+    return raw;
+  }
+  return addressToStrkey(xdr.ScVal.fromXDR(Buffer.from(String(raw ?? ""), "base64")));
+}
+
+/**
  * Convert a Bytes ScVal to a lowercase hex string.
  * Throws if the value is not bytes.
  */
@@ -100,9 +113,7 @@ function decodeIntentRegistered(
     srcChain:     body?.src_chain as string,
     srcToken:     body?.src_token as string,
     srcAmount:    body?.src_amount as bigint,
-    dstToken:     addressToStrkey(
-                    xdr.ScVal.fromXDR(Buffer.from(String(body?.dst_token ?? ""), "base64")),
-                  ),
+    dstToken:     dstTokenToStrkey(body?.dst_token),
     minDstAmount: body?.min_dst_amount as bigint,
     deadline:     body?.deadline as bigint,
   };

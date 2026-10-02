@@ -145,9 +145,9 @@ describe("OutboxRelayService (#396)", () => {
         { get: (k: string) => (k === "onchainIntentsEnabled" ? true : k === "stellar.settlementContractId" ? CONTRACT_ID : undefined) } as unknown as ConfigService<AppConfig, true>,
         {} as StellarTxService,
         { intentAuditLog: { create: jest.fn().mockResolvedValue({}) } } as unknown as PrismaService,
-        undefined,
-        undefined,
         { snapshotForChain: jest.fn().mockReturnValue({ version: 0, deadlineSeconds: 1800, fillWindowSeconds: 600 }) } as unknown as ProtocolParamsService,
+        undefined,
+        undefined,
         undefined,
         new InMemoryIntentsUnitOfWork(repo, outbox),
       );

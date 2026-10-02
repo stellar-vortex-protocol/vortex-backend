@@ -39,8 +39,9 @@ export class AllowlistService {
     for (const entry of raw.split(",").map((e) => e.trim()).filter(Boolean)) {
       if (entry.startsWith("key:")) {
         keyDigests.add(this.digest(entry.slice(4)));
-      } else if (entry.startsWith("G") && entry.length >= 32) {
-        // Stellar address heuristic: starts with G and is at least 32 chars
+      } else if (entry.startsWith("G")) {
+        // Stellar account IDs start with G (contracts C, muxed M never do),
+        // so a G-prefix alone classifies the entry as an address.
         addresses.add(entry.toLowerCase());
       } else {
         // Everything else is treated as an IP / CIDR

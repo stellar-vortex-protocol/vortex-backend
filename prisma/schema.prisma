@@ -1,13 +1,3 @@
-// Prisma schema for vortex-backend.
-// This file is the source of truth for `npx prisma generate`; the canonical
-// migration history lives in prisma/migrations/.
-//
-// Issues implemented in this file:
-//   #410 — src_token_id / dst_token_id FK columns + snapshot decimals
-//   #411 — DATABASE_REPLICA_URLS env var wired through datasource
-
-generator client {
-  provider = "prisma-client-js"
 // ─── Prisma Schema ────────────────────────────────────────────────────────────
 // Database: PostgreSQL (swap to sqlite for local dev / CI without a real DB)
 // Run `npm run db:generate` after editing this file.
@@ -44,6 +34,11 @@ enum IntentState {
   cancelled
   expired
   slashed
+  // Submitted-but-unconfirmed variants (issue #385).
+  pending_open
+  pending_accepted
+  pending_filled
+  pending_cancelled
 }
 
 enum SupportedChain {
@@ -56,97 +51,16 @@ enum SupportedChain {
   avalanche
 }
 
+/// Registry lifecycle. Delisted rows stay in the table so existing intents
+/// that already copied the token metadata keep resolving.
 enum TokenStatus {
   active
   paused
   delisted
+
+  @@map("token_status")
 }
 
-// ─── Tokens ──────────────────────────────────────────────────────────────────
-
-model Token {
-  id        String      @id @default(cuid())
-  address   String
-  symbol    String
-  name      String
-  decimals  Int
-  chain     SupportedChain
-  logoUri   String?     @map("logo_uri")
-  priceUsd  Float?      @map("price_usd")
-  isStellar Boolean     @default(false) @map("is_stellar")
-  status    TokenStatus @default(active)
-  assetKind String      @default("evm") @map("asset_kind")
-
-  // Back-references from intents (#410)
-  srcIntents Intent[] @relation("src_token")
-  dstIntents Intent[] @relation("dst_token")
-
-  @@unique([address, chain], name: "address_chain")
-  @@index([chain])
-  @@index([symbol])
-  @@map("tokens")
-}
-
-// ─── Intents ─────────────────────────────────────────────────────────────────
-
-model Intent {
-  id               String      @id @default(cuid())
-  intentId         String      @unique @map("intent_id")
-  user             String
-  srcChain         SupportedChain @map("src_chain")
-
-  // Original JSON blobs retained during expand/contract migration (#410).
-  // Do NOT remove until the follow-up contract migration is complete.
-  srcToken         Json        @map("src_token")
-  srcAmount        String      @map("src_amount")
-  dstToken         Json        @map("dst_token")
-  minDstAmount     String      @map("min_dst_amount")
-
-  // ── #410: FK columns ────────────────────────────────────────────────────────
-  // Nullable during the transition period; set by the create path once all
-  // tokens in the registry are resolvable.  The backfill migration populates
-  // these for existing rows.
-  srcTokenId       String?     @map("src_token_id")
-  dstTokenId       String?     @map("dst_token_id")
-  /// Immutable snapshot of src token decimals at intent creation time.
-  srcDecimals      Int?        @map("src_decimals")
-  /// Immutable snapshot of dst token decimals at intent creation time.
-  dstDecimals      Int?        @map("dst_decimals")
-
-  // Relations
-  srcTokenRecord   Token?      @relation("src_token", fields: [srcTokenId], references: [id])
-  dstTokenRecord   Token?      @relation("dst_token", fields: [dstTokenId], references: [id])
-
-  quotedDstAmount  String?     @map("quoted_dst_amount")
-  acceptedDstAmount String?    @map("accepted_dst_amount")
-  solver           String?
-  state            IntentState @default(open)
-  createdAt        Int         @map("created_at")
-  deadline         Int
-  filledAt         Int?        @map("filled_at")
-  fillAmount       String?     @map("fill_amount")
-  feeAmount        String?     @map("fee_amount")
-  txHash           String?     @map("tx_hash")
-  slashedAt        Int?        @map("slashed_at")
-  slashReason      String?     @map("slash_reason")
-
-  // Optimistic concurrency (#404)
-  version          Int         @default(0)
-  idempotencyKey   String?     @unique @map("idempotency_key")
-
-  // Dutch auction (#429)
-  auction          Json?
-
-  // Source-deposit verification (#403)
-  srcVerified      Boolean     @default(false) @map("src_verified")
-  srcTxHash        String?     @map("src_tx_hash")
-  srcVerification  Json?       @map("src_verification")
-
-  // Governance params snapshot at creation
-  paramsVersion    String?     @map("params_version")
-
-  // Audit log
-  auditLog         IntentAuditLog[]
 // ─── Kill-switch scopes (issue #477) ──────────────────────────────────────────
 // A switch is addressed by exactly one of four mutually-exclusive scopes.
 // `global` has no chain/token; `chain` sets chain only; `token` sets chain +
@@ -175,6 +89,15 @@ enum KillSwitchOperation {
   onchain
 }
 
+/// Fill-verification lifecycle (issue #385 / DDL in
+/// 20260930000000_fill_verification): `pending` until the source-deposit side
+/// settles, then `verified` or `rejected`.
+enum FillVerificationState {
+  pending
+  verified
+  rejected
+}
+
 // ─── Intent ──────────────────────────────────────────────────────────────────
 // Represents a cross-chain swap request submitted by a user.
 // The nested token objects (srcToken / dstToken) are stored as JSONB so the
@@ -195,6 +118,22 @@ model Intent {
   dstToken       Json        @map("dst_token")
   /// Minimum acceptable destination amount (base unit string).
   minDstAmount   String      @map("min_dst_amount")
+
+  // ── #410: FK columns ────────────────────────────────────────────────────────
+  // Nullable during the transition period; set by the create path once all
+  // tokens in the registry are resolvable.  The backfill migration populates
+  // these for existing rows.
+  srcTokenId       String?     @map("src_token_id")
+  dstTokenId       String?     @map("dst_token_id")
+  /// Immutable snapshot of src token decimals at intent creation time.
+  srcDecimals      Int?        @map("src_decimals")
+  /// Immutable snapshot of dst token decimals at intent creation time.
+  dstDecimals      Int?        @map("dst_decimals")
+
+  /// Optional off-chain Dutch auction terms (issue #507).
+  auction        Json?       @map("auction")
+  /// Auction price locked when a solver accepts.
+  acceptedDstAmount String?  @map("accepted_dst_amount")
   /// Best quote from solvers, populated after quoting.
   quotedDstAmount String?    @map("quoted_dst_amount")
   /// Solver address that accepted / filled this intent.
@@ -212,38 +151,41 @@ model Intent {
   feeAmount      String?     @map("fee_amount")
   /// On-chain transaction hash of the Stellar fill transaction.
   txHash         String?     @map("tx_hash")
+  /// Unix epoch seconds – set when state becomes `slashed`.
+  slashedAt      Int?        @map("slashed_at")
+  slashReason    String?     @map("slash_reason")
+  /// Optimistic-concurrency version, incremented on every update (issue #405).
+  version        Int         @default(0) @map("version")
+  /// Caller-supplied idempotency key for POST /intents; unique across replicas (issue #404).
+  idempotencyKey String?     @unique @map("idempotency_key")
+  /// Source-chain escrow deposit confirmed (issue #403); unverified intents are not fillable.
+  srcVerified    Boolean     @default(false) @map("src_verified")
+  /// EVM deposit transaction hash supplied at creation, if any.
+  srcTxHash      String?     @map("src_tx_hash")
+  /// Last verification result: status, block, received amount, detail.
+  srcVerification Json?      @map("src_verification")
+
+  /// USD value of `srcAmount` at creation (issue #440); null when the price
+  /// was unknown — historical rows are never backfilled.
+  usdValueAtCreate Float?    @map("usd_value_at_create")
+  /// Fill-verification timestamp written by the fill verifier.
+  fillVerifiedAt DateTime?   @map("fill_verified_at") @db.Timestamptz
+  /// Fill verification state ("pending" | "verified" | "rejected").
+  fillVerificationState FillVerificationState? @map("fill_verification_state")
+  /// Reason reported when fill verification rejected the fill.
+  fillVerificationReason String? @map("fill_verification_reason")
 
   @@index([user])
   @@index([state])
-  @@index([solver])
   @@index([user, createdAt(sort: Desc)], name: "intents_user_created_idx")
   @@index([state, createdAt(sort: Desc)], name: "intents_state_created_idx")
-  // Volume-by-token index for token analytics (#410)
-  // Partial indexes are expressed in raw SQL migration (Prisma doesn't support WHERE clauses).
+  // Volume-by-token index for token analytics (#410).
+  // Partial variants live in raw SQL migration 20261001000000 (Prisma cannot
+  // express WHERE clauses on indexes).
   @@index([srcTokenId, createdAt(sort: Desc)], name: "intents_volume_by_token_idx")
   @@index([dstTokenId, createdAt(sort: Desc)], name: "intents_volume_by_dst_token_idx")
   @@map("intents")
-}
 
-// ─── Solvers ─────────────────────────────────────────────────────────────────
-
-model Solver {
-  id                  String @id @default(cuid())
-  address             String @unique
-  name                String
-  bondAmount          String @map("bond_amount")
-  fillsCompleted      Int    @default(0) @map("fills_completed")
-  fillsFailed         Int    @default(0) @map("fills_failed")
-  totalVolume         String @default("0") @map("total_volume")
-  avgFillTime         Float  @default(0) @map("avg_fill_time")
-  isActive            Boolean @default(true) @map("is_active")
-  registeredAt        Int    @map("registered_at")
-  lastActiveAt        Int    @map("last_active_at")
-  supportedChains     Json   @map("supported_chains")
-  supportedTokens     Json   @map("supported_tokens")
-  source              String? @default("api")
-  chainUpdatedLedger  Int?   @map("chain_updated_ledger")
-  @@map("intents")
 }
 
 // ─── Solver ──────────────────────────────────────────────────────────────────
@@ -284,23 +226,6 @@ model Solver {
   @@map("solvers")
 }
 
-// ─── Intent audit log ────────────────────────────────────────────────────────
-
-model IntentAuditLog {
-  id         BigInt   @id @default(autoincrement())
-  intentId   String   @map("intent_id")
-  timestamp  DateTime @default(now())
-  toState    String   @map("to_state")
-  actor      String
-  reason     String
-  metadata   Json?
-
-  intent     Intent   @relation(fields: [intentId], references: [intentId], onDelete: Cascade)
-
-  @@index([intentId])
-  @@index([intentId, timestamp(sort: Desc)])
-  @@map("intent_audit_log")
-}
 // ─── IntentAuditLog ──────────────────────────────────────────────────────────
 // Append-only record of every state transition for an intent (issue #217 / #62).
 // Queried by intentId to reconstruct the full history of a swap.
@@ -324,6 +249,30 @@ model IntentAuditLog {
   @@map("intent_audit_log")
 }
 
+// ─── ContractUpgrade ─────────────────────────────────────────────────────────
+// Append-only history of detected WASM upgrades of the contracts the backend
+// writes to (issue #402). Written by ContractVersionService when a poll sees
+// a new hash or an upgrade event is ingested.
+
+model ContractUpgrade {
+  id               BigInt   @id @default(autoincrement()) @map("id")
+  /// "settlement" | "solverRegistry"
+  contractName     String   @map("contract_name")
+  contractId       String   @map("contract_id")
+  previousWasmHash String?  @map("previous_wasm_hash")
+  wasmHash         String?  @map("wasm_hash")
+  /// ABI version the new hash maps to; null when unsupported.
+  abiVersion       String?  @map("abi_version")
+  /// "poll" | "event"
+  source           String   @map("source")
+  ledger           Int?     @map("ledger")
+  txHash           String?  @map("tx_hash")
+  detectedAt       DateTime @default(now()) @map("detected_at") @db.Timestamptz
+
+  @@index([contractId, detectedAt], name: "contract_upgrades_contract_idx")
+  @@map("contract_upgrades")
+}
+
 // ─── Token ───────────────────────────────────────────────────────────────────
 // Static registry of tokens the protocol supports.
 // Kept separate so it can be updated without migrations when the token list changes.
@@ -341,6 +290,12 @@ model Token {
   priceUsd  Float?         @map("price_usd")
   /// Whether this is a destination-side Stellar token.
   isStellar Boolean        @default(false) @map("is_stellar")
+  /// active tokens are listed; paused stay listed but are not offered for new
+  /// intents; delisted are hidden from discovery and still readable by id.
+  status    TokenStatus    @default(active) @map("status")
+  /// evm | stellar-sac | stellar-classic. String so classic and SAC stay distinct
+  /// without a second database enum.
+  assetKind String         @default("evm") @map("asset_kind")
 
   @@unique([address, chain])
   @@index([chain])
@@ -610,3 +565,278 @@ model GuardianAction {
   @@map("guardian_actions")
 }
 
+// ─── OnchainOutbox ───────────────────────────────────────────────────────────
+// Transactional outbox for on-chain writes (issue #396). A row is inserted in
+// the same database transaction as the intent mutation it mirrors, and
+// OutboxRelayService submits it to Soroban afterwards — so the DB can never say
+// "accepted" while the corresponding transaction silently never went out.
+//
+// `id` is a monotonically increasing sequence and doubles as the per-intent
+// ordering key: a row is only claimable once every earlier row for the same
+// intent has reached a terminal success state.
+
+enum OutboxStatus {
+  pending
+  processing
+  submitted
+  confirmed
+  simulated
+  dead
+}
+
+model OnchainOutbox {
+  id            BigInt       @id @default(autoincrement()) @map("id")
+  /// intents.intent_id this operation belongs to (ordering partition key).
+  intentId      String       @map("intent_id")
+  /// Contract operation, e.g. "create_intent", "accept_intent".
+  operation     String       @map("operation")
+  /// Operation arguments (JSON-safe, bigint amounts as strings).
+  payload       Json         @map("payload")
+  status        OutboxStatus @default(pending) @map("status")
+  /// Number of times this row has been claimed by a relay worker.
+  attempts      Int          @default(0) @map("attempts")
+  nextAttemptAt DateTime     @default(now()) @map("next_attempt_at") @db.Timestamptz
+  /// Lease expiry while status = processing; a crashed worker's row is reclaimed after this.
+  lockedUntil   DateTime?    @map("locked_until") @db.Timestamptz
+  /// Hash of the signed envelope, persisted BEFORE submission (crash idempotency).
+  envelopeHash  String?      @map("envelope_hash")
+  /// Hash of the transaction that was submitted.
+  txHash        String?      @map("tx_hash")
+  lastError     String?      @map("last_error")
+  createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([status, nextAttemptAt], name: "onchain_outbox_claim_idx")
+  @@index([intentId, id], name: "onchain_outbox_intent_order_idx")
+  @@map("onchain_outbox")
+}
+
+// ─── PendingSlash ────────────────────────────────────────────────────────────
+// Durable saga state for a solver slash (issue #397):
+//   detected → challenge_window → submitted → confirmed | cancelled
+// The unique constraint on intent_id enforces exactly-once slashing per intent.
+
+enum PendingSlashState {
+  detected
+  challenge_window
+  submitted
+  confirmed
+  cancelled
+}
+
+model PendingSlash {
+  id              String            @id @default(uuid()) @map("id")
+  intentId        String            @unique @map("intent_id")
+  solverAddress   String            @map("solver_address")
+  reason          String            @map("reason")
+  state           PendingSlashState @default(detected) @map("state")
+  /// The intent's fill deadline (unix seconds) that the solver missed.
+  fillDeadline    Int               @map("fill_deadline")
+  detectedAt      DateTime          @map("detected_at") @db.Timestamptz
+  /// Slash may not be submitted before this instant.
+  challengeEndsAt DateTime          @map("challenge_ends_at") @db.Timestamptz
+  attempts        Int               @default(0) @map("attempts")
+  nextAttemptAt   DateTime          @default(now()) @map("next_attempt_at") @db.Timestamptz
+  /// Lease held by the pipeline worker that is currently verifying/submitting.
+  lockedUntil     DateTime?         @map("locked_until") @db.Timestamptz
+  txHash          String?           @map("tx_hash")
+  /// true when the registry client simulated but did not broadcast (dry-run / gated submit).
+  simulated       Boolean           @default(false) @map("simulated")
+  submittedAt     DateTime?         @map("submitted_at") @db.Timestamptz
+  confirmedAt     DateTime?         @map("confirmed_at") @db.Timestamptz
+  cancelledAt     DateTime?         @map("cancelled_at") @db.Timestamptz
+  cancelReason    String?           @map("cancel_reason")
+  cancelledBy     String?           @map("cancelled_by")
+  /// Fill transaction that cancelled the slash, when cancelled by a fill proof.
+  fillTxHash      String?           @map("fill_tx_hash")
+  lastError       String?           @map("last_error")
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([state, challengeEndsAt], name: "pending_slashes_due_idx")
+  @@index([solverAddress], name: "pending_slashes_solver_idx")
+  @@map("pending_slashes")
+}
+
+// ─── API key tiers (issue #441) ───────────────────────────────────────────────
+// API keys authenticate programmatic clients and carry a tier that selects the
+// distributed rate-limit quota. Keys are stored only as SHA-256 hashes; the
+// plaintext is shown once at creation and never persisted or logged.
+
+enum ApiKeyTier {
+  public
+  integrator
+  solver
+  partner
+}
+
+model ApiKey {
+  id        String     @id @default(uuid()) @map("id")
+  /// First 8 characters of the key — non-secret lookup handle.
+  keyPrefix String     @unique @map("key_prefix")
+  /// SHA-256 hash of the full key (hex-encoded).  Never store the plaintext.
+  keyHash   String     @map("key_hash")
+  tier      ApiKeyTier @map("tier")
+  /// Free-text owner label (e.g. "frontend", "solver-bot-1").
+  owner     String     @map("owner")
+  /// Optional scope strings narrowing what the key may do (e.g. ["intents:read"]).
+  scopes    Json       @default("[]") @map("scopes")
+  /// Unix epoch seconds.
+  createdAt Int        @map("created_at")
+  /// Unix epoch seconds; null while the key is active.
+  revokedAt Int?       @map("revoked_at")
+  /// Unix epoch seconds; null for keys that do not expire.
+  expiresAt Int?       @map("expires_at")
+  lastUsedAt Int?      @map("last_used_at")
+
+  @@index([tier])
+  @@map("api_keys")
+}
+
+model SolverCredential {
+  id            String   @id @default(uuid()) @map("id")
+  /// First 8 characters of the credential — non-secret lookup handle.
+  credPrefix    String   @unique @map("cred_prefix")
+  /// SHA-256 hash of the credential (hex-encoded).
+  credHash      String   @map("cred_hash")
+  /// Solver on-chain address this credential is bound to.
+  solverAddress String   @map("solver_address")
+  /// Allowed scope strings, e.g. ["quote:respond", "intents:accept"].
+  scopes        Json     @map("scopes")
+  /// Optional CIDR / IP allowlist the credential may be presented from.
+  ipAllowlist   Json?    @map("ip_allowlist")
+  /// Unix epoch seconds.
+  createdAt     Int      @map("created_at")
+  /// Unix epoch seconds; null for credentials that do not expire.
+  expiresAt     Int?     @map("expires_at")
+  /// Unix epoch seconds; null while the credential is active.
+  revokedAt     Int?     @map("revoked_at")
+  /// Unix epoch seconds of the last rotation (previous credential revoked).
+  rotatedAt     Int?     @map("rotated_at")
+  lastUsedAt    Int?     @map("last_used_at")
+
+  @@index([solverAddress])
+  @@map("solver_credentials")
+}
+
+// ─── Soroban event ingestion (transactional outbox lineage) ───────────────────
+// Idempotency + dead-letter tables for the versioned decoder registry (#390),
+// ledger-gap backfill (#391) and chain-authoritative reconciler (#392). The
+// models mirror the authoritative DDL in
+// 20260927000000_processed_events_dead_letters (keyed by the RPC event id
+// "<ledger>-<index>").
+
+model ProcessedEvent {
+  id          BigInt   @id @default(autoincrement()) @map("id")
+  /// RPC event id "<ledger>-<index>".
+  eventId     String   @map("event_id")
+  ledger      Int      @map("ledger")
+  eventIndex  Int      @map("event_index")
+  contractId  String   @map("contract_id")
+  /// Decoded topic[0] string.
+  topic       String   @map("topic")
+  txHash      String   @map("tx_hash")
+  processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz
+
+  @@unique([ledger, eventIndex], name: "processed_events_ledger_idx_key")
+  @@index([ledger], name: "processed_events_ledger_idx")
+  @@index([contractId], name: "processed_events_contract_idx")
+  @@map("processed_events")
+}
+
+model DeadLetterEvent {
+  id       BigInt @id @default(autoincrement()) @map("id")
+  /// RPC event id "<ledger>-<index>".
+  eventId  String @map("event_id")
+  ledger   Int    @map("ledger")
+  txHash   String @map("tx_hash")
+  /// Raw (undecoded) topic[0] string that failed schema validation.
+  rawTopic String @map("raw_topic")
+  /// Validation error message.
+  error    String @map("error")
+  /// JSON-encoded base64 XDR topic array, kept so operators can replay.
+  rawXdr   String @map("raw_xdr")
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz
+
+  @@index([ledger], name: "dead_letter_events_ledger_idx")
+  @@map("dead_letter_events")
+}
+
+// ─── Pending-transaction confirmation (issues #386–#389, PR #509) ────────────
+// DDL: 20260926000000_tx_confirmation_channel_pool_ingestion.
+
+enum PendingTxStatus {
+  pending
+  confirmed
+  failed
+  expired
+}
+
+model PendingTransaction {
+  id            BigInt          @id @default(autoincrement()) @map("id")
+  /// The Stellar transaction hash.
+  txHash        String          @unique @map("tx_hash")
+  /// XDR-encoded signed transaction envelope (base64), kept for fee-bump resubmission.
+  txXdr         String          @map("tx_xdr")
+  /// Associated intent identifier (nullable — not every tx is tied to one intent).
+  intentId      String?         @map("intent_id")
+  /// Channel account public key used for submission (nullable for main-key txs).
+  channelKey    String?         @map("channel_key")
+  status        PendingTxStatus @default(pending) @map("status")
+  /// Unix epoch seconds after which tracking is abandoned and the tx is marked expired.
+  maxTrackUntil Int             @map("max_track_until")
+  /// Number of poll attempts so far.
+  attempts      Int             @default(0) @map("attempts")
+  /// Unix epoch seconds of the next scheduled poll.
+  nextPollAt    Int             @default(0) @map("next_poll_at")
+  /// Fee in stroops of the most recent submission.
+  lastFeeStroops String?        @map("last_fee_stroops")
+  /// Number of fee-bump escalations applied so far.
+  feeBumpCount  Int             @default(0) @map("fee_bump_count")
+  createdAt     DateTime        @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime        @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([status, nextPollAt], name: "pending_tx_poll_idx")
+  @@index([intentId], name: "pending_tx_intent_idx")
+  @@map("pending_transactions")
+}
+
+model IngestionCursor {
+  id           BigInt   @id @default(autoincrement()) @map("id")
+  network      String   @map("network")
+  contractId   String   @map("contract_id")
+  /// Last ledger sequence whose events have been fully applied.
+  lastLedger   Int      @map("last_ledger")
+  /// Index of the last applied event within lastLedger (for sub-ledger resume).
+  lastEventIdx Int      @default(0) @map("last_event_idx")
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@unique([network, contractId], name: "ingestion_cursor_uniq")
+  @@map("ingestion_cursor")
+}
+
+model SignatureNonce {
+  signer    String @map("signer")
+  nonce     String @map("nonce")
+  expiresAt Int    @map("expires_at")
+
+  @@id([signer, nonce])
+  @@index([expiresAt])
+  @@map("signature_nonces")
+}
+
+// ─── Price history (price-feed worker, issue #566) ────────────────────────────
+// Append-only series backing the extreme-move circuit breaker; `tokens.price_usd`
+// holds the latest value, this table keeps the trail.
+
+model PriceHistory {
+  id         String   @id @default(uuid()) @map("id")
+  /// Token this sample belongs to (cascade-deleted with the token).
+  tokenId    String   @map("token_id")
+  priceUsd   Float    @map("price_usd")
+  /// Unix epoch seconds… wall-clock sample time (UTC).
+  recordedAt DateTime @map("recorded_at") @db.Timestamptz
+
+  @@index([tokenId, recordedAt], name: "price_history_token_idx")
+  @@map("price_history")
+}

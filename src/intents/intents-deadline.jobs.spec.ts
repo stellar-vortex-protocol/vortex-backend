@@ -47,6 +47,7 @@ function buildIntents(scheduler: IntentDeadlineScheduler): IntentsService {
     undefined,
     undefined,
     undefined,
+    undefined,
     scheduler,
   );
 }
@@ -66,6 +67,7 @@ describe("deadline jobs", () => {
       intents,
       { broadcast: jest.fn().mockResolvedValue(undefined) } as unknown as IntentsGateway,
       {} as SolversService,
+      null,
       { slashSolver: jest.fn().mockResolvedValue({ detail: "no-op" }) } as unknown as SolverRegistryService,
       metrics,
       { evaluateTarget: jest.fn().mockReturnValue({ paused: false, matched: null, matchedChain: [] }) } as unknown as KillSwitchService,

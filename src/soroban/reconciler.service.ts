@@ -242,16 +242,18 @@ export class ReconcilerService {
   ): DivergenceClass | null {
     if (!local) return "missing_locally";
 
-    if (local.state !== onChain.state && onChain.state !== "unknown") {
-      return "state_mismatch";
-    }
-
+    // Solver (identity) divergence outranks a lifecycle lag: repairing the
+    // state first would silently adopt the chain solver.
     if (
       onChain.solver &&
       local.solver &&
       local.solver.toLowerCase() !== onChain.solver.toLowerCase()
     ) {
       return "solver_mismatch";
+    }
+
+    if (local.state !== onChain.state && onChain.state !== "unknown") {
+      return "state_mismatch";
     }
 
     if (

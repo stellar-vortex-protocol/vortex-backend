@@ -13,6 +13,7 @@
 import { ConfigService } from "@nestjs/config";
 import { AbuseScoreService } from "./abuse-score.service";
 import { AbuseContext } from "./abuse.types";
+import type { AppConfig } from "../config/configuration";
 
 // ---------------------------------------------------------------------------
 // Minimal ioredis mock — we stub only the methods used by the scorer.
@@ -133,10 +134,10 @@ class FakeRedis {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeConfigService(): ConfigService {
+function makeConfigService(): ConfigService<AppConfig, true> {
   return {
     get: (_key: string) => "redis://localhost:6379",
-  } as unknown as ConfigService;
+  } as unknown as ConfigService<AppConfig, true>;
 }
 
 function makeCtx(overrides: Partial<AbuseContext> = {}): AbuseContext {
@@ -153,7 +154,7 @@ function makeCtx(overrides: Partial<AbuseContext> = {}): AbuseContext {
 }
 
 function buildService(fakeRedis: FakeRedis): AbuseScoreService {
-  const svc = new AbuseScoreService(makeConfigService() as ConfigService);
+  const svc = new AbuseScoreService(makeConfigService());
   // Replace the ioredis instance with our fake
   (svc as unknown as { redis: FakeRedis }).redis = fakeRedis;
   return svc;

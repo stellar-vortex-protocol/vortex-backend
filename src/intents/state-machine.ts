@@ -9,6 +9,14 @@ import { IntentState } from "./intents.types";
  * repositories must route mutations through {@link canTransition} (or one of
  * the guarded `*If*` repository methods) instead of blind `update()` writes.
  *
+ * Exception — pending markers (issue #385): the `pending_*` states are a
+ * confirmation layer stacked on top of the lifecycle, not steps of it.
+ * `IntentsService.transitionToOnChainPending` parks an intent there with a
+ * direct write (the guarded `*If*` edge it mirrors has already committed —
+ * even `filled → pending_filled`, which would be illegal as a lifecycle
+ * edge), and `IntentsService.confirmIntent` settles it back through the
+ * `pending_* → base` edges below.
+ *
  * ```
  *            ┌──────┐  acceptIfOpen   ┌──────────┐  fillIfAccepted  ┌────────┐
  *            │ open ├────────────────►│ accepted ├────────────────►│ filled │ (terminal)
@@ -30,12 +38,18 @@ import { IntentState } from "./intents.types";
  * `slashed` are terminal and have no outgoing edges.
  */
 export const TRANSITIONS: Readonly<Record<IntentState, readonly IntentState[]>> = {
-  open: ["accepted", "cancelled", "expired"],
-  accepted: ["filled", "slashed"],
+  open: ["accepted", "cancelled", "expired", "pending_open", "pending_accepted", "pending_cancelled"],
+  accepted: ["filled", "slashed", "pending_accepted", "pending_filled", "pending_cancelled"],
+  // Terminal states stay sinks — parking out of them (`filled → pending_filled`)
+  // is a direct confirmation write, not a lifecycle edge (see the class docs).
   filled: [],
   cancelled: [],
   expired: [],
   slashed: [],
+  pending_open: ["open"],
+  pending_accepted: ["accepted"],
+  pending_filled: ["filled"],
+  pending_cancelled: ["cancelled"],
 };
 
 /** States from which no further transition is legal. */

@@ -41,8 +41,6 @@ function build(enabled = true) {
     config(enabled),
     {} as StellarTxService,
     { intentAuditLog: { create: jest.fn().mockResolvedValue({}) } } as unknown as PrismaService,
-    undefined, // shadow monitor
-    undefined, // metrics
     { snapshotForChain: () => ({ version: 0, deadlineSeconds: 1800, fillWindowSeconds: 600 }) } as unknown as ProtocolParamsService,
   );
   const verify = jest.fn<Promise<DepositCheck>, [unknown]>();
@@ -117,7 +115,7 @@ describe("SourceDepositVerificationService (issue #403)", () => {
     const stored = (await h.intents.get(created.intentId))!;
     expect(stored).toMatchObject({
       srcVerified: true,
-      version: created.version + 1,
+      version: (created.version ?? 0) + 1,
       srcVerification: {
         status: "verified",
         checkedAt: Math.floor(T0 / 1000),

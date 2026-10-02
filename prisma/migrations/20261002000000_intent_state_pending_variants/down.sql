@@ -1,0 +1,12 @@
+-- Rollback for 20261002000000_intent_state_pending_variants.
+--
+-- PostgreSQL (through v16, the version CI and production run) has no
+-- `ALTER TYPE ... DROP VALUE`: enum values cannot be removed once added, and
+-- attempting to recreate the enum would require dropping the `intents` table
+-- and every other column typed with `IntentState`. This rollback is therefore
+-- an explicit no-op — the table list (what the rollback-verification job
+-- compares) is unchanged, and rows in the pending_* states are legal values
+-- of a *superset* enum, so the database remains queryable either way.
+--
+-- Re-running migration.sql re-adds any value that was manually removed.
+SELECT 1;

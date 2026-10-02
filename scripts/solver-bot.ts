@@ -2,6 +2,7 @@
 import WebSocket from "ws";
 import { Keypair } from "@stellar/stellar-sdk";
 import { buildAcceptMessage, buildFillMessage } from "../src/common/stellar-signature";
+import { attemptGateReason } from "../tools/simulator/strategies/gate";
 
 const API_BASE = process.env.API_BASE ?? "http://localhost:4000";
 const WS_URL = process.env.WS_URL ?? "ws://localhost:4000/ws";
@@ -104,13 +105,20 @@ async function fillIntent(intentId: string, minDstAmount: string): Promise<void>
 
 async function tryFillOpenIntent(intent: Intent): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
-  if (intent.state !== "open" || intent.deadline <= now) return;
-  if (!SOLVER_CHAINS.includes(intent.srcChain)) {
+  // Shared accept gate — the same one tools/simulator's always-fill
+  // reference strategy runs in replay (issue #452). Live bot and harness
+  // agree on which intents get attempted.
+  const reason = attemptGateReason(intent, {
+    chains: SOLVER_CHAINS,
+    minMarginBps: MIN_MARGIN_BPS,
+    nowSec: now,
+  });
+  if (reason === "state" || reason === "deadline") return;
+  if (reason === "chain") {
     console.log(`[solver-bot] skipping ${intent.intentId} on ${intent.srcChain} (not subscribed)`);
     return;
   }
-
-  if (MIN_MARGIN_BPS > 0 && Number(intent.minDstAmount) < 1_000_000 * (MIN_MARGIN_BPS / 10000)) {
+  if (reason === "margin") {
     console.log(`[solver-bot] skipped ${intent.intentId} below min margin ${MIN_MARGIN_BPS} bps`);
     return;
   }

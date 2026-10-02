@@ -53,7 +53,6 @@ describe("StellarTxService.invokeContract beforeSubmit (#396)", () => {
       signer as unknown as SignerService,
       confirmation as unknown as TxConfirmationService,
       config as unknown as ConfigService<AppConfig, true>,
-      undefined,
       { evaluateTarget: () => ({ paused: false }) } as unknown as KillSwitchService,
     );
   });

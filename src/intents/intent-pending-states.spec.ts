@@ -19,6 +19,7 @@ import { Intent, IntentState, INTENT_STATES } from "./intents.types";
 import { AppConfig } from "../config/configuration";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { ProtocolParamsService } from "../governance/params.service";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -68,7 +69,18 @@ function makeService(
   });
   const stellarTx = opts.stellarTx ?? fakeStellarTx();
   const prisma = fakePrisma();
-  return new IntentsService(repo, config, stellarTx, prisma);
+  // Governance snapshot (issue #500): creation stamps `paramsVersion` from it,
+  // so every harness that creates intents must provide one.
+  const protocolParams = {
+    snapshotForChain: jest.fn().mockReturnValue({
+      version: 0,
+      feeBps: 30,
+      deadlineSeconds: 1800,
+      fillWindowSeconds: 600,
+      capturedAt: new Date().toISOString(),
+    }),
+  } as unknown as ProtocolParamsService;
+  return new IntentsService(repo, config, stellarTx, prisma, protocolParams);
 }
 
 function validCreateData(): Omit<Intent, "intentId" | "createdAt" | "state"> {

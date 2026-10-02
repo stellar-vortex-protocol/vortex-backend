@@ -13,7 +13,7 @@
  * ALLOW_LOCAL_SIGNER_IN_PROD=true is explicitly set.
  */
 
-import { FeeBumpTransaction, Transaction, xdr } from "@stellar/stellar-sdk";
+import { FeeBumpTransaction, Keypair, Transaction, xdr } from "@stellar/stellar-sdk";
 
 export const SIGNER_TOKEN = Symbol("SIGNER");
 
@@ -48,4 +48,14 @@ export interface ISigner {
    * Sign a Soroban auth entry for contract-authorisation flows.
    */
   signAuthEntry(entry: xdr.SorobanAuthorizationEntry): Promise<xdr.SorobanAuthorizationEntry>;
+
+  /**
+   * The signing keypair itself, when this backend holds one in process.
+   *
+   * Fee-bump construction (issue #386) needs the raw key to re-sign the
+   * outer envelope. Remote backends (Vault Transit) never expose key
+   * material and omit this method — callers must treat its absence as
+   * "escalation unavailable" and fall back to the terminal path.
+   */
+  feeSourceKeypair?(): Keypair;
 }

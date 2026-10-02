@@ -124,26 +124,27 @@ export class ChannelPoolService implements OnModuleInit {
         this.metrics.channelLeaseWaitTime.observe(waitMs / 1000);
 
         const kp = this.keypairs.get(ch.publicKey)!;
-        const self = this;
 
         return {
           publicKey: ch.publicKey,
           keypair: kp,
           sequence,
-          release(success: boolean): void {
-            const target = self.channels.find((c) => c.publicKey === ch.publicKey);
+          // Arrow property, not a method: the handle must close over the class
+          // instance (`this`), which the object-literal method form would rebind.
+          release: (success: boolean): void => {
+            const target = this.channels.find((c) => c.publicKey === ch.publicKey);
             if (target) {
               target.leased = false;
               target.leaseExpiresAt = 0;
               if (!success) {
                 // Sequence is suspect — force re-sync on next use
                 target.cachedSequence = null;
-                self.metrics.channelBadSeqResyncs.inc();
+                this.metrics.channelBadSeqResyncs.inc();
               }
             }
-            self.updateUtilisationMetric();
+            this.updateUtilisationMetric();
             // Wake the next waiter in FIFO order
-            const next = self.waiters.shift();
+            const next = this.waiters.shift();
             if (next) next();
           },
         };

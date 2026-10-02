@@ -61,21 +61,29 @@ export class SolverBondService {
     try {
       const account = await this.server.getAccount(address);
       const contract = new Contract(this.contractId);
-      const transaction = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: this.networkPassphrase,
-      })
-        .addOperation(contract.call("get_bond", Address.fromString(address).toScVal()))
-        .addOperation(contract.call("is_active", Address.fromString(address).toScVal()))
-        .setTimeout(30)
-        .build();
-      const simulation = await this.server.simulateTransaction(transaction);
-      if (SorobanRpc.Api.isSimulationError(simulation) || !simulation.results || simulation.results.length < 2) {
-        throw new Error(SorobanRpc.Api.isSimulationError(simulation) ? simulation.error : "missing simulation results");
-      }
+      // Soroban allows one invoke-host-function operation per transaction, so
+      // each registry getter gets its own single-call envelope and the two
+      // values are read off the two simulation results.
+      const simulate = async (method: string): Promise<unknown> => {
+        const transaction = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: this.networkPassphrase,
+        })
+          .addOperation(contract.call(method, Address.fromString(address).toScVal()))
+          .setTimeout(30)
+          .build();
+        const simulation = await this.server.simulateTransaction(transaction);
+        if (SorobanRpc.Api.isSimulationError(simulation)) {
+          throw new Error(simulation.error);
+        }
+        if (!simulation.result) {
+          throw new Error(`missing simulation result for ${method}`);
+        }
+        return scValToNative(simulation.result.retval);
+      };
 
-      const bondNative = scValToNative(simulation.results[0].xdr);
-      const activeNative = scValToNative(simulation.results[1].xdr);
+      const bondNative = await simulate("get_bond");
+      const activeNative = await simulate("is_active");
       const bondAmount = this.parseBondAmount(bondNative);
       if (typeof activeNative !== "boolean") throw new Error("invalid active status returned by registry");
 

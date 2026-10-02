@@ -37,6 +37,13 @@ export interface SlashResult {
   submitted: boolean;
   /** true if we got far enough to run a (network, non-mutating) simulation. */
   simulated: boolean;
+  /**
+   * true when this attempt failed and should count against the saga's retry
+   * budget (issue #397): simulation rejections, unconfigured registries, and
+   * transport errors retry with backoff instead of pretending a submission
+   * happened. A dry-run or simulated-only success is not a failure.
+   */
+  failed: boolean;
   txHash?: string;
   detail: string;
   /**
@@ -116,6 +123,7 @@ export class SolverRegistryService {
       return {
         submitted: false,
         simulated: false,
+        failed: false,
         dryRun: true,
         detail: "ONCHAIN_DRY_RUN=true — simulated log only, no transaction submitted",
       };
@@ -128,7 +136,7 @@ export class SolverRegistryService {
       this.logger.log(
         `[solver-registry] would slash solver=${params.solverAddress} intent=${params.intentId} reason="${params.reason}" (${detail})`,
       );
-      return { submitted: false, simulated: false, dryRun: false, detail };
+      return { submitted: false, simulated: false, failed: true, dryRun: false, detail };
     }
 
     try {
@@ -158,7 +166,7 @@ export class SolverRegistryService {
         this.logger.error(
           `[solver-registry] slash simulation errored for solver=${params.solverAddress} intent=${params.intentId}: ${detail}`,
         );
-        return { submitted: false, simulated: true, dryRun: false, detail };
+        return { submitted: false, simulated: true, failed: true, dryRun: false, detail };
       }
 
       // TODO: Once issue #23 confirms the real contract interface, replace
@@ -172,7 +180,7 @@ export class SolverRegistryService {
       this.logger.log(
         `[solver-registry] simulated slash tx for solver=${params.solverAddress} intent=${params.intentId} (${detail})`,
       );
-      return { submitted: false, simulated: true, dryRun: false, detail };
+      return { submitted: false, simulated: true, failed: false, dryRun: false, detail };
     } catch (err) {
       // Issue #300 — the SDK may include serialized transaction/XDR details in
       // thrown errors; do not log the signing key or any raw secret here.
@@ -180,7 +188,7 @@ export class SolverRegistryService {
       this.logger.error(
         `[solver-registry] slash call errored for solver=${params.solverAddress} intent=${params.intentId}: ${detail}`,
       );
-      return { submitted: false, simulated: false, dryRun: false, detail };
+      return { submitted: false, simulated: false, failed: true, dryRun: false, detail };
     }
   }
 

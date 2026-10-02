@@ -231,18 +231,11 @@ function betaFunction(a: number, b: number): number {
   return Math.exp(logGamma(a) + logGamma(b) - logGamma(a + b));
 }
 
-function regularizedIncompleteBeta(p: number, a: number, b: number): number {
-  // B(a,b; p) / B(a,b) via the continued-fraction form (Numerical Recipes §6.4).
-  if (p <= 0) return 0;
-  if (p >= 1) return 1;
-  const bt =
-    Math.exp(
-      logGamma(a + b) -
-        logGamma(a) -
-        logGamma(b) +
-        a * Math.log(p) +
-        b * Math.log(1 - p),
-    );
+/**
+ * Continued fraction for the incomplete beta function (Numerical Recipes
+ * §6.4 `betacf`), evaluated at `(a, b, p)`.
+ */
+function betaContinuedFraction(a: number, b: number, p: number): number {
   const fpmin = 1e-300;
   const maxIt = 200;
   const eps = 3e-12;
@@ -273,7 +266,32 @@ function regularizedIncompleteBeta(p: number, a: number, b: number): number {
     h *= del;
     if (Math.abs(del - 1) < eps) break;
   }
-  return p < (a + 1) / (a + b + 2) ? (bt * h) / a : 1 - (bt * h) / b;
+  return h;
+}
+
+function regularizedIncompleteBeta(p: number, a: number, b: number): number {
+  // B(a,b; p) / B(a,b) via the continued-fraction form (Numerical Recipes §6.4).
+  if (p <= 0) return 0;
+  if (p >= 1) return 1;
+  const bt =
+    Math.exp(
+      logGamma(a + b) -
+        logGamma(a) -
+        logGamma(b) +
+        a * Math.log(p) +
+        b * Math.log(1 - p),
+    );
+  // Both branches share the prefactor `bt`, but the second one relies on the
+  // symmetry I_x(a,b) = 1 − I_{1−x}(b,a): its continued fraction must be
+  // re-evaluated with the parameters swapped and the argument mirrored.
+  // Reusing the first branch's value here silently produced garbage for every
+  // p ≥ (a+1)/(a+b+2) with asymmetric (a, b) — e.g. I_0.5(1, 2) returned
+  // 0.625 instead of 0.75, and the reputation fill-rate quantile came out
+  // backwards for well-established performers.
+  if (p < (a + 1) / (a + b + 2)) {
+    return (bt * betaContinuedFraction(a, b, p)) / a;
+  }
+  return 1 - (bt * betaContinuedFraction(b, a, 1 - p)) / b;
 }
 
 function betaQuantile(q: number, a: number, b: number): number {
@@ -294,12 +312,14 @@ function betaQuantile(q: number, a: number, b: number): number {
   let hi = 1;
   for (let guard = 0; guard < 30; guard++) {
     const fx = regularizedIncompleteBeta(x, a, b) - q;
+    // Beta density at x: x^(a−1) (1−x)^(b−1) / B(a,b). The previous form put
+    // the logΓ combination inside the exponent AND divided by B(a,b); those
+    // logΓ terms already fold in 1/B(a,b), so the slope was inflated by a
+    // factor 1/B, which threw Newton's step across the root and made the
+    // inverse quantile wander for well-established (large a,b) performers.
     const df =
       Math.exp(
-        logGamma(a + b) -
-          logGamma(a) -
-          logGamma(b) +
-          (a - 1) * Math.log(Math.max(x, 1e-300)) +
+        (a - 1) * Math.log(Math.max(x, 1e-300)) +
           (b - 1) * Math.log(Math.max(1 - x, 1e-300)),
       ) / betaFunction(a, b);
     if (fx > 0) hi = x;

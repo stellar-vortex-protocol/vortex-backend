@@ -249,7 +249,8 @@ export class HttpEgressService {
 
       if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
         redirects++;
-        const location = response.headers['location'];
+        const locationHeader = response.headers['location'];
+        const location = Array.isArray(locationHeader) ? locationHeader[0] : locationHeader;
         if (!location) {
           throw new Error('Redirect without Location header');
         }

@@ -113,9 +113,10 @@ describe("InMemoryIntentsRepository", () => {
     repo.save(makeIntent({ intentId: "upd-1", state: "open" }));
 
     const updated = repo.update("upd-1", { state: "accepted", solver: "SOLVER_X" });
+    if (!updated || "kind" in updated) throw new Error("update should have succeeded");
 
-    expect(updated?.state).toBe("accepted");
-    expect(updated?.solver).toBe("SOLVER_X");
+    expect(updated.state).toBe("accepted");
+    expect(updated.solver).toBe("SOLVER_X");
     expect(repo.findById("upd-1")?.state).toBe("accepted");
   });
 
@@ -156,7 +157,5 @@ describe("InMemoryIntentsRepository", () => {
     expect(repo.amendIfOpen("accepted", { minDstAmount: "1", deadline: now + 200 }, now)).toBeNull();
     expect(repo.amendIfOpen("expired", { minDstAmount: "1", deadline: now + 200 }, now)).toBeNull();
     expect(repo.amendIfOpen("missing", { minDstAmount: "1", deadline: now + 200 }, now)).toBeNull();
-  });
-});
   });
 });

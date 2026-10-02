@@ -28,6 +28,7 @@ module.exports = {
       collectCoverageFrom: ["**/*.(t|j)s"],
       moduleNameMapper: {
         "^@nestjs/schedule$": "<rootDir>/../test/__mocks__/nestjs-schedule.ts",
+        "^@nestjs/event-emitter$": "<rootDir>/../test/__mocks__/nestjs-event-emitter.ts",
       },
     },
 
@@ -44,6 +45,24 @@ module.exports = {
           "ts-jest",
           {
             tsconfig: "./tsconfig.scripts.json",
+          },
+        ],
+      },
+    },
+
+    // ── Simulator tooling suite (issue #452) ───────────────────────────────
+    // The replay harness lives in tools/simulator/ (outside src/); same
+    // broader-rootDir trick as the scripts suite.
+    {
+      displayName: "tools",
+      testEnvironment: "node",
+      rootDir: ".",
+      testMatch: ["<rootDir>/tools/**/*.spec.ts"],
+      transform: {
+        "^.+\\.tsx?$": [
+          "ts-jest",
+          {
+            tsconfig: "./tsconfig.tools.json",
           },
         ],
       },

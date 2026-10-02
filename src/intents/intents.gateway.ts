@@ -1,30 +1,4 @@
-import { Injectable, Logger, Optional } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
-import { AppConfig } from "../config/configuration";
-
-/**
- * IntentsGateway — WebSocket gateway for real-time intent events.
- *
- * Stub that exposes `getSubscriberCount()` used by StatsService.
- * Full WebSocket implementation delegates to IntentFeedService (issue #433).
- *
- * The stub is Injectable so it can be provided in test modules without
- * requiring a real WS server.
- */
-@Injectable()
-export class IntentsGateway {
-  private readonly logger = new Logger(IntentsGateway.name);
-
-  constructor(
-    @Optional() private readonly config?: ConfigService<AppConfig, true>,
-  ) {}
-
-  /** Returns the number of currently-connected WebSocket subscribers. */
-  getSubscriberCount(): number {
-    // Delegates to the feed service in the real implementation.
-    // Returning 0 here is correct for the stub / test path.
-    return 0;
-﻿import { OnModuleDestroy, Optional, Inject } from "@nestjs/common";
+import { Inject, OnModuleDestroy, Optional } from "@nestjs/common";
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
@@ -34,22 +8,40 @@ import { logger } from "../common/logger";
 import { SUPPORTED_CHAINS, SupportedChain } from "./intents.types";
 import { verifyStellarSignature, buildWsAuthMessage } from "../common/stellar-signature";
 import { buildMatchPredicate, IntentCapabilityIndex, SolverMatchPredicate } from "./solver-intent-matcher";
+import { IntentFeedService } from "./feed/intent-feed.service";
+import type { BackplaneHealth } from "./backplane/backplane.types";
+import type { ReplayStore } from "./backplane/replay-store";
+import { REPLAY_STORE } from "./backplane/replay-store.token";
+import {
+  negotiateProtocol,
+  resolveProtocol,
+  WS_CLOSE_REASON_UNSUPPORTED,
+  WS_CLOSE_UNSUPPORTED_PROTOCOL,
+} from "./ws-protocol";
 import {
   WS_MAX_FILTER_CHAINS,
   WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
 } from "../config/limits.config";
-import {
-  negotiateProtocol,
-  resolveProtocol,
-  WS_CLOSE_UNSUPPORTED_PROTOCOL,
-  WS_CLOSE_REASON_UNSUPPORTED,
-} from "./ws-protocol";
-import { REPLAY_STORE } from "./backplane/replay-store.token";
-import { ReplayStore, SequencedEvent } from "./backplane/replay-store";
-import { MemoryReplayStore } from "./backplane/memory-replay.store";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
+/**
+ * How many sequenced events to keep in the replay buffer.
+ *
+ * At typical broadcast volume (a few dozen events/minute in production),
+ * 500 events covers many minutes of missed events — more than enough to
+ * bridge a transient network blip or container restart without forcing a
+ * full snapshot re-fetch. Increasing this beyond ~1 000 starts to add
+ * non-trivial heap pressure for large event payloads; the current bound
+ * is a deliberate memory vs. reconnect-gap tradeoff.
+ */
+const REPLAY_BUFFER_SIZE = 500;
+
+export interface SequencedEvent {
+  seq: number;
+  type: string;
+  [key: string]: unknown;
+}
 
 /**
  * Per-subscriber filter (issue #436).
@@ -71,6 +63,49 @@ interface SubscriberFilter {
   wantAll: boolean;
   /** Number of `subscribe` messages this connection has sent. */
   subscriptionCount: number;
+}
+
+/**
+ * Fixed-size ring buffer that retains the last `capacity` events so
+ * reconnecting clients can request a replay from a known sequence number.
+ */
+export class EventRingBuffer {
+  private readonly buf: SequencedEvent[] = [];
+  private readonly capacity: number;
+
+  constructor(capacity = REPLAY_BUFFER_SIZE) {
+    this.capacity = capacity;
+  }
+
+  push(event: SequencedEvent): void {
+    if (this.buf.length >= this.capacity) {
+      this.buf.shift();
+    }
+    this.buf.push(event);
+  }
+
+  /**
+   * Return all buffered events whose seq is strictly greater than `fromSeq`.
+   * Returns an empty array when `fromSeq` is older than the earliest buffered
+   * event (the caller should request a fresh snapshot instead).
+   */
+  since(fromSeq: number): SequencedEvent[] {
+    return this.buf.filter((e) => e.seq > fromSeq);
+  }
+
+  /** Lowest seq still in the buffer, or -1 when empty. */
+  oldestSeq(): number {
+    return this.buf.length === 0 ? -1 : this.buf[0].seq;
+  }
+
+  /** Highest seq in the buffer, or 0 when empty. */
+  latestSeq(): number {
+    return this.buf.length === 0 ? 0 : this.buf[this.buf.length - 1].seq;
+  }
+
+  size(): number {
+    return this.buf.length;
+  }
 }
 
 /**
@@ -100,8 +135,9 @@ interface SubscriberFilter {
    * versions — giving the client a descriptive WS reason string.
    *
    * - vortex.v1 offered   → echo "vortex.v1"
-   * - no protocol offered → echo "vortex.v1" (backward-compatible default)
-   * - unknown protocol    → echo "" (empty); handleConnection closes 1002
+   * - no protocol offered → echo "" (resolveProtocol treats "" as vortex.v1)
+   * - unknown protocol    → echo the first offered token; handleConnection
+   *                         then closes with 1002
    */
   handleProtocols: negotiateProtocol,
 })
@@ -117,22 +153,44 @@ export class IntentsGateway
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private heartbeatTimer: any;
   private nextSeq = 1;
+  /** True once graceful connection draining has begun (issue #511). */
+  private draining = false;
   private readonly backplane: null | {
     publish: (event: Record<string, unknown>) => void;
     subscribe: (handler: (event: Record<string, unknown>) => void) => void;
   } = null;
 
   /** Ring buffer storing the last REPLAY_BUFFER_SIZE broadcast events. */
-  private replayStore: ReplayStore;
+  private readonly ringBuffer = new EventRingBuffer(REPLAY_BUFFER_SIZE);
+
+  /**
+   * Sequenced replay store (issue #457).
+   *
+   * Provided by the IntentsModule via the REPLAY_STORE token (memory or
+   * Redis, selected by WS_REPLAY_STORE).  When absent — direct unit-harness
+   * construction — replay falls back to the in-process ring buffer above,
+   * which the broadcast path always keeps populated as well.
+   */
+  private readonly replayStore: ReplayStore | null;
 
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
     private readonly intentIndex: IntentCapabilityIndex,
     @Optional() private readonly metricsService?: MetricsService,
-    @Optional() @Inject(REPLAY_STORE) replayStoreParam: ReplayStore | null = null,
+    /**
+     * Sequenced replay store (issue #457) — 5th positional parameter so the
+     * backplane test harnesses can inject a MemoryReplayStore directly.
+     */
+    @Optional() @Inject(REPLAY_STORE) replayStoreParam?: ReplayStore | null,
+    /**
+     * SSE intent feed (issues #454, #492). Injected `@Optional()` so graphs
+     * that do not mount the feed — and the unit harnesses that construct this
+     * gateway directly — still run; it only supplies backplane health detail.
+     */
+    @Optional() private readonly feed?: IntentFeedService,
   ) {
-    this.replayStore = replayStoreParam ?? new MemoryReplayStore({ maxCount: 500 });
+    this.replayStore = replayStoreParam ?? null;
     this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
     this.backplane = this.createBackplane();
     if (this.backplane) {
@@ -301,12 +359,18 @@ export class IntentsGateway
     }
   }
 
-  async handleConnection(client: WebSocket) {
-    // ── Protocol version check (issue #456) ────────────────────────────────
-    // `client.protocol` is the negotiated subprotocol string from the HTTP
-    // upgrade handshake.  Empty string means the client sent no
-    // Sec-WebSocket-Protocol header — we default to vortex.v1.
-    // Any other value that is not vortex.v1 is rejected with close code 1002.
+  handleConnection(client: WebSocket) {
+    // Graceful shutdown: refuse new clients once draining has begun (issue #511).
+    if (this.draining) {
+      client.close(1001, "Server draining");
+      this.metricsService?.wsConnectionsRejected.inc({ reason: "draining" });
+      return;
+    }
+
+    // Subprotocol negotiation (issue #456): resolveProtocol treats "" as the
+    // backward-compatible default vortex.v1; any other non-empty string that
+    // is not vortex.v1 was echoed back by negotiateProtocol and is rejected
+    // here with a descriptive close reason.
     const protocolResult = resolveProtocol(
       (client as unknown as { protocol?: string }).protocol ?? "",
     );
@@ -343,7 +407,7 @@ export class IntentsGateway
       );
     });
 
-    const currentSeq = await this.replayStore.latestSeq();
+    const currentSeq = this.nextSeq - 1;
 
     client.send(
       JSON.stringify({
@@ -542,6 +606,13 @@ export class IntentsGateway
 
   /**
    * Process a `{ type: "replay", fromSeq: number }` message.
+   *
+   * Events are read from the injected replay store when one is wired
+   * (issue #457 — memory or Redis, survives restarts and spans replicas),
+   * otherwise from the in-process ring buffer.  Before the events are sent,
+   * the requesting connection's subscription filter (chains or solver
+   * capability predicate) is applied so replay honours the same
+   * server-side scoping as live delivery.
    */
   private async handleReplay(client: WebSocket, msg: Record<string, unknown>): Promise<void> {
     const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : null;
@@ -552,23 +623,47 @@ export class IntentsGateway
 
     if (client.readyState !== WebSocket.OPEN) return;
 
-    const result = await this.replayStore.since(fromSeq);
+    let events: SequencedEvent[];
+    if (this.replayStore) {
+      const result = await this.replayStore.since(fromSeq);
+      if (result.tooOld) {
+        const oldest = await this.replayStore.oldestSeq();
+        client.send(JSON.stringify({ type: "replay_too_old", fromSeq, oldestAvailableSeq: oldest }));
+        logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
+        return;
+      }
+      events = result.events;
+    } else {
+      const oldest = this.ringBuffer.oldestSeq();
 
-    if (result.tooOld) {
-      const oldest = await this.replayStore.oldestSeq();
-      client.send(JSON.stringify({ type: "replay_too_old", fromSeq, oldestAvailableSeq: oldest }));
-      logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
-      return;
+      if (oldest !== -1 && fromSeq < oldest - 1) {
+        client.send(
+          JSON.stringify({
+            type: "replay_too_old",
+            fromSeq,
+            oldestAvailableSeq: oldest,
+          }),
+        );
+        logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
+        return;
+      }
+
+      events = this.ringBuffer.since(fromSeq);
     }
 
-    const events = result.events;
-
-    client.send(JSON.stringify({ type: "replay_start", fromSeq, count: events.length }));
+    client.send(
+      JSON.stringify({
+        type: "replay_start",
+        fromSeq,
+        count: events.length,
+      }),
+    );
 
     const filter = this.subscribers.get(client);
     for (const event of events) {
       if (client.readyState !== WebSocket.OPEN) break;
-      // Apply server-side filter (same logic as deliverToMatchingSubscribers but for one client)
+      // Apply server-side filter (same logic as deliverToMatchingSubscribers
+      // but for this one client).
       if (filter) {
         if (!filter.wantAll) {
           if (filter.solver !== null) {
@@ -589,8 +684,14 @@ export class IntentsGateway
     }
 
     if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify({ type: "replay_end", count: events.length }));
+      client.send(
+        JSON.stringify({
+          type: "replay_end",
+          count: events.length,
+        }),
+      );
     }
+
     logger.debug(`ws replay complete: fromSeq=${fromSeq} count=${events.length}`);
   }
 
@@ -751,8 +852,17 @@ export class IntentsGateway
     // eligible-intents call sees fresh state.
     this.updateIndexForEvent(event);
 
-    // Push into replay store before sending.
-    await this.replayStore.append(sequencedEvent);
+    // Push into replay buffer before sending.
+    this.ringBuffer.push(sequencedEvent);
+    // Mirror into the injected replay store (issue #457) so reconnecting
+    // clients can replay across restarts/replicas.
+    if (this.replayStore) {
+      try {
+        await this.replayStore.append(sequencedEvent);
+      } catch (err) {
+        logger.warn(`replay store append failed: ${String(err)}`);
+      }
+    }
 
     logger.debug(`ws broadcast type=${event.type} seq=${seq} subscribers=${this.subscribers.size}`);
 
@@ -807,6 +917,25 @@ export class IntentsGateway
     return this.subscribers.size;
   }
 
+  /**
+   * Backplane health for /health (issues #454, #492).
+   *
+   * Delegates to the intent feed when it is wired — the feed owns the real
+   * backplane link (and its Redis connection state). Without a feed, fall
+   * back to this gateway's own view: a memory backplane is a single replica
+   * and is healthy by construction; the gateway's redis mirror reports its
+   * sequenced high-water mark.
+   */
+  backplaneHealth(): BackplaneHealth {
+    if (this.feed) return this.feed.backplaneHealth();
+    return {
+      mode: this.backplane ? "redis" : "memory",
+      status: "ok",
+      lastSeq: this.nextSeq - 1,
+      pendingPublishes: 0,
+    };
+  }
+
   /** Returns the current number of active WebSocket subscribers. */
   get subscriberCount(): number {
     return this.subscribers.size;
@@ -830,11 +959,79 @@ export class IntentsGateway
     }
   }
 
-  onModuleDestroy() {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+  /**
+   * Graceful connection draining (issue #511):
+   * 1. Set the draining flag so `handleConnection` refuses new clients
+   * 2. Send every connected client a `server_draining` event carrying the
+   *    resume sequence so it can reconnect with replay
+   * 3. Close connections in batches with jittered delays to avoid a
+   *    reconnect stampede against the replacement pod
+   *
+   * Kubernetes terminationGracePeriodSeconds should be at least
+   * WS_DRAIN_TIMEOUT_MS + 5s.
+   */
+  async startDraining(): Promise<void> {
+    if (this.draining) return;
+
+    this.draining = true;
+    const drainTimeoutMs = parseInt(process.env.WS_DRAIN_TIMEOUT_MS ?? "25000", 10);
+    const currentSeq = this.nextSeq - 1;
+    const clientCount = this.subscribers.size;
+
+    logger.warn(`ws draining started: ${clientCount} clients, timeout=${drainTimeoutMs}ms`);
+
+    const drainMessage = JSON.stringify({
+      type: "server_draining",
+      resumeFrom: currentSeq,
+      reconnectAfterMs: Math.floor(1000 + Math.random() * 4000),
+      reason: "graceful_shutdown",
+    });
+
     for (const [client] of this.subscribers) {
-      client.close(1001, "Server shutting down");
-      this.removeSubscriber(client);
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(drainMessage);
+        } catch {
+          /* best effort — the connection is going away anyway */
+        }
+      }
     }
+
+    if (clientCount === 0) {
+      logger.warn("ws draining complete: no clients connected");
+      return;
+    }
+
+    const batchSize = Math.max(10, Math.ceil(clientCount / 10));
+    const clients = Array.from(this.subscribers.keys());
+    const batchDelayMs = Math.floor(drainTimeoutMs / Math.ceil(clientCount / batchSize));
+
+    for (let i = 0; i < clients.length; i += batchSize) {
+      const batch = clients.slice(i, i + batchSize);
+      if (i > 0) await new Promise((r) => setTimeout(r, batchDelayMs));
+
+      for (const client of batch) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.close(1001, "Server draining");
+        }
+        this.removeSubscriber(client);
+      }
+
+      logger.info(
+        `ws drain progress: ${Math.min(i + batchSize, clientCount)}/${clientCount} closed`,
+      );
+    }
+
+    logger.warn("ws draining complete: all clients closed");
+  }
+
+  /** True while the gateway refuses new connections during shutdown (issue #511). */
+  isDraining(): boolean {
+    return this.draining;
+  }
+
+  async onModuleDestroy() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    await this.startDraining();
   }
 }

@@ -17,7 +17,7 @@
  */
 
 import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
-import { FeeBumpTransaction, Transaction, xdr } from "@stellar/stellar-sdk";
+import { FeeBumpTransaction, Keypair, Transaction, xdr } from "@stellar/stellar-sdk";
 import { SorobanService } from "./soroban.service";
 import { ISigner, SIGNER_TOKEN } from "./signers/signer.interface";
 
@@ -70,6 +70,19 @@ export class SignerService {
       return this.backend.publicKey().length > 0;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * The signing keypair when the backend can expose it (fee-bump
+   * construction, issue #386). `undefined` for remote backends — key
+   * material never leaves them, so fee escalation is unavailable there.
+   */
+  getFeeSourceKeypair(): Keypair | undefined {
+    try {
+      return this.backend.feeSourceKeypair?.();
+    } catch {
+      return undefined;
     }
   }
 

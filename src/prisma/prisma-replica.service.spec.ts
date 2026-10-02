@@ -71,6 +71,7 @@ describe("PrismaReplicaService (#411)", () => {
       replica1 = makeMockPrismaClient(100);
       replica2 = makeMockPrismaClient(200);
       let callCount = 0;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
       jest.spyOn(require("@prisma/client"), "PrismaClient").mockImplementation(() => {
         return callCount++ === 0 ? replica1 : replica2;
       });

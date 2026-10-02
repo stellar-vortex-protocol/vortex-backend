@@ -214,7 +214,11 @@ describe("IntentsGateway heartbeat", () => {
     const signature = keypair.sign(Buffer.from(message, "utf8")).toString("base64");
 
     await client._listeners.message(JSON.stringify({ type: "auth", solver: keypair.publicKey(), timestamp, signature }));
-    expect(client.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "auth_ok" }));
+    // Ack the auth first, then immediately push the scoped eligibility
+    // snapshot (#436) — so the snapshot, not the ack, is the final frame of
+    // a successful handshake.
+    expect(client.send).toHaveBeenCalledWith(JSON.stringify({ type: "auth_ok" }));
+    expect(client.send).toHaveBeenLastCalledWith(expect.stringContaining('"type":"eligible_snapshot"'));
 
     await client._listeners.message(JSON.stringify({ type: "auth", solver: keypair.publicKey(), timestamp, signature: "bad" }));
     expect(client.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }));

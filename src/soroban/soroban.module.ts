@@ -9,6 +9,7 @@ import { SolverRegistryService } from "./solver-registry.service";
 import { SignerService } from "./signer.service";
 import { StellarTxService } from "./stellar-tx.service";
 import { TxConfirmationService } from "./tx-confirmation.service";
+import { FeeEscalationPolicy } from "./fee-escalation-policy";
 import { SolverRegistryEventsService } from "./events/solver-registry-events.service";
 import { SIGNER_TOKEN, signerFactory } from "./signers/signer.factory";
 import { SolversModule } from "../solvers/solvers.module";
@@ -44,6 +45,9 @@ import { IntentsModule } from "../intents/intents.module";
 
     // ── On-chain tx pipeline (issue #394) ─────────────────────────────────
     TxConfirmationService,
+    // Fee-escalation ladder used by TxConfirmationService's durable poller
+    // (issue #386): decides when a stuck envelope gets a fee bump.
+    FeeEscalationPolicy,
     StellarTxService,
 
     SolverRegistryService,

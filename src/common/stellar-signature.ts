@@ -12,8 +12,6 @@
 import { Keypair } from "@stellar/stellar-sdk";
 import { UnauthorizedException } from "@nestjs/common";
 import { createHash } from "node:crypto";
-import { Keypair } from "@stellar/stellar-sdk";
-import { UnauthorizedException } from "@nestjs/common";
 
 export const INTENT_SIGNATURE_CLOCK_SKEW_SECONDS = 30;
 export const MAX_INTENT_SIGNATURE_TTL_SECONDS = 900;
@@ -55,33 +53,6 @@ export function verifyStellarSignature(
   try {
     const keypair = Keypair.fromPublicKey(publicKey);
     const messageBytes = Buffer.from(message, "utf8");
-    const signatureBytes = Buffer.from(signature, "base64");
-    if (!keypair.verify(messageBytes, signatureBytes)) {
-      throw new UnauthorizedException("Invalid Stellar signature");
-    }
-  } catch (error) {
-    if (error instanceof UnauthorizedException) {
-      throw error;
-    }
-    throw new UnauthorizedException("Invalid Stellar signature");
-  }
-}
-
-/**
- * Verify that `signature` (base64) over `message` (utf-8) was produced by
- * the private key corresponding to `publicKey` (Stellar G-address).
- *
- * Throws UnauthorizedException on any failure so callers can let it propagate
- * straight to the HTTP layer.
- */
-export function verifyStellarSignature(
-  publicKey: string,
-  message: string,
-  signature: string,
-): void {
-  try {
-    const keypair = Keypair.fromPublicKey(publicKey);
-    const messageBytes = Buffer.from(message, "utf8");
     const sigBytes = Buffer.from(signature, "base64");
     const valid = keypair.verify(messageBytes, sigBytes);
     if (!valid) {
@@ -100,8 +71,6 @@ export function verifyStellarSignature(
 export function buildCancelMessage(intentId: string, context?: IntentSignatureContext, user?: string): string {
   if (context) return buildV2IntentMessage(context, "cancel", intentId, { user: user ?? "" });
 
-  return `cancel:${intentId}`;
-}
   return `cancel:${intentId}`;
 }
 
@@ -132,8 +101,6 @@ export function buildAcceptMessage(intentId: string, solver: string, context?: I
 
   return `accept:${intentId}:${solver}`;
 }
-  return `accept:${intentId}:${solver}`;
-}
 
 /**
  * Build the canonical message that a solver must sign to fill an intent.
@@ -153,14 +120,20 @@ export function buildFillMessage(
   }
   return `fill:${intentId}:${solver}`;
 }
-  return `fill:${intentId}:${solver}`;
-}
 
 /**
  * Build the canonical message that a solver must sign to register.
  */
 export function buildRegisterMessage(address: string): string {
   return `register:${address}`;
+}
+
+/**
+ * Canonical message a solver signs to prove a fill landed in time and cancel
+ * a pending slash during its challenge window (issue #397).
+ */
+export function buildFillProofMessage(intentId: string, solver: string, txHash: string): string {
+  return `fill-proof:${intentId}:${solver}:${txHash}`;
 }
 
 /**
@@ -203,16 +176,3 @@ export function buildDisputeReviewMessage(disputeId: string): string {
 export function buildDisputeDecisionMessage(disputeId: string, resolution: string, reason: string): string {
   return `dispute-decision:${disputeId}:${resolution}:${reason}`;
 }
-
-/**
- * Build the canonical message that a solver must sign to update their mutable
- * profile fields (name / supportedChains / supportedTokens / avgFillTime).
- *
- * Signing over just the address is sufficient here: it proves control of the
- * account whose profile is being edited, and the request body is already
- * constrained by the DTO whitelist so no immutable field can ride along.
- */
-export function buildUpdateSolverMessage(address: string): string {
-  return `update-solver:${address}`;
-}
-

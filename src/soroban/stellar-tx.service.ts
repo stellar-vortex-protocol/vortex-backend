@@ -30,11 +30,13 @@ import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Account,
+  Address,
   BASE_FEE,
   Contract,
   FeeBumpTransaction,
   Operation,
   SorobanDataBuilder,
+  nativeToScVal,
   Networks,
   SorobanRpc,
   Transaction,
@@ -85,6 +87,24 @@ export interface InvokeContractParams {
   contractId: string;
   method: string;
   args: xdr.ScVal[];
+}
+
+/**
+ * Time bound (seconds) on every transaction built by {@link StellarTxService.invokeContract}.
+ * After this the network rejects the envelope, which is what lets the outbox
+ * relay treat a NOT_FOUND envelope hash as "never landed, safe to rebuild"
+ * once its processing lease (OUTBOX_LEASE_SECONDS) has expired (issue #396).
+ */
+export const INVOKE_TX_TIMEOUT_SECONDS = 30;
+
+export interface InvokeContractOptions {
+  /**
+   * Called with the signed envelope's hash after signing and *before*
+   * broadcast (issue #396). If it throws, nothing is submitted. The outbox
+   * relay uses this to durably record the hash so a crash mid-submit can be
+   * detected on retry instead of double-submitting.
+   */
+  beforeSubmit?: (envelopeHash: string) => Promise<void>;
 }
 
 export interface InvokeContractResult {
@@ -158,6 +178,11 @@ export class StellarTxService {
     private readonly signerService: SignerService,
     private readonly confirmationService: TxConfirmationService,
     configService: ConfigService<AppConfig, true>,
+    /**
+     * Emergency pause control plane (issue #477). Required: the module that
+     * owns this service runs under the global KillSwitchModule, and a missing
+     * kill switch would fail open on every write path.
+     */
     private readonly killSwitch: KillSwitchService,
     @Optional() private readonly metricsService?: MetricsService,
     @Optional() private readonly flags?: FeatureFlagService,
@@ -263,7 +288,10 @@ export class StellarTxService {
    *   3. Sign and submit the (now-prepared) original transaction.
    *   4. Confirm and return the result.
    */
-  async invokeContract(params: InvokeContractParams): Promise<InvokeContractResult> {
+  async invokeContract(
+    params: InvokeContractParams,
+    options: InvokeContractOptions = {},
+  ): Promise<InvokeContractResult> {
     // Issue #477 — the last gate before anything touches the chain. Checking
     // here rather than only in controllers also covers background callers (the
     // sweeper, event ingestion) that never pass through an HTTP guard.
@@ -300,7 +328,7 @@ export class StellarTxService {
         .addOperation(
           new Contract(params.contractId).call(params.method, ...params.args),
         )
-        .setTimeout(30)
+        .setTimeout(INVOKE_TX_TIMEOUT_SECONDS)
         .build();
       let simulation = await this.sorobanService.simulateTransaction(rawTx);
 
@@ -330,6 +358,8 @@ export class StellarTxService {
       // Assemble with Soroban data + fee.
       const prepared = await this.sorobanService.prepareTransaction(rawTx);
       const signed = await this.signerService.sign(prepared as Transaction);
+
+      await options.beforeSubmit?.(signed.hash().toString("hex"));
 
       const submittedAt = Date.now();
       const sendResponse = await this.sorobanService.submitTransaction(signed);
@@ -599,6 +629,7 @@ export class StellarTxService {
   ): Promise<Transaction> {
     const baseFee = await this.estimateBaseFee();
     const sequence = await this.resolveSimulationSequence(sourceAccount);
+    const contract = new Contract(params.contractId);
 
     // `TransactionBuilder` emits `source.sequenceNumber() + 1` as the envelope's
     // seqNum, so the account handed to it must sit one *below* the sequence the
@@ -615,10 +646,10 @@ export class StellarTxService {
       fee: baseFee,
       networkPassphrase: this.networkPassphrase,
     })
-      // Same envelope shape as `invokeContract` builds for the live path —
-      // the monitor is only useful if it simulates the call the chain would
-      // actually receive.
-      .addOperation(new Contract(params.contractId).call(params.method, ...params.args))
+      // Contract.call encodes the invoke-host-function operation (method name
+      // as an ScSymbol, args as ScVals) exactly the way every other call site
+      // in this codebase builds one.
+      .addOperation(contract.call(params.method, ...params.args))
       .setTimebounds(now, now + this.simulationTimeoutSeconds)
       .build();
   }

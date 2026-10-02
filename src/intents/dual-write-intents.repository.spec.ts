@@ -21,7 +21,7 @@ class FakeSecondary extends InMemoryIntentsRepository {
   async saveIfNewer(intent: Intent): Promise<void> {
     if (this.failWrites) throw new Error("postgres unavailable");
     const current = this.findById(intent.intentId);
-    if (!current || current.version < intent.version) this.save(intent);
+    if (!current || (current.version ?? 0) < (intent.version ?? 0)) this.save(intent);
   }
 
   override createIdempotent(intent: Intent, key: string, minCreatedAt: number) {

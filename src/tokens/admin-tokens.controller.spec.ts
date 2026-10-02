@@ -4,6 +4,7 @@ import { Reflector } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
 import request from "supertest";
 import { AdminGuard } from "../admin/admin.guard";
+import { enableApiVersioning } from "../common/api-versioning";
 import { AdminTokensController } from "./admin-tokens.controller";
 import { AdminTokensService } from "./admin-tokens.service";
 
@@ -28,6 +29,9 @@ describe("AdminTokensController RBAC", () => {
       ],
     }).compile();
     app = moduleRef.createNestApplication();
+    // URI versioning with the `api/v` prefix is what turns the controller's
+    // `admin/tokens` path into the /api/v1/admin/tokens route under test.
+    enableApiVersioning(app);
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
     await app.init();
   });

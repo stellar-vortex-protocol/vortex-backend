@@ -170,7 +170,9 @@ const fcFill = fcTimestamp().chain((ts) =>
 const fcSlash = fcTimestamp().chain((ts) =>
   fc.record({
     timestamp: fc.constant(ts),
-    severity: fc.float({ min: 0.1, max: 2, noNaN: true }),
+    // `min` must be exactly representable as a 32-bit float; 0.1 is not,
+    // so round it the way fast-check itself prescribes.
+    severity: fc.float({ min: Math.fround(0.1), max: 2, noNaN: true }),
     disputeStatus: fc.constantFrom<
       "none" | "disputed" | "resolved-upheld" | "resolved-reversed" | undefined
     >(undefined, "none", "disputed", "resolved-upheld", "resolved-reversed"),

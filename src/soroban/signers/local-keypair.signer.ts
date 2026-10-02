@@ -138,6 +138,15 @@ export class LocalKeypairSigner implements ISigner, OnModuleInit {
     }
   }
 
+  /**
+   * The local signing keypair (issue #386): fee-bump construction re-signs
+   * the outer envelope with the same key that signed the inner transaction.
+   * Only the local backend can provide it — remote signers keep keys sealed.
+   */
+  feeSourceKeypair(): Keypair {
+    return this.getKeypair();
+  }
+
   private getKeypair(): Keypair {
     if (!this.secretKey) {
       throw new Error("Soroban signer is not configured: set SOROBAN_SIGNING_KEY");

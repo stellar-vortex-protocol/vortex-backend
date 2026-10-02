@@ -12,7 +12,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { EventDecoderRegistry, type DeadLetterEntry } from "./registry";
 
-const SOLVER_STRKEY = "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGKW7MW8X2ONKGZGK6XOMP";
+const SOLVER_STRKEY = "GCZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFF6T";
 const INTENT_ID = "550e8400-e29b-41d4-a716-446655440000";
 
 function str(s: string): xdr.ScVal { return nativeToScVal(s, { type: "string" }); }

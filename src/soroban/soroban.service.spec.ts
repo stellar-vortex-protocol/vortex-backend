@@ -137,7 +137,7 @@ describe("SorobanService", () => {
   // -------------------------------------------------------------------------
 
   describe("getAccount", () => {
-    const PUBLIC_KEY = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+    const PUBLIC_KEY = "GCQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DJX7";
 
     it("delegates to server.getAccount with the given public key", async () => {
       const mockAccount = { id: PUBLIC_KEY, sequence: "12345" };
@@ -157,7 +157,7 @@ describe("SorobanService", () => {
     });
 
     it("passes through different public keys correctly", async () => {
-      const anotherKey = "GBVVJJLE2VF7VKUQM7FXKCOQMHJZYJFXBSRH3DPHQHVJQCLJTPB65CG";
+      const anotherKey = "GDB4HQ6DYPB4HQ6DYPB4HQ6DYPB4HQ6DYPB4HQ6DYPB4HQ6DYPB4H6AC";
       mockGetAccount.mockResolvedValueOnce({ id: anotherKey });
 
       await service.getAccount(anotherKey);

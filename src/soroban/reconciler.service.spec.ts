@@ -13,19 +13,17 @@ import { ConfigService } from "@nestjs/config";
 import type { Intent } from "../intents/intents.types";
 import type { AppConfig } from "../config/configuration";
 
-import type { AppConfig } from "../config/configuration";
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const BASE_INTENT: Intent = {
   intentId: "550e8400-e29b-41d4-a716-446655440000",
-  user: "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN",
+  user: "GCQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DJX7",
   srcChain: "stellar",
   srcToken: { address: "native", symbol: "XLM", name: "Stellar Lumens", decimals: 7, chain: "stellar" as const },
   srcAmount: "1000000000",
   dstToken: { contract: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M", symbol: "USDC", decimals: 6 },
   minDstAmount: "990000000",
-  solver: "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGKW7MW8X2ONKGZGK6XOMP",
+  solver: "GCZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFF6T",
   state: "accepted",
   createdAt: Math.floor(Date.now() / 1000) - 1000,
   deadline: Math.floor(Date.now() / 1000) + 3600,
@@ -157,7 +155,7 @@ describe("ReconcilerService", () => {
 
   describe("solver_mismatch divergence", () => {
     it("detects solver mismatch and repairs via acceptIfOpen", async () => {
-      const differentSolver = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+      const differentSolver = "GCQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DJX7";
       const chainResult = new Map([
         [BASE_INTENT.intentId, {
           ok: true as const,
@@ -165,7 +163,7 @@ describe("ReconcilerService", () => {
         }],
       ]);
 
-      const openIntent: Intent = { ...BASE_INTENT, state: "open", solver: "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGKW7MW8X2ONKGZGK6XOMP" };
+      const openIntent: Intent = { ...BASE_INTENT, state: "open", solver: "GCZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFF6T" };
       const configService = { get: jest.fn(() => false) } as unknown as ConfigService<AppConfig, true>;
       const intentsService = {
         getByState: jest.fn((s: string) => Promise.resolve(s === "open" ? [openIntent] : [])),

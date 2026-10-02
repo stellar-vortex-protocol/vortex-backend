@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { readFileSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 // @dsnp/parquetjs is aliased as "parquetjs" in package.json
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const parquet = require("parquetjs");
 
 /**

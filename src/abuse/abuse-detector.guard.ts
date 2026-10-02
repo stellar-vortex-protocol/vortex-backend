@@ -27,7 +27,6 @@ import {
   HttpException,
   Injectable,
   Logger,
-  TooManyRequestsException,
 } from "@nestjs/common";
 import { Request } from "express";
 import { AbuseScoreService } from "./abuse-score.service";
@@ -42,6 +41,19 @@ import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 class PreconditionRequiredException extends HttpException {
   constructor(message: string) {
     super({ statusCode: 428, error: "Precondition Required", message }, 428);
+  }
+}
+
+/**
+ * 429 Too Many Requests for the throttle action.
+ *
+ * Declared locally because the installed `@nestjs/common` build does not
+ * export a `TooManyRequestsException`; mirroring {@link PreconditionRequiredException}
+ * keeps the guard independent of that export.
+ */
+class TooManyRequestsException extends HttpException {
+  constructor(message: string) {
+    super({ statusCode: 429, error: "Too Many Requests", message }, 429);
   }
 }
 

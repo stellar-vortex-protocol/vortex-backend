@@ -52,7 +52,7 @@
   "ignorePatterns": ["dist", "node_modules"],
   "overrides": [
     {
-      "files": ["scripts/**/*.ts", "tools/**/*.ts"],
+      "files": ["scripts/**/*.ts", "tools/**/*.ts", "test/chaos/**/*.ts"],
       "rules": {
         "no-restricted-syntax": "off"
       }

@@ -1,9 +1,9 @@
 {
   "openapi": "3.0.0",
   "paths": {
-    "/health": {
+    "/metrics": {
       "get": {
-        "operationId": "HealthController_check",
+        "operationId": "MetricsController_index",
         "parameters": [],
         "responses": {
           "200": {
@@ -11,189 +11,1491 @@
           }
         },
         "tags": [
-          "health"
+          "metrics"
         ]
       }
     },
-    "/api/v1/chain/health": {
+    "/ops/killswitch": {
       "get": {
-        "operationId": "SorobanController_getHealth",
+        "operationId": "KillSwitchController_status",
         "parameters": [],
         "responses": {
           "200": {
-            "description": "Soroban RPC node health status (pass-through of the RPC `getHealth` result).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "string",
-                      "example": "healthy"
-                    },
-                    "latestLedger": {
-                      "type": "number"
-                    },
-                    "oldestLedger": {
-                      "type": "number"
-                    },
-                    "ledgerRetentionWindow": {
-                      "type": "number"
-                    }
-                  },
-                  "required": [
-                    "status"
-                  ]
-                }
+            "description": ""
+          }
+        },
+        "summary": "Current kill-switch state and propagation health.",
+        "tags": [
+          "ops/killswitch"
+        ]
+      }
+    },
+    "/ops/killswitch/pause": {
+      "post": {
+        "operationId": "KillSwitchController_pause",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseKillSwitchDto"
               }
             }
           }
         },
-        "tags": [
-          "chain"
-        ]
-      }
-    },
-    "/api/v1/chain/ledger": {
-      "get": {
-        "operationId": "SorobanController_getLatestLedger",
-        "parameters": [],
         "responses": {
           "200": {
-            "description": "Latest closed ledger as reported by the Soroban RPC node.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "id": {
-                      "type": "string"
-                    },
-                    "sequence": {
-                      "type": "number",
-                      "example": 12345678
-                    },
-                    "protocolVersion": {
-                      "type": "number"
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "sequence"
-                  ]
-                }
-              }
-            }
+            "description": ""
           }
         },
+        "summary": "Pause a scope. Effective on every replica within the propagation budget.",
         "tags": [
-          "chain"
+          "ops/killswitch"
         ]
       }
     },
-    "/api/v1/chain/network": {
-      "get": {
-        "operationId": "SorobanController_getNetwork",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "Network passphrase and protocol metadata for the configured RPC node.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "friendbotUrl": {
-                      "type": "string",
-                      "nullable": true
-                    },
-                    "passphrase": {
-                      "type": "string",
-                      "example": "Test SDF Network ; September 2015"
-                    },
-                    "protocolVersion": {
-                      "type": "number"
-                    }
-                  },
-                  "required": [
-                    "passphrase"
-                  ]
-                }
-              }
-            }
-          }
-        },
-        "tags": [
-          "chain"
-        ]
-      }
-    },
-    "/api/v1/chain/account/{publicKey}": {
-      "get": {
-        "operationId": "SorobanController_getAccount",
+    "/ops/killswitch/resume/{id}": {
+      "post": {
+        "operationId": "KillSwitchController_approveResume",
         "parameters": [
           {
-            "name": "publicKey",
+            "name": "id",
             "required": true,
             "in": "path",
-            "description": "Stellar Ed25519 account public key (starts with `G`, 56 characters).",
             "schema": {
-              "example": "GABC1234567890TESTPUBLICKEY000000000000000000000000000000",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveResumeDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Approve a resume. Takes effect once two distinct operators have approved.",
+        "tags": [
+          "ops/killswitch"
+        ]
+      }
+    },
+    "/intents": {
+      "get": {
+        "operationId": "IntentsController_list",
+        "parameters": [
+          {
+            "name": "state",
+            "required": false,
+            "in": "query",
+            "description": "Filter by intent state",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "accepted",
+                "filled",
+                "cancelled",
+                "expired",
+                "slashed",
+                "pending_open",
+                "pending_accepted",
+                "pending_filled",
+                "pending_cancelled"
+              ]
+            }
+          },
+          {
+            "name": "user",
+            "required": false,
+            "in": "query",
+            "description": "Filter by user address",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chain",
+            "required": false,
+            "in": "query",
+            "description": "Filter by source chain",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "stellar",
+                "ethereum",
+                "base",
+                "polygon",
+                "arbitrum",
+                "optimism",
+                "avalanche"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "description": "Number of results per page (max 100)",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Cursor for the next page of intents",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "required": false,
+            "in": "query",
+            "description": "Number of results to skip",
+            "schema": {
+              "minimum": 0,
+              "default": 0,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid limit or offset"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      },
+      "post": {
+        "operationId": "IntentsController_create",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateIntentDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "Invalid request body"
+          },
+          "409": {
+            "description": "Open-intent cap reached — a single user may not hold more than 50 open/accepted intents simultaneously"
+          },
+          "429": {
+            "description": "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/open": {
+      "get": {
+        "operationId": "IntentsController_listOpen",
+        "parameters": [
+          {
+            "name": "state",
+            "required": false,
+            "in": "query",
+            "description": "Filter by intent state",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "accepted",
+                "filled",
+                "cancelled",
+                "expired",
+                "slashed",
+                "pending_open",
+                "pending_accepted",
+                "pending_filled",
+                "pending_cancelled"
+              ]
+            }
+          },
+          {
+            "name": "user",
+            "required": false,
+            "in": "query",
+            "description": "Filter by user address",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chain",
+            "required": false,
+            "in": "query",
+            "description": "Filter by source chain",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "stellar",
+                "ethereum",
+                "base",
+                "polygon",
+                "arbitrum",
+                "optimism",
+                "avalanche"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "description": "Number of results per page (max 100)",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Cursor for the next page of intents",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "required": false,
+            "in": "query",
+            "description": "Number of results to skip",
+            "schema": {
+              "minimum": 0,
+              "default": 0,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/user/{address}": {
+      "get": {
+        "operationId": "IntentsController_listByUser",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "required": false,
+            "in": "query",
+            "description": "Filter by intent state",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "accepted",
+                "filled",
+                "cancelled",
+                "expired",
+                "slashed",
+                "pending_open",
+                "pending_accepted",
+                "pending_filled",
+                "pending_cancelled"
+              ]
+            }
+          },
+          {
+            "name": "user",
+            "required": false,
+            "in": "query",
+            "description": "Filter by user address",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chain",
+            "required": false,
+            "in": "query",
+            "description": "Filter by source chain",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "stellar",
+                "ethereum",
+                "base",
+                "polygon",
+                "arbitrum",
+                "optimism",
+                "avalanche"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "description": "Number of results per page (max 100)",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Cursor for the next page of intents",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "required": false,
+            "in": "query",
+            "description": "Number of results to skip",
+            "schema": {
+              "minimum": 0,
+              "default": 0,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/{id}": {
+      "get": {
+        "operationId": "IntentsController_getOne",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "description": "Intent not found"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/{id}/audit": {
+      "get": {
+        "description": "Returns the full state-transition history for an intent ordered oldest-first. Each entry records the state the intent moved into, who triggered it, and why.",
+        "operationId": "IntentsController_getAudit",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "required": false,
+            "in": "query",
+            "description": "Filter by intent state",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "accepted",
+                "filled",
+                "cancelled",
+                "expired",
+                "slashed",
+                "pending_open",
+                "pending_accepted",
+                "pending_filled",
+                "pending_cancelled"
+              ]
+            }
+          },
+          {
+            "name": "user",
+            "required": false,
+            "in": "query",
+            "description": "Filter by user address",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chain",
+            "required": false,
+            "in": "query",
+            "description": "Filter by source chain",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "stellar",
+                "ethereum",
+                "base",
+                "polygon",
+                "arbitrum",
+                "optimism",
+                "avalanche"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "description": "Number of results per page (max 100)",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Cursor for the next page of intents",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "required": false,
+            "in": "query",
+            "description": "Number of results to skip",
+            "schema": {
+              "minimum": 0,
+              "default": 0,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit trail for the intent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "intentId": {
+                      "type": "string"
+                    },
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "timestamp": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "toState": {
+                            "type": "string"
+                          },
+                          "actor": {
+                            "type": "string"
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "metadata": {
+                            "type": "object",
+                            "nullable": true
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Intent not found"
+          }
+        },
+        "summary": "Get audit trail for an intent",
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/{id}/quote": {
+      "get": {
+        "operationId": "IntentsController_getPersistedQuote",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
               "type": "string"
             }
           }
         ],
         "responses": {
           "200": {
-            "description": "On-chain account record (id, sequence number, and balances).",
+            "description": "Persisted quote for the intent"
+          },
+          "404": {
+            "description": "Intent not found or no quote persisted"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/batch": {
+      "post": {
+        "description": "Returns the current record for each supplied intent ID. IDs with no matching record are omitted (not individually 404'd). Capped at 100 IDs.",
+        "operationId": "IntentsController_batchLookup",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchLookupDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Records for the found intent IDs, plus a count"
+          },
+          "400": {
+            "description": "intentIds missing, not an array of strings, or exceeds 100 entries"
+          }
+        },
+        "summary": "Batch-fetch current intent records by ID",
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/batch-create": {
+      "post": {
+        "description": "Creates up to 50 intents in a single atomic (all-or-nothing) request. If any item fails validation or exceeds open intent limits, zero intents are created and per-item errors are reported.",
+        "operationId": "IntentsController_batchCreate",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchCreateIntentsDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "id": {
-                      "type": "string"
-                    },
-                    "sequence": {
-                      "type": "string",
-                      "example": "987654321"
-                    },
-                    "balances": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "balance": {
-                            "type": "string"
-                          },
-                          "asset_type": {
-                            "type": "string"
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "sequence"
-                  ]
+                  "$ref": "#/components/schemas/BatchCreateIntentsResponseDto"
                 }
               }
             }
           },
           "400": {
-            "description": "Invalid Stellar public key format"
+            "description": "Invalid request payload or empty batch"
           },
-          "429": {
-            "description": "Per-account rate limit exceeded (AccountRateLimitGuard)"
+          "422": {
+            "description": "Per-item validation errors or limits exceeded"
           }
         },
+        "summary": "Create multiple intents atomically",
         "tags": [
-          "chain"
+          "intents"
         ]
       }
     },
-    "/api/v1/tokens": {
+    "/intents/{id}/accept": {
+      "post": {
+        "operationId": "IntentsController_accept",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptIntentDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "403": {
+            "description": "Solver not registered or inactive"
+          },
+          "404": {
+            "description": "Intent not found"
+          },
+          "409": {
+            "description": "Intent is not in open state"
+          },
+          "410": {
+            "description": "Intent has expired"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/{id}/fill": {
+      "post": {
+        "operationId": "IntentsController_fill",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FillIntentDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "Fill amount below minimum"
+          },
+          "403": {
+            "description": "Wrong solver for this intent"
+          },
+          "404": {
+            "description": "Intent not found"
+          },
+          "409": {
+            "description": "Intent is not in accepted state"
+          },
+          "410": {
+            "description": "Fill window has expired"
+          },
+          "503": {
+            "description": "An emergency kill-switch is active for this intent's scope (503 + Retry-After)"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/{id}/cancel": {
+      "post": {
+        "operationId": "IntentsController_cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelIntentDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "403": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Intent not found"
+          },
+          "409": {
+            "description": "Intent is not in open state"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/{id}/amend": {
+      "post": {
+        "operationId": "IntentsController_amend",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AmendIntentDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "403": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Intent not found"
+          },
+          "409": {
+            "description": "Intent is not amendable"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/quote": {
+      "post": {
+        "operationId": "IntentsController_quote",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuoteRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuoteResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded — max 20 quote requests per 60 s per IP"
+          }
+        },
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/intents/{id}/requote": {
+      "post": {
+        "operationId": "IntentsController_requote",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuoteResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Intent not found"
+          },
+          "409": {
+            "description": "Intent is not in the open state"
+          },
+          "429": {
+            "description": "Rate limit exceeded — max 20 quote requests per 60 s per IP"
+          }
+        },
+        "summary": "Re-quote an existing open intent using its stored fields",
+        "tags": [
+          "intents"
+        ]
+      }
+    },
+    "/docs/ws": {
+      "get": {
+        "description": "Returns the AsyncAPI 2.6 YAML document describing the vortex.v1 subprotocol. Use this with AsyncAPI Studio or SDK generators.",
+        "operationId": "WsDocsController_getSpec",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "AsyncAPI specification for the Vortex WebSocket feed",
+        "tags": [
+          "docs"
+        ]
+      }
+    },
+    "/solvers": {
+      "post": {
+        "operationId": "SolversController_register",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterSolverDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      },
+      "get": {
+        "operationId": "SolversController_getLegacyLeaderboard",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/solvers/leaderboard": {
+      "get": {
+        "description": "Returns the ranked solver list for a specific window. This endpoint is intended for recent-performance visibility and does not alter the legacy all-time leaderboard.",
+        "operationId": "SolversController_getLeaderboard",
+        "parameters": [
+          {
+            "name": "window",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "enum": [
+                "24h",
+                "7d",
+                "30d",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Windowed solver leaderboard",
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/solvers/{address}/eligible-intents": {
+      "get": {
+        "operationId": "SolversController_getEligibleIntents",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "required": false,
+            "in": "query",
+            "description": "Filter by intent state",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "accepted",
+                "filled",
+                "cancelled",
+                "expired",
+                "slashed",
+                "pending_open",
+                "pending_accepted",
+                "pending_filled",
+                "pending_cancelled"
+              ]
+            }
+          },
+          {
+            "name": "user",
+            "required": false,
+            "in": "query",
+            "description": "Filter by user address",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chain",
+            "required": false,
+            "in": "query",
+            "description": "Filter by source chain",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "stellar",
+                "ethereum",
+                "base",
+                "polygon",
+                "arbitrum",
+                "optimism",
+                "avalanche"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "description": "Number of results per page (max 100)",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Cursor for the next page of intents",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "required": false,
+            "in": "query",
+            "description": "Number of results to skip",
+            "schema": {
+              "minimum": 0,
+              "default": 0,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/solvers/{address}": {
+      "get": {
+        "operationId": "SolversController_getSolver",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      },
+      "patch": {
+        "operationId": "SolversController_updateSolver",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSolverDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated solver record"
+          },
+          "400": {
+            "description": "Invalid update body"
+          },
+          "401": {
+            "description": "Missing or invalid signature"
+          },
+          "404": {
+            "description": "Solver not found"
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/solvers/{address}/stats": {
+      "get": {
+        "operationId": "SolversController_getSolverStats",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "window",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/solvers/{address}/slashes": {
+      "get": {
+        "operationId": "SolversController_getSlashHistory",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/solvers/{address}/slashes/{slashId}/dispute": {
+      "post": {
+        "operationId": "SolversController_submitDispute",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slashId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/solvers/{address}/slashes/{slashId}/dispute/resolve": {
+      "post": {
+        "operationId": "SolversController_resolveDispute",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slashId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/solvers/{address}/deregister": {
+      "post": {
+        "operationId": "SolversController_deregisterSolver",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSolverStatusDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/solvers/{address}/deactivate": {
+      "post": {
+        "operationId": "SolversController_deactivate",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSolverStatusDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/solvers/{address}/reactivate": {
+      "post": {
+        "operationId": "SolversController_reactivate",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSolverStatusDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "solvers"
+        ]
+      }
+    },
+    "/api/v1/admin/griefing": {
+      "get": {
+        "operationId": "SolverGriefingController_listEnforced",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "List solvers currently under anti-griefing enforcement",
+        "tags": [
+          "admin/griefing"
+        ]
+      }
+    },
+    "/api/v1/admin/griefing/{address}": {
+      "get": {
+        "operationId": "SolverGriefingController_getSolverRecord",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Get anti-griefing record for a solver",
+        "tags": [
+          "admin/griefing"
+        ]
+      },
+      "delete": {
+        "operationId": "SolverGriefingController_resetSolver",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Reset a solver's anti-griefing state to ok",
+        "tags": [
+          "admin/griefing"
+        ]
+      }
+    },
+    "/api/v1/admin/griefing/{address}/audit": {
+      "get": {
+        "operationId": "SolverGriefingController_getSolverAudit",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Get anti-griefing audit log for a solver",
+        "tags": [
+          "admin/griefing"
+        ]
+      }
+    },
+    "/api/v1/admin/griefing/{address}/exclude/{intentId}": {
+      "post": {
+        "operationId": "SolverGriefingController_excludeIncident",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "intentId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "summary": "Exclude an incident intent from griefing ratio",
+        "tags": [
+          "admin/griefing"
+        ]
+      }
+    },
+    "/tokens": {
       "get": {
         "operationId": "TokensController_getTokens",
         "parameters": [
@@ -354,7 +1656,7 @@
         ]
       }
     },
-    "/api/v1/tokens/stellar": {
+    "/tokens/stellar": {
       "get": {
         "operationId": "TokensController_getStellarTokens",
         "parameters": [],
@@ -375,212 +1677,323 @@
         ]
       }
     },
-    "/api/v1/intents": {
+    "/chain/health": {
       "get": {
-        "operationId": "IntentsController_list",
-        "parameters": [
-          {
-            "name": "state",
-            "required": false,
-            "in": "query",
-            "description": "Filter by intent state",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "user",
-            "required": false,
-            "in": "query",
-            "description": "Filter by user address",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "chain",
-            "required": false,
-            "in": "query",
-            "description": "Filter by source chain",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "required": true,
-            "in": "query",
-            "description": "Number of results per page",
-            "schema": {
-              "minimum": 1,
-              "maximum": 100,
-              "default": 20,
-              "type": "number"
-            }
-          },
-          {
-            "name": "cursor",
-            "required": false,
-            "in": "query",
-            "description": "Cursor for the next page of intents",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "offset",
-            "required": true,
-            "in": "query",
-            "description": "Number of results to skip",
-            "schema": {
-              "minimum": 0,
-              "default": 0,
-              "type": "number"
-            }
-          }
-        ],
-        "responses": {
-          "400": {
-            "description": "Invalid limit or offset"
-          }
-        },
-        "tags": [
-          "intents"
-        ]
-      },
-      "post": {
-        "operationId": "IntentsController_create",
-        "parameters": [],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateIntentDto"
-              }
-            }
-          }
-        },
-        "responses": {
-          "400": {
-            "description": "Invalid request body"
-          },
-          "429": {
-            "description": "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)"
-          }
-        },
-        "tags": [
-          "intents"
-        ]
-      }
-    },
-    "/api/v1/intents/open": {
-      "get": {
-        "operationId": "IntentsController_listOpen",
+        "operationId": "SorobanController_getHealth",
         "parameters": [],
         "responses": {
           "200": {
-            "description": ""
-          }
-        },
-        "tags": [
-          "intents"
-        ]
-      }
-    },
-    "/api/v1/intents/user/{address}": {
-      "get": {
-        "operationId": "IntentsController_listByUser",
-        "parameters": [
-          {
-            "name": "address",
-            "required": true,
-            "in": "path",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": ""
-          }
-        },
-        "tags": [
-          "intents"
-        ]
-      }
-    },
-    "/api/v1/intents/{id}": {
-      "get": {
-        "operationId": "IntentsController_getOne",
-        "parameters": [
-          {
-            "name": "id",
-            "required": true,
-            "in": "path",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "404": {
-            "description": "Intent not found"
-          }
-        },
-        "tags": [
-          "intents"
-        ]
-      }
-    },
-    "/api/v1/intents/{id}/audit": {
-      "get": {
-        "description": "Returns the full state-transition history for an intent ordered oldest-first. Each entry records the state the intent moved into, who triggered it, and why.",
-        "operationId": "IntentsController_getAudit",
-        "parameters": [
-          {
-            "name": "id",
-            "required": true,
-            "in": "path",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Audit trail for the intent",
+            "description": "Soroban RPC node health status (pass-through of the RPC `getHealth` result).",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "intentId": {
+                    "status": {
+                      "type": "string",
+                      "example": "healthy"
+                    },
+                    "latestLedger": {
+                      "type": "number"
+                    },
+                    "oldestLedger": {
+                      "type": "number"
+                    },
+                    "ledgerRetentionWindow": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "chain"
+        ]
+      }
+    },
+    "/chain/ledger": {
+      "get": {
+        "operationId": "SorobanController_getLatestLedger",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Latest closed ledger as reported by the Soroban RPC node.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
                       "type": "string"
                     },
-                    "entries": {
+                    "sequence": {
+                      "type": "number",
+                      "example": 12345678
+                    },
+                    "protocolVersion": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "sequence"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "chain"
+        ]
+      }
+    },
+    "/chain/network": {
+      "get": {
+        "operationId": "SorobanController_getNetwork",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Network passphrase and protocol metadata for the configured RPC node.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "friendbotUrl": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "passphrase": {
+                      "type": "string",
+                      "example": "Test SDF Network ; September 2015"
+                    },
+                    "protocolVersion": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "passphrase"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "chain"
+        ]
+      }
+    },
+    "/chain/account/{publicKey}": {
+      "get": {
+        "operationId": "SorobanController_getAccount",
+        "parameters": [
+          {
+            "name": "publicKey",
+            "required": true,
+            "in": "path",
+            "description": "Stellar Ed25519 account public key (starts with `G`, 56 characters).",
+            "schema": {
+              "example": "GABC1234567890TESTPUBLICKEY000000000000000000000000000000",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "On-chain account record (id, sequence number, and balances).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "sequence": {
+                      "type": "string",
+                      "example": "987654321"
+                    },
+                    "balances": {
                       "type": "array",
                       "items": {
                         "type": "object",
                         "properties": {
-                          "timestamp": {
+                          "balance": {
+                            "type": "string"
+                          },
+                          "asset_type": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "sequence"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Stellar public key format"
+          },
+          "429": {
+            "description": "Per-account rate limit exceeded (AccountRateLimitGuard)"
+          }
+        },
+        "tags": [
+          "chain"
+        ]
+      }
+    },
+    "/admin/shadow-report": {
+      "get": {
+        "description": "Returns (expected, simulated) comparison counts for on-chain simulations run in parallel with the off-chain intent path, broken down by transition and by divergence reason, plus a per-UTC-day series and shadow queue health. Headline totals are lifetime-to-date; `days` bounds only the per-day breakdown.",
+        "operationId": "ShadowController_shadowReport",
+        "parameters": [
+          {
+            "name": "days",
+            "required": false,
+            "in": "query",
+            "description": "Trailing UTC days of per-day breakdown to include (1-90, default 1).",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Shadow-mode divergence report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "sampleRate": {
+                      "type": "number"
+                    },
+                    "day": {
+                      "type": "string",
+                      "example": "2026-09-30"
+                    },
+                    "generatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "compared": {
+                      "type": "number"
+                    },
+                    "diverged": {
+                      "type": "number"
+                    },
+                    "divergenceRate": {
+                      "type": "number"
+                    },
+                    "transitions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "transition": {
                             "type": "string",
-                            "format": "date-time"
+                            "example": "accept"
                           },
-                          "toState": {
-                            "type": "string"
+                          "compared": {
+                            "type": "number"
                           },
-                          "actor": {
-                            "type": "string"
+                          "diverged": {
+                            "type": "number"
+                          },
+                          "divergenceRate": {
+                            "type": "number"
+                          }
+                        }
+                      }
+                    },
+                    "divergences": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "transition": {
+                            "type": "string",
+                            "example": "fill"
                           },
                           "reason": {
-                            "type": "string"
+                            "type": "string",
+                            "example": "outcome_mismatch",
+                            "enum": [
+                              "outcome_mismatch",
+                              "simulation_error",
+                              "simulation_exception",
+                              "contract_unconfigured"
+                            ]
                           },
-                          "metadata": {
-                            "type": "object",
-                            "nullable": true
+                          "count": {
+                            "type": "number"
                           }
+                        }
+                      }
+                    },
+                    "daily": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "day": {
+                            "type": "string",
+                            "example": "2026-09-30"
+                          },
+                          "compared": {
+                            "type": "number"
+                          },
+                          "diverged": {
+                            "type": "number"
+                          },
+                          "divergenceRate": {
+                            "type": "number"
+                          },
+                          "cells": {
+                            "type": "array",
+                            "items": {
+                              "type": "object"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "queue": {
+                      "type": "object",
+                      "properties": {
+                        "depth": {
+                          "type": "number"
+                        },
+                        "capacity": {
+                          "type": "number"
+                        },
+                        "dropped": {
+                          "type": "number"
+                        },
+                        "sampledOut": {
+                          "type": "number"
+                        },
+                        "disabled": {
+                          "type": "number"
+                        },
+                        "completed": {
+                          "type": "number"
                         }
                       }
                     }
@@ -588,338 +2001,236 @@
                 }
               }
             }
-          },
-          "404": {
-            "description": "Intent not found"
           }
         },
-        "summary": "Get audit trail for an intent",
+        "summary": "Daily shadow-mode divergence summary",
         "tags": [
-          "intents"
+          "admin"
         ]
       }
     },
-    "/api/v1/intents/{id}/quote": {
+    "/params": {
       "get": {
-        "operationId": "IntentsController_getPersistedQuote",
-        "parameters": [
-          {
-            "name": "id",
-            "required": true,
-            "in": "path",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
+        "description": "Returns the actively-enforced protocol parameters, any pending governance change with its timelock execution ledger and ETA, and recent parameter history. Parameters are sourced from the on-chain governance contract when PARAMS_CONTRACT_ID is configured; code/env defaults are used otherwise.",
+        "operationId": "ParamsController_getParams",
+        "parameters": [],
         "responses": {
           "200": {
-            "description": "Persisted quote for the intent"
-          },
-          "404": {
-            "description": "Intent not found or no quote persisted"
-          }
-        },
-        "tags": [
-          "intents"
-        ]
-      }
-    },
-    "/api/v1/intents/{id}/auction": {
-      "get": {
-        "operationId": "IntentsController_getAuctionPrice",
-        "parameters": [
-          {
-            "name": "id",
-            "required": true,
-            "in": "path",
-            "schema": { "type": "string" }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Current and accepted Dutch auction prices",
+            "description": "Protocol parameters — current, pending, and history",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "intentId": { "type": "string" },
-                    "currentDstAmount": { "type": "string" },
-                    "acceptedDstAmount": { "type": "string" },
-                    "timestamp": { "type": "number" }
-                  }
+                    "current": {
+                      "type": "object",
+                      "description": "Currently active protocol parameters",
+                      "properties": {
+                        "version": {
+                          "type": "number",
+                          "example": 3
+                        },
+                        "feeBps": {
+                          "type": "number",
+                          "example": 30,
+                          "description": "Protocol fee in basis points"
+                        },
+                        "chains": {
+                          "type": "object",
+                          "description": "Per-chain deadline and fill-window overrides",
+                          "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                              "deadlineSeconds": {
+                                "type": "number",
+                                "example": 900
+                              },
+                              "fillWindowSeconds": {
+                                "type": "number",
+                                "example": 120
+                              }
+                            }
+                          }
+                        },
+                        "maxExposureRatio": {
+                          "type": "number",
+                          "example": 0.05,
+                          "description": "Maximum on-chain exposure ratio (0–1)"
+                        },
+                        "slashAmount": {
+                          "type": "string",
+                          "example": "100000000"
+                        },
+                        "activeSinceLedger": {
+                          "type": "number",
+                          "example": 12345678
+                        },
+                        "adoptedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "version",
+                        "feeBps",
+                        "chains",
+                        "maxExposureRatio",
+                        "slashAmount",
+                        "activeSinceLedger",
+                        "adoptedAt"
+                      ]
+                    },
+                    "pending": {
+                      "nullable": true,
+                      "description": "Scheduled governance change not yet activated, or null",
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "params": {
+                              "type": "object"
+                            },
+                            "executionLedger": {
+                              "type": "number",
+                              "example": 12349999
+                            },
+                            "estimatedEta": {
+                              "type": "string",
+                              "format": "date-time",
+                              "description": "Best-effort ETA for timelock execution"
+                            },
+                            "observedAt": {
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "history": {
+                      "type": "array",
+                      "description": "Previous parameter versions, newest-first (max 50)",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  },
+                  "required": [
+                    "current",
+                    "pending",
+                    "history"
+                  ]
                 }
               }
             }
-          },
-          "404": { "description": "Intent not found or does not use a Dutch auction" }
-        },
-        "tags": ["intents"]
-      }
-    },
-    "/api/v1/intents/{id}/accept": {
-      "post": {
-        "operationId": "IntentsController_accept",
-        "parameters": [
-          {
-            "name": "id",
-            "required": true,
-            "in": "path",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AcceptIntentDto"
-              }
-            }
           }
         },
-        "responses": {
-          "403": {
-            "description": "Solver not registered or inactive"
-          },
-          "404": {
-            "description": "Intent not found"
-          },
-          "409": {
-            "description": "Intent is not in open state"
-          },
-          "410": {
-            "description": "Intent has expired"
-          }
-        },
+        "summary": "Current and pending governance-controlled protocol parameters",
         "tags": [
-          "intents"
+          "governance"
         ]
       }
     },
-    "/api/v1/intents/{id}/fill": {
-      "post": {
-        "operationId": "IntentsController_fill",
-        "parameters": [
-          {
-            "name": "id",
-            "required": true,
-            "in": "path",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FillIntentDto"
-              }
-            }
-          }
-        },
-        "responses": {
-          "400": {
-            "description": "Fill amount below minimum"
-          },
-          "403": {
-            "description": "Wrong solver for this intent"
-          },
-          "404": {
-            "description": "Intent not found"
-          },
-          "409": {
-            "description": "Intent is not in accepted state"
-          },
-          "410": {
-            "description": "Fill window has expired"
-          }
-        },
-        "tags": [
-          "intents"
-        ]
-      }
-    },
-    "/api/v1/intents/{id}/cancel": {
-      "post": {
-        "operationId": "IntentsController_cancel",
-        "parameters": [
-          {
-            "name": "id",
-            "required": true,
-            "in": "path",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CancelIntentDto"
-              }
-            }
-          }
-        },
-        "responses": {
-          "403": {
-            "description": "Unauthorized"
-          },
-          "404": {
-            "description": "Intent not found"
-          },
-          "409": {
-            "description": "Intent is not in open state"
-          }
-        },
-        "tags": [
-          "intents"
-        ]
-      }
-    },
-    "/api/v1/intents/quote": {
-      "post": {
-        "operationId": "IntentsController_quote",
+    "/governance/guardian/status": {
+      "get": {
+        "operationId": "GuardianController_status",
         "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Active guardian actions (with tx references) and effective pause state",
+        "tags": [
+          "governance"
+        ]
+      }
+    },
+    "/governance/guardian/actions/{id}/override": {
+      "post": {
+        "operationId": "GuardianController_override",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-admin-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/QuoteRequestDto"
+                "$ref": "#/components/schemas/GuardianOverrideDto"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/QuoteResponseDto"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limit exceeded — max 20 quote requests per 60 s per IP"
+            "description": ""
           }
         },
+        "summary": "Superadmin override of an active guardian action (audited)",
         "tags": [
-          "intents"
+          "governance"
         ]
       }
     },
-    "/api/v1/solvers": {
+    "/solvers/{address}/credentials": {
       "post": {
-        "operationId": "SolversController_register",
-        "parameters": [],
+        "description": "Mints a new scoped credential for the authenticated solver. The plaintext secret is returned ONCE. Requires a valid SEP-10 JWT for the solver.",
+        "operationId": "SolverCredentialController_create",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RegisterSolverDto"
+                "$ref": "#/components/schemas/CreateSolverCredentialDto"
               }
             }
           }
         },
         "responses": {
           "201": {
-            "description": ""
-          }
-        },
-        "tags": [
-          "solvers"
-        ]
-      },
-      "get": {
-        "operationId": "SolversController_getLeaderboard",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": ""
-          }
-        },
-        "tags": [
-          "solvers"
-        ]
-      }
-    },
-    "/api/v1/solvers/{address}": {
-      "get": {
-        "operationId": "SolversController_getSolver",
-        "parameters": [
-          {
-            "name": "address",
-            "required": true,
-            "in": "path",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": ""
-          }
-        },
-        "tags": [
-          "solvers"
-        ]
-      },
-      "patch": {
-        "operationId": "SolversController_updateSolver",
-        "parameters": [
-          {
-            "name": "address",
-            "required": true,
-            "in": "path",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateSolverDto"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Updated solver record"
-          },
-          "400": {
-            "description": "Invalid update body"
+            "description": "Credential created (plaintext shown once)"
           },
           "401": {
-            "description": "Missing or invalid signature"
-          },
-          "404": {
-            "description": "Solver not found"
+            "description": "Missing or invalid SEP-10 JWT"
           }
         },
+        "summary": "Create a scoped solver credential",
         "tags": [
           "solvers"
         ]
-      }
-    },
-    "/api/v1/solvers/{address}/stats": {
+      },
       "get": {
-        "operationId": "SolversController_getSolverStats",
+        "description": "Lists credential metadata (never plaintext) for the authenticated solver.",
+        "operationId": "SolverCredentialController_list",
         "parameters": [
           {
             "name": "address",
@@ -932,17 +2243,22 @@
         ],
         "responses": {
           "200": {
-            "description": ""
+            "description": "Credential metadata list"
+          },
+          "401": {
+            "description": "Missing or invalid SEP-10 JWT"
           }
         },
+        "summary": "List a solver's credentials",
         "tags": [
           "solvers"
         ]
       }
     },
-    "/api/v1/solvers/{address}/deregister": {
+    "/solvers/{address}/credentials/{id}/rotate": {
       "post": {
-        "operationId": "SolversController_deregisterSolver",
+        "description": "Revokes the credential and issues a replacement with the same scopes. The new plaintext is returned ONCE.",
+        "operationId": "SolverCredentialController_rotate",
         "parameters": [
           {
             "name": "address",
@@ -951,21 +2267,44 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
-        "responses": {
-          "201": {
-            "description": ""
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSolverCredentialDto"
+              }
+            }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Credential rotated (new plaintext shown once)"
+          },
+          "401": {
+            "description": "Missing or invalid SEP-10 JWT"
+          }
+        },
+        "summary": "Rotate a solver credential",
         "tags": [
           "solvers"
         ]
       }
     },
-    "/api/v1/solvers/{address}/deactivate": {
+    "/solvers/{address}/credentials/{id}/revoke": {
       "post": {
-        "operationId": "SolversController_deactivate",
+        "description": "Instantly revokes the credential and propagates to all replicas.",
+        "operationId": "SolverCredentialController_revoke",
         "parameters": [
           {
             "name": "address",
@@ -974,24 +2313,9 @@
             "schema": {
               "type": "string"
             }
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": ""
-          }
-        },
-        "tags": [
-          "solvers"
-        ]
-      }
-    },
-    "/api/v1/solvers/{address}/reactivate": {
-      "post": {
-        "operationId": "SolversController_reactivate",
-        "parameters": [
+          },
           {
-            "name": "address",
+            "name": "id",
             "required": true,
             "in": "path",
             "schema": {
@@ -1000,16 +2324,263 @@
           }
         ],
         "responses": {
-          "201": {
-            "description": ""
+          "200": {
+            "description": "Credential revoked"
+          },
+          "401": {
+            "description": "Missing or invalid SEP-10 JWT"
           }
         },
+        "summary": "Revoke a solver credential",
         "tags": [
           "solvers"
         ]
       }
     },
-    "/api/v1/stats": {
+    "/admin/jobs/queues": {
+      "get": {
+        "operationId": "JobsController_queues",
+        "parameters": [
+          {
+            "name": "x-admin-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Depth and dead-letter counts per queue",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/jobs/queues/{queue}/dead-letters": {
+      "get": {
+        "operationId": "JobsController_deadLetters",
+        "parameters": [
+          {
+            "name": "x-admin-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "queue",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Most recent dead-lettered jobs for a queue",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/flags": {
+      "get": {
+        "operationId": "FlagsController_list",
+        "parameters": [
+          {
+            "name": "x-admin-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Managed flags with env default, override pin and stored rules",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/flags/{key}": {
+      "put": {
+        "description": "Returns 202-style { status: 'pending' } when a second approval is required.",
+        "operationId": "FlagsController_update",
+        "parameters": [
+          {
+            "name": "x-admin-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateFlagDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Set a flag's default and targeting rules",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/flags/change-requests/{id}/approve": {
+      "post": {
+        "operationId": "FlagsController_approve",
+        "parameters": [
+          {
+            "name": "x-admin-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Approve a pending change (must be a different admin than the proposer)",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/flags/{key}/audit": {
+      "get": {
+        "operationId": "FlagsController_auditLog",
+        "parameters": [
+          {
+            "name": "x-admin-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Audit trail for a flag, newest first",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/health/live": {
+      "get": {
+        "operationId": "HealthController_live",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "HealthController_ready",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/health/startup": {
+      "get": {
+        "operationId": "HealthController_startup",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "HealthController_check",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/stats": {
       "get": {
         "operationId": "StatsController_getStats",
         "parameters": [],
@@ -1023,7 +2594,21 @@
         ]
       }
     },
-    "/api/v1/stats/ws": {
+    "/stats/treasury": {
+      "get": {
+        "operationId": "StatsController_getTreasuryStats",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "stats"
+        ]
+      }
+    },
+    "/stats/ws": {
       "get": {
         "operationId": "StatsController_getWsStats",
         "parameters": [],
@@ -1034,6 +2619,278 @@
         },
         "tags": [
           "stats"
+        ]
+      }
+    },
+    "/treasury/reconciliation": {
+      "get": {
+        "description": "Returns daily reconciliation summary showing expected vs actual balances per asset",
+        "operationId": "TreasuryController_getReconciliation",
+        "parameters": [
+          {
+            "name": "date",
+            "required": false,
+            "in": "query",
+            "description": "Date in YYYY-MM-DD format (defaults to today)",
+            "schema": {
+              "example": "2026-09-28",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reconciliation summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "date": {
+                      "type": "string",
+                      "example": "2026-09-28"
+                    },
+                    "assets": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "asset": {
+                            "type": "string",
+                            "example": "native"
+                          },
+                          "expectedBalance": {
+                            "type": "string",
+                            "example": "1000000000"
+                          },
+                          "actualBalance": {
+                            "type": "string",
+                            "example": "1000500000"
+                          },
+                          "discrepancy": {
+                            "type": "string",
+                            "example": "500000"
+                          },
+                          "discrepancyPercentage": {
+                            "type": "number",
+                            "example": 0.05
+                          },
+                          "hasUnexplainedDiscrepancy": {
+                            "type": "boolean",
+                            "example": false
+                          },
+                          "explanation": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        }
+                      }
+                    },
+                    "totalDiscrepancies": {
+                      "type": "number",
+                      "example": 3
+                    },
+                    "assetsWithUnexplainedDiscrepancies": {
+                      "type": "number",
+                      "example": 1
+                    },
+                    "lastReconciliationAt": {
+                      "type": "string",
+                      "example": "2026-09-28T00:00:00.000Z"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get treasury reconciliation summary",
+        "tags": [
+          "treasury"
+        ]
+      }
+    },
+    "/treasury/reconciliation/{asset}": {
+      "get": {
+        "description": "Returns detailed reconciliation data including transaction breakdown",
+        "operationId": "TreasuryController_getAssetReconciliation",
+        "parameters": [
+          {
+            "name": "asset",
+            "required": true,
+            "in": "path",
+            "description": "Asset identifier (e.g., 'native', 'USDC:ISSUER', or contract address)",
+            "schema": {
+              "example": "native",
+              "type": "string"
+            }
+          },
+          {
+            "name": "date",
+            "required": false,
+            "in": "query",
+            "description": "Date in YYYY-MM-DD format (defaults to today)",
+            "schema": {
+              "example": "2026-09-28",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detailed reconciliation data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "snapshotDate": {
+                      "type": "string",
+                      "example": "2026-09-28"
+                    },
+                    "asset": {
+                      "type": "string",
+                      "example": "native"
+                    },
+                    "expectedBalance": {
+                      "type": "string",
+                      "example": "1000000000"
+                    },
+                    "actualBalance": {
+                      "type": "string",
+                      "example": "1000500000"
+                    },
+                    "discrepancy": {
+                      "type": "string",
+                      "example": "500000"
+                    },
+                    "discrepancyPercentage": {
+                      "type": "number",
+                      "example": 0.05
+                    },
+                    "toleranceThreshold": {
+                      "type": "string",
+                      "example": "10000000"
+                    },
+                    "hasUnexplainedDiscrepancy": {
+                      "type": "boolean",
+                      "example": false
+                    },
+                    "explanation": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "breakdown": {
+                      "type": "object",
+                      "properties": {
+                        "fees": {
+                          "type": "string",
+                          "example": "500000000"
+                        },
+                        "slashes": {
+                          "type": "string",
+                          "example": "100000000"
+                        },
+                        "refunds": {
+                          "type": "string",
+                          "example": "50000000"
+                        }
+                      }
+                    },
+                    "recentTransactions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "fee",
+                              "slash",
+                              "refund"
+                            ]
+                          },
+                          "amount": {
+                            "type": "string",
+                            "example": "1000000"
+                          },
+                          "timestamp": {
+                            "type": "string",
+                            "example": "2026-09-28T12:00:00.000Z"
+                          },
+                          "reference": {
+                            "type": "string",
+                            "example": "intent-uuid"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get detailed reconciliation for an asset",
+        "tags": [
+          "treasury"
+        ]
+      }
+    },
+    "/treasury/reconciliation/trigger": {
+      "post": {
+        "description": "Admin endpoint to trigger reconciliation on-demand",
+        "operationId": "TreasuryController_triggerReconciliation",
+        "parameters": [
+          {
+            "name": "asset",
+            "required": false,
+            "in": "query",
+            "description": "Specific asset to reconcile (reconciles all if omitted)",
+            "schema": {
+              "example": "native",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reconciliation completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "example": "Reconciliation completed"
+                    },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "asset": {
+                            "type": "string"
+                          },
+                          "hasUnexplainedDiscrepancy": {
+                            "type": "boolean"
+                          },
+                          "discrepancy": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "Manually trigger treasury reconciliation",
+        "tags": [
+          "treasury"
         ]
       }
     }
@@ -1078,69 +2935,83 @@
   ],
   "components": {
     "schemas": {
-      "StellarTokenDto": {
+      "PauseKillSwitchDto": {
         "type": "object",
         "properties": {
-          "contract": {
+          "scope": {
             "type": "string",
-            "description": "Stellar contract ID of the token"
+            "enum": [
+              "global",
+              "chain",
+              "token",
+              "operation"
+            ],
+            "description": "Breadth of the pause."
           },
-          "symbol": {
+          "chain": {
             "type": "string",
-            "example": "XLM"
+            "description": "Required for chain/token/operation scope."
           },
-          "name": {
+          "token": {
             "type": "string",
-            "example": "Stellar Lumens"
+            "description": "Required for token scope; wildcard for operation scope."
           },
-          "decimals": {
-            "type": "number",
-            "example": 7
+          "operation": {
+            "type": "string",
+            "enum": [
+              "create",
+              "accept",
+              "fill",
+              "slash",
+              "onchain"
+            ],
+            "description": "Required for operation scope."
           },
-          "priceUSD": {
-            "type": "number",
-            "example": 0.1182
+          "reasonCode": {
+            "type": "string",
+            "enum": [
+              "INCIDENT",
+              "TOKEN_DEPEGGED",
+              "SOLVER_INCIDENT",
+              "CHAIN_DEGRADED",
+              "RPC_DEGRADED",
+              "REGULATORY",
+              "MAINTENANCE"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Operator explanation, shown to clients and in the audit log."
           }
         },
         "required": [
-          "contract",
-          "symbol",
-          "name",
-          "decimals",
-          "priceUSD"
+          "scope",
+          "reasonCode",
+          "reason"
         ]
       },
-      "StellarTokensResponseDto": {
+      "ApproveResumeDto": {
         "type": "object",
         "properties": {
-          "tokens": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/StellarTokenDto"
-            }
+          "note": {
+            "type": "string",
+            "description": "Why the resume is safe."
+          },
+          "approvalsRequired": {
+            "type": "number",
+            "default": 2,
+            "minimum": 2,
+            "description": "Distinct approvals needed."
           }
-        },
-        "required": [
-          "tokens"
-        ]
-      },
-      "DutchAuctionDto": {
-        "type": "object",
-        "properties": {
-          "startDstAmount": { "type": "string", "description": "Starting destination amount in base units" },
-          "decayStart": { "type": "number", "description": "Unix timestamp when the price decay starts" },
-          "decayEnd": { "type": "number", "description": "Unix timestamp when the price reaches minDstAmount" },
-          "exclusiveSolver": { "type": "string", "maxLength": 56, "description": "Solver address exclusively eligible until exclusivityEnd" },
-          "exclusivityEnd": { "type": "number", "description": "Unix timestamp when solver exclusivity ends" }
-        },
-        "required": ["startDstAmount", "decayStart", "decayEnd"]
+        }
       },
       "CreateIntentDto": {
         "type": "object",
         "properties": {
           "user": {
             "type": "string",
-            "description": "Stellar or EVM address of the user creating the intent"
+            "description": "Stellar address of the user creating the intent",
+            "maxLength": 56
           },
           "srcChain": {
             "type": "string",
@@ -1161,7 +3032,8 @@
           },
           "srcTokenSymbol": {
             "type": "string",
-            "description": "Source token symbol, e.g. USDC"
+            "description": "Source token symbol, e.g. USDC",
+            "maxLength": 16
           },
           "srcTokenDecimals": {
             "type": "number",
@@ -1175,11 +3047,13 @@
           },
           "dstTokenContract": {
             "type": "string",
-            "description": "Destination Stellar token contract"
+            "description": "Destination Stellar token contract",
+            "maxLength": 56
           },
           "dstTokenSymbol": {
             "type": "string",
-            "description": "Destination token symbol, e.g. USDC"
+            "description": "Destination token symbol, e.g. USDC",
+            "maxLength": 16
           },
           "dstTokenDecimals": {
             "type": "number",
@@ -1191,17 +3065,10 @@
             "type": "string",
             "description": "Minimum acceptable destination amount as an integer string"
           },
-          "auction": {
-            "$ref": "#/components/schemas/DutchAuctionDto",
-            "description": "Optional Dutch-auction allocation terms"
-          },
           "deadline": {
             "type": "number",
             "description": "Unix timestamp deadline; defaults to now + 1800s; must be between now+60s and now+24h"
           },
-          "signature": { "type": "string", "maxLength": 4096, "description": "EIP-712 signature for EVM-originated intent creation" },
-          "nonce": { "type": "string", "maxLength": 128, "description": "Unique nonce included in the EIP-712 signature" },
-          "expiresAt": { "type": "number", "description": "Unix timestamp when the EIP-712 signature expires" },
           "idempotencyKey": {
             "type": "string",
             "description": "Idempotency key for deduplicating duplicate requests"
@@ -1220,18 +3087,93 @@
           "minDstAmount"
         ]
       },
+      "BatchLookupDto": {
+        "type": "object",
+        "properties": {
+          "intentIds": {
+            "maxItems": 100,
+            "description": "Intent IDs to look up (max 100). IDs with no matching record are omitted from the response, not individually 404'd.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "intentIds"
+        ]
+      },
+      "BatchCreateIntentsDto": {
+        "type": "object",
+        "properties": {
+          "intents": {
+            "description": "List of intents to create atomically (1..50)",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CreateIntentDto"
+            }
+          }
+        },
+        "required": [
+          "intents"
+        ]
+      },
+      "BatchCreateItemErrorDto": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "number",
+            "description": "Zero-based index of the failed intent item in the input array"
+          },
+          "field": {
+            "type": "string",
+            "description": "Field name associated with the error, if applicable"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable error description"
+          }
+        },
+        "required": [
+          "index",
+          "message"
+        ]
+      },
+      "BatchCreateIntentsResponseDto": {
+        "type": "object",
+        "properties": {
+          "created": {
+            "description": "Array of created Intent objects when successful",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "errors": {
+            "description": "List of per-item validation errors if any failed",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchCreateItemErrorDto"
+            }
+          }
+        },
+        "required": [
+          "created",
+          "errors"
+        ]
+      },
       "AcceptIntentDto": {
         "type": "object",
         "properties": {
           "solver": {
             "type": "string",
-            "description": "Solver address accepting the intent"
+            "description": "Solver address accepting the intent",
+            "maxLength": 56
           },
-          "nonce": { "type": "string", "minLength": 16, "maxLength": 128, "description": "Single-use signing nonce" },
-          "expiresAt": { "type": "number", "description": "Unix timestamp when the signature expires" },
           "signature": {
             "type": "string",
-            "description": "Base64-encoded Ed25519 signature of the signed intent action"
+            "description": "Base64-encoded Ed25519 signature of the message \"accept:<intentId>:<solver>\" produced by the solver's private key",
+            "maxLength": 88
           }
         },
         "required": [
@@ -1244,7 +3186,8 @@
         "properties": {
           "solver": {
             "type": "string",
-            "description": "Solver address filling the intent (must match the accepting solver)"
+            "description": "Solver address filling the intent (must match the accepting solver)",
+            "maxLength": 56
           },
           "fillAmount": {
             "type": "string",
@@ -1252,13 +3195,13 @@
           },
           "txHash": {
             "type": "string",
-            "description": "Stellar fill transaction hash"
+            "description": "Stellar fill transaction hash",
+            "maxLength": 128
           },
-          "nonce": { "type": "string", "minLength": 16, "maxLength": 128, "description": "Single-use signing nonce" },
-          "expiresAt": { "type": "number", "description": "Unix timestamp when the signature expires" },
           "signature": {
             "type": "string",
-            "description": "Base64-encoded Ed25519 signature of the signed intent action"
+            "description": "Base64-encoded Ed25519 signature of the message \"fill:<intentId>:<solver>\" produced by the solver's private key",
+            "maxLength": 88
           }
         },
         "required": [
@@ -1272,18 +3215,46 @@
         "properties": {
           "user": {
             "type": "string",
-            "description": "Stellar or EVM address of the intent's original creator (must match)"
+            "description": "Stellar address of the intent's original creator (must match)",
+            "maxLength": 56
           },
-          "nonce": { "type": "string", "minLength": 16, "maxLength": 128, "description": "Single-use signing nonce" },
-          "expiresAt": { "type": "number", "description": "Unix timestamp when the signature expires" },
           "signature": {
             "type": "string",
-            "maxLength": 4096,
-            "description": "Base64 Ed25519 or EIP-712 signature proving control of user"
+            "description": "Base64-encoded Ed25519 signature of the message \"cancel:<intentId>\" produced by the private key of `user`",
+            "maxLength": 88
           }
         },
         "required": [
           "user",
+          "signature"
+        ]
+      },
+      "AmendIntentDto": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "type": "string",
+            "description": "Stellar address of the intent's original creator (must match)",
+            "maxLength": 56
+          },
+          "minDstAmount": {
+            "type": "string",
+            "description": "Replacement minimum destination amount in base units"
+          },
+          "deadline": {
+            "type": "number",
+            "description": "Replacement Unix timestamp deadline"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Base64 Ed25519 signature of \"amend:<intentId>:<user>:<minDstAmount>:<deadline>\"",
+            "maxLength": 88
+          }
+        },
+        "required": [
+          "user",
+          "minDstAmount",
+          "deadline",
           "signature"
         ]
       },
@@ -1517,6 +3488,10 @@
           "priceImpact": {
             "type": "number",
             "description": "Price impact for the best quote as a decimal fraction (0 when no quote available)"
+          },
+          "indicative": {
+            "type": "boolean",
+            "description": "True when no solver responded and the returned quote is indicative"
           }
         },
         "required": [
@@ -1536,11 +3511,13 @@
         "properties": {
           "address": {
             "type": "string",
-            "description": "Solver's Stellar address"
+            "description": "Solver's Stellar address",
+            "maxLength": 56
           },
           "name": {
             "type": "string",
-            "description": "Solver's display name"
+            "description": "Solver's display name",
+            "maxLength": 64
           },
           "bondAmount": {
             "type": "string",
@@ -1575,7 +3552,8 @@
           },
           "proofSignature": {
             "type": "string",
-            "description": "Proof-of-control signature for the advertised solver address"
+            "description": "Proof-of-control signature for the advertised solver address",
+            "maxLength": 88
           }
         },
         "required": [
@@ -1630,6 +3608,103 @@
         "required": [
           "signature"
         ]
+      },
+      "UpdateSolverStatusDto": {
+        "type": "object",
+        "properties": {
+          "signature": {
+            "type": "string",
+            "description": "Proof-of-control signature for the solver status update",
+            "maxLength": 88
+          }
+        },
+        "required": [
+          "signature"
+        ]
+      },
+      "StellarTokenDto": {
+        "type": "object",
+        "properties": {
+          "contract": {
+            "type": "string",
+            "description": "Stellar contract ID of the token"
+          },
+          "symbol": {
+            "type": "string",
+            "example": "XLM"
+          },
+          "name": {
+            "type": "string",
+            "example": "Stellar Lumens"
+          },
+          "decimals": {
+            "type": "number",
+            "example": 7
+          },
+          "priceUSD": {
+            "type": "number",
+            "example": 0.1182
+          }
+        },
+        "required": [
+          "contract",
+          "symbol",
+          "name",
+          "decimals",
+          "priceUSD"
+        ]
+      },
+      "StellarTokensResponseDto": {
+        "type": "object",
+        "properties": {
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StellarTokenDto"
+            }
+          }
+        },
+        "required": [
+          "tokens"
+        ]
+      },
+      "GuardianOverrideDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "CreateSolverCredentialDto": {
+        "type": "object",
+        "properties": {
+          "scopes": {
+            "type": "string",
+            "enum": [
+              "solver:read",
+              "intents:read",
+              "quote:respond",
+              "intents:accept",
+              "intents:fill"
+            ],
+            "description": "Scopes granted to the credential"
+          },
+          "ipAllowlist": {
+            "description": "Optional source-address allowlist. Entries are an exact IPv4 address, an IPv4 CIDR block, an exact IPv6 address, or `*` for any source. IPv6 CIDR blocks and hostnames are not supported; an entry that does not parse never matches, so a typo locks the credential out rather than opening it up.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expiresAt": {
+            "type": "number",
+            "description": "Unix epoch seconds at which the credential expires (null = never)"
+          }
+        },
+        "required": [
+          "scopes"
+        ]
+      },
+      "UpdateFlagDto": {
+        "type": "object",
+        "properties": {}
       }
     }
   }

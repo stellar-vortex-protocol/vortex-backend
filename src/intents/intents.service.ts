@@ -8,8 +8,12 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { v4 as uuidv4 } from "uuid";
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
-import { Intent, IntentAuditEntry, IntentState } from "./intents.types";
-import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
+import { Intent, IntentAuditEntry, IntentState, PendingIntentOp } from "./intents.types";
+import { INTENTS_REPOSITORY, IIntentsRepository, isVersionConflict, MutationResult } from "./intents.repository";
+import { INTENTS_UNIT_OF_WORK, IIntentsUnitOfWork } from "./intents.unit-of-work";
+import { IntentDeadlineScheduler } from "./intents-deadline.jobs";
+import { IOutboxWriter, NewOutboxEntry } from "../soroban/outbox.repository";
+import { buildOutboxInvocation, createIntentEntry } from "../soroban/outbox-operations";
 import { AppConfig } from "../config/configuration";
 import {
   CHAIN_DEADLINE_DEFAULTS,
@@ -28,7 +32,9 @@ import { FeatureFlagService } from "../flags/feature-flag.service";
 const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slashed"];
 
 /**
- * Sentinel `from_state` for the transition into "open".
+ * Sentinel `from_state` for the transition at intent creation — into `open`
+ * on the in-memory path, or into `pending_open` when the onchain rollout
+ * parks the fresh intent (issue #385).
  *
  * Not an {@link IntentState}: creation has no prior state, and inventing one
  * would put a value in the `from_state` label that no lifecycle edge can
@@ -36,6 +42,34 @@ const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slash
  * honest.
  */
 const NONE_STATE = "none";
+
+/** pending_* state each chain write parks in (issue #385). */
+const PENDING_STATE_BY_OP: Record<PendingIntentOp, IntentState> = {
+  create: "pending_open",
+  accept: "pending_accepted",
+  fill: "pending_filled",
+  cancel: "pending_cancelled",
+};
+
+/** Confirmed base state each pending_* marker settles back to (issue #385). */
+const CONFIRMED_STATE_BY_PENDING: Partial<Record<IntentState, IntentState>> = {
+  pending_open: "open",
+  pending_accepted: "accepted",
+  pending_filled: "filled",
+  pending_cancelled: "cancelled",
+};
+
+/**
+ * Settlement-contract method each write broadcasts (issue #385). Names mirror
+ * the shadow hooks (`observeAccept`/`observeFill`/`cancelIfOpen`) so the
+ * simulated and the real invocation stay the same call.
+ */
+const ONCHAIN_METHOD_BY_OP: Record<PendingIntentOp, string> = {
+  create: "create_intent",
+  accept: "accept_intent",
+  fill: "fill_intent",
+  cancel: "cancel_intent",
+};
 
 /**
  * Runtime check that `transition` is one of the five the shadow monitor models.
@@ -50,6 +84,43 @@ function isKnownShadowTransition(transition: ShadowTransition): boolean {
 
 /** How long a completed idempotency-key result stays replayable. */
 const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
+
+/**
+ * Compute the USD value of a base-unit amount at a given token price (issue #440).
+ *
+ * Uses integer arithmetic for the amount (BigInt) so large base-unit values do
+ * not lose precision before the float conversion; the price is scaled to 1e8
+ * to keep the multiplication in integer space.  Returns `undefined` when the
+ * price is unknown — historical rows are never backfilled with fabricated
+ * values.
+ */
+function computeUsdValue(
+  srcAmount: string,
+  decimals: number,
+  priceUsd: number | undefined,
+): number | undefined {
+  if (priceUsd === undefined || priceUsd === null || !Number.isFinite(priceUsd)) return undefined;
+  try {
+    const amount = BigInt(srcAmount);
+    const scale = 10n ** BigInt(decimals);
+    const scaled = amount * BigInt(Math.round(priceUsd * 1e8));
+    return Number(scaled / (scale * 100_000_000n));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Narrow an optimistic-concurrency mutation result to the written record.
+ *
+ * `VersionConflict` means a concurrent writer won the race — the guarded
+ * transition did not happen — which every service-level caller treats exactly
+ * like "no match": `null`. The conflict details remain available to callers
+ * that talk to the repository directly (see `etag.ts` / `preconditionFailed`).
+ */
+function written(result: MutationResult): Intent | null {
+  return result !== null && !isVersionConflict(result) ? result : null;
+}
 
 /**
  * Maximum number of simultaneously open (state = "open" | "accepted") intents
@@ -67,6 +138,13 @@ const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
  * a code change + review rather than a silent env-var override.
  */
 export const MAX_OPEN_INTENTS_PER_USER = 50;
+
+/**
+ * Upper bound on re-read → retry attempts inside {@link IntentsService.mutateWithRetry}.
+ * Three conflicts in a row means a hot row; giving up keeps a retrying writer
+ * from starving concurrent readers (issue #405).
+ */
+export const MAX_VERSION_RETRIES = 3;
 
 /** Payload for creating a new intent. */
 export type NewIntentData = Omit<Intent, "intentId" | "createdAt" | "state">;
@@ -133,7 +211,37 @@ export class IntentsService {
      */
     @Optional() private readonly metricsService?: MetricsService,
     @Optional() private readonly flags?: FeatureFlagService,
+    /**
+     * Transactional outbox unit of work (issue #396).
+     *
+     * Present only where the durable outbox is wired (and in the crash-injection
+     * harnesses): while it is injected, `create()` commits the intent row and its
+     * `create_intent` outbox row atomically and the relay submits later, instead
+     * of calling the settlement contract inline. Absent — the default graph at
+     * HEAD — creation keeps the direct, synchronous registration path.
+     */
+    @Optional() @Inject(INTENTS_UNIT_OF_WORK)
+    private readonly unitOfWork?: IIntentsUnitOfWork,
+    /**
+     * Deadline-job scheduler (issue #550). Registers the expire/fill-window
+     * wake-ups whenever an intent is created or its fill window starts, so the
+     * sweeper settles deadlines through the jobs queue instead of polling.
+     * `@Optional()` because unit harnesses that never exercise deadline jobs
+     * construct this service directly without one.
+     */
+    @Optional() private readonly deadlines?: IntentDeadlineScheduler,
   ) {}
+
+  /**
+   * Lifecycle hook (Nest `OnModuleDestroy`): drops the in-memory idempotency
+   * caches. This service owns no timers — deadline wake-ups live in the jobs
+   * queue — so the caches are the only teardown the instance has. Called
+   * directly by the unit harnesses after each case for the same reason.
+   */
+  onModuleDestroy(): void {
+    this.idempotencyCache.clear();
+    this.idempotencyInFlight.clear();
+  }
 
   /**
    * Logs the store size and evicts stale terminal intents from the in-memory
@@ -287,6 +395,41 @@ export class IntentsService {
    * Build, optionally register on-chain, and persist a brand-new intent.
    * Contains no idempotency logic — deduplication is the caller's concern.
    */
+  /**
+   * Creation-time source-deposit-verification verdict (issue #403).
+   *
+   * - `evm.depositVerificationEnabled=false` → everything is marked verified
+   *   up front (`skipped`) so the verify loop never picks it up.
+   * - Non-EVM source chains (Stellar) are out of the EVM verifier's scope →
+   *   `skipped`, verified.
+   * - Otherwise the intent is born `pending` / unverified until the
+   *   source-deposit verification service ticks it.
+   */
+  private initialSrcVerification(
+    srcChain: NewIntentData["srcChain"],
+    now: number,
+  ): Pick<Intent, "srcVerified" | "srcVerification"> {
+    const enabled =
+      this.configService.get("evm", { infer: true })?.depositVerificationEnabled === true;
+    if (!enabled) {
+      return {
+        srcVerified: true,
+        srcVerification: {
+          status: "skipped",
+          checkedAt: now,
+          detail: "deposit verification disabled",
+        },
+      };
+    }
+    if (srcChain === "stellar") {
+      return {
+        srcVerified: true,
+        srcVerification: { status: "skipped", checkedAt: now, detail: "non-EVM source chain" },
+      };
+    }
+    return { srcVerified: false, srcVerification: { status: "pending", checkedAt: now } };
+  }
+
   private async persistNewIntent(
     data: Omit<Intent, "intentId" | "createdAt" | "state">,
   ): Promise<Intent> {
@@ -299,41 +442,113 @@ export class IntentsService {
     const defaultDeadline = data.deadline ?? now + paramsSnapshot.deadlineSeconds;
 
     const intent: Intent = {
+      // Issue #403: stamp the creation-time source-deposit verdict first so
+      // the row is self-describing from its first write — the verify loop
+      // picks intents up by `srcVerified === false` and never re-checks
+      // "skipped"/"grandfathered" ones. An explicit caller-supplied verdict
+      // (imports, seeds) wins over this default.
+      ...this.initialSrcVerification(data.srcChain, now),
       ...data,
       intentId: uuidv4(),
       state: "open",
       createdAt: now,
       deadline: defaultDeadline,
       paramsVersion: paramsSnapshot.version,
+      usdValueAtCreate: computeUsdValue(
+        data.srcAmount,
+        data.srcToken.decimals,
+        data.srcToken.priceUSD,
+      ),
+      // Issue #385: both creation paths carry the pending keys — undefined
+      // until a chain write is in flight — so the in-memory and on-chain
+      // paths return an identical shape.
+      pendingTxHash: undefined,
+      pendingOp: undefined,
     };
 
     // ONCHAIN_INTENTS_ENABLED is the default; the `onchain-intents-enabled`
     // runtime flag (issue #495) can roll it out per chain / percentage.
-    const onchain = this.flags
-      ? await this.flags.getBooleanValue("onchain-intents-enabled", {
-          targetingKey: intent.intentId,
-          chain: intent.srcChain,
-        })
-      : this.configService.get("onchainIntentsEnabled", { infer: true });
-    if (onchain) {
-      await this.registerOnChain(intent);
+    const onchain = await this.isOnchainWrite(intent);
+    if (onchain && this.unitOfWork) {
+      // Issue #396: intent row + create_intent outbox row commit atomically;
+      // OutboxRelayService submits afterwards, never inside this request.
+      // Issue #385: nothing has reached the chain yet, so the row is born
+      // `pending_open` — `pendingTxHash` is attached once the confirmation
+      // watcher observes the relay's transaction.
+      intent.state = "pending_open";
+      intent.pendingOp = "create";
+      await this.unitOfWork.run(async ({ intents, outbox }) => {
+        await this.enqueueOnchain(outbox, intent);
+        await intents.save(intent);
+      });
+    } else if (onchain) {
+      // Registration must land before the row exists: a failed broadcast
+      // rejects the whole creation, leaving no dangling `pending_open` record
+      // behind (issue #385).
+      const txHash = await this.registerOnChain(intent);
+      intent.state = "pending_open";
+      intent.pendingOp = "create";
+      intent.pendingTxHash = txHash;
+      await this.repo.save(intent);
+    } else {
+      await this.repo.save(intent);
     }
-
-    await this.repo.save(intent);
+    // Issue #550: wake the sweeper at this intent's deadline through the jobs
+    // queue instead of relying on the legacy 30s poll.
+    this.deadlines?.scheduleExpire(intent);
     // Creation is the entry edge of the funnel: the `vortex:intent:*` recording
     // rules count transitions *into* each state, so without this the intent
     // dashboard would start every conversion ratio from zero. `from_state` is
     // the sentinel "none" — an intent that does not exist yet has no state.
-    this.countTransition(NONE_STATE, "open");
+    this.countTransition(NONE_STATE, intent.state);
     return intent;
   }
 
   /**
-   * Registers `intent` with the settlement contract. Only called when
-   * ONCHAIN_INTENTS_ENABLED is on; while that flag is off, create() stays
-   * fully in-memory (the rollout fallback).
+   * Queues the settlement contract's `create_intent` call for `intent` on the
+   * outbox (issue #396), for the unit-of-work path of {@link persistNewIntent}.
+   * Nothing is broadcast here — the relay submits afterwards, so the request
+   * never waits on Soroban and an Soroban outage cannot fail intent creation.
    */
-  private async registerOnChain(intent: Intent): Promise<void> {
+  private async enqueueOnchain(outbox: IOutboxWriter, intent: Intent): Promise<void> {
+    const contractId = this.configService.get("stellar.settlementContractId", { infer: true });
+    if (!contractId) {
+      throw new ServiceUnavailableException(
+        "On-chain intent registration is enabled but SETTLEMENT_CONTRACT_ID is not configured",
+      );
+    }
+    const entry = createIntentEntry(intent);
+    // Validates the entry encodes to a contract call before it can become a
+    // poison row.
+    buildOutboxInvocation(entry, contractId);
+    await outbox.enqueue(entry);
+    this.logger.log(`Queued on-chain registration for intent ${intent.intentId}`);
+  }
+
+  /**
+   * Does a write for `intent` need the settlement contract? Resolved from the
+   * runtime rollout flag when the flag service is wired (issue #495), from
+   * `ONCHAIN_INTENTS_ENABLED` otherwise — shared by creation and the later
+   * accept/fill/cancel writes so they can never disagree about a rollout.
+   */
+  private async isOnchainWrite(intent: Intent): Promise<boolean> {
+    if (this.flags) {
+      return this.flags.getBooleanValue("onchain-intents-enabled", {
+        targetingKey: intent.intentId,
+        chain: intent.srcChain,
+      });
+    }
+    return this.configService.get("onchainIntentsEnabled", { infer: true });
+  }
+
+  /**
+   * Registers `intent` with the settlement contract, returning the broadcast
+   * transaction hash (issue #385 — stamped as `pendingTxHash`). Only called
+   * when ONCHAIN_INTENTS_ENABLED is on and no outbox unit of work is wired;
+   * while that flag is off, create() stays fully in-memory (the rollout
+   * fallback).
+   */
+  private async registerOnChain(intent: Intent): Promise<string> {
     const contractId = this.configService.get("stellar.settlementContractId", { infer: true });
     if (!contractId) {
       throw new ServiceUnavailableException(
@@ -348,6 +563,7 @@ export class IntentsService {
         args: this.buildCreateIntentArgs(intent),
       });
       this.logger.log(`Registered intent ${intent.intentId} on-chain (tx ${result.hash})`);
+      return result.hash;
     } catch (err) {
       this.logger.error(
         `Failed to register intent ${intent.intentId} on-chain: ${(err as Error).message}`,
@@ -513,7 +729,10 @@ export class IntentsService {
   }
 
   /**
-   * Count the number of intents in "open" or "accepted" state for a user.
+   * Count the number of intents standing for a user: `open` or `accepted`,
+   * plus their `pending_open` / `pending_accepted` in-flight variants
+   * (issue #385) — a chain write that has not confirmed yet still occupies
+   * the user's {@link MAX_OPEN_INTENTS_PER_USER} slot.
    *
    * Used by IntentsController.create() to enforce MAX_OPEN_INTENTS_PER_USER.
    * The query is a simple filter over findByUser so it works identically
@@ -524,7 +743,11 @@ export class IntentsService {
   async countOpenByUser(user: string): Promise<number> {
     const userIntents = await this.repo.findByUser(user);
     return userIntents.filter(
-      (i) => i.state === "open" || i.state === "accepted",
+      (i) =>
+        i.state === "open" ||
+        i.state === "accepted" ||
+        i.state === "pending_open" ||
+        i.state === "pending_accepted",
     ).length;
   }
 
@@ -538,14 +761,44 @@ export class IntentsService {
    * it is used by test setup only. It is logged so that a future production
    * caller is caught in review rather than silently skewing the dashboards.
    */
-  async update(id: string, patch: Partial<Intent>): Promise<Intent | null> {
+  async update(
+    id: string,
+    patch: Partial<Intent>,
+    expectedVersion?: number,
+  ): Promise<Intent | null> {
     if (patch.state !== undefined) {
       this.logger.warn(
         `[state-machine] update(${id}) carries a state patch ("${patch.state}"); ` +
           `this bypasses the guarded transitions and their observers`,
       );
     }
-    return this.repo.update(id, patch);
+    return written(await this.repo.update(id, patch, expectedVersion));
+  }
+
+  /**
+   * Re-read → mutate loop for writers for whom retrying is semantically safe
+   * (the sweeper, quote persistence, deposit verification). `mutate` receives
+   * the freshly-read intent and returns the versioned mutation to attempt, or
+   * `undefined` when the intent no longer needs changing — which ends the loop
+   * with `null`. Bounded by {@link MAX_VERSION_RETRIES}; if every attempt
+   * conflicts, the last VersionConflict is returned.
+   */
+  async mutateWithRetry(
+    id: string,
+    mutate: (current: Intent) => Promise<MutationResult> | MutationResult | undefined,
+    maxAttempts = MAX_VERSION_RETRIES,
+  ): Promise<MutationResult> {
+    let last: MutationResult = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const current = await this.repo.findById(id);
+      if (!current) return null;
+      const pending = mutate(current);
+      if (pending === undefined) return null;
+      last = await pending;
+      if (!isVersionConflict(last)) return last;
+    }
+    this.logger.warn(`[occ] gave up on intent ${id} after ${maxAttempts} version conflicts`);
+    return last;
   }
 
   /** Amend an open intent without changing its ID or creation history. */
@@ -574,10 +827,25 @@ export class IntentsService {
     const nowSec = now ?? Math.floor(Date.now() / 1000);
     const fillWindow =
       CHAIN_FILL_WINDOW_DEFAULTS[intent.srcChain] ?? DEFAULT_FILL_WINDOW_SECONDS;
-    const updated = await this.repo.acceptIfOpen(id, solver, nowSec + fillWindow, nowSec);
-    if (updated !== null) this.countTransition("open", "accepted");
+    const updated = written(await this.repo.acceptIfOpen(id, solver, nowSec + fillWindow, nowSec));
+    if (updated !== null) {
+      this.countTransition("open", "accepted");
+      // Issue #550: the fill window is now the binding deadline — schedule the
+      // fill-window job so the sweeper settles it through the jobs queue.
+      this.deadlines?.scheduleFillWindow(updated);
+    }
     if (this.beginShadowObservation()) {
       this.observeAccept(updated ?? intent, solver, updated !== null);
+    }
+    if (updated === null) return null;
+    // Issue #385: with the onchain rollout on, the accept is not final until
+    // the contract has seen it — broadcast and park pending_accepted.
+    if (await this.isOnchainWrite(updated)) {
+      return this.parkWithBroadcast(updated, "accept", () => [
+        nativeToScVal(updated.intentId, { type: "string" }),
+        new Address(updated.solver ?? solver).toScVal(),
+        nativeToScVal(updated.deadline, { type: "u64" }),
+      ]);
     }
     return updated;
   }
@@ -610,7 +878,7 @@ export class IntentsService {
     now?: number,
   ): Promise<Intent | null> {
     const nowSec = now ?? Math.floor(Date.now() / 1000);
-    const updated = await this.repo.fillIfAccepted(id, solver, patch, nowSec);
+    const updated = written(await this.repo.fillIfAccepted(id, solver, patch, nowSec));
     if (updated !== null) this.countTransition("accepted", "filled");
     if (this.beginShadowObservation()) {
       // Report from `patch` rather than re-reading: on a lost race the stored
@@ -619,6 +887,16 @@ export class IntentsService {
       // contract would have been handed if the off-chain guard had not
       // pre-empted it.
       this.observeFill(id, solver, patch.fillAmount, patch.txHash, updated !== null);
+    }
+    if (updated === null) return null;
+    // Issue #385: park the fill pending until the contract confirms it.
+    if (await this.isOnchainWrite(updated)) {
+      return this.parkWithBroadcast(updated, "fill", () => [
+        nativeToScVal(updated.intentId, { type: "string" }),
+        new Address(updated.solver ?? solver).toScVal(),
+        nativeToScVal(BigInt(patch.fillAmount ?? "0"), { type: "i128" }),
+        nativeToScVal(patch.txHash ?? "", { type: "string" }),
+      ]);
     }
     return updated;
   }
@@ -651,7 +929,7 @@ export class IntentsService {
    * (e.g. a concurrent accept() or sweeper expiry already transitioned it).
    */
   async cancelIfOpen(id: string): Promise<Intent | null> {
-    const updated = await this.repo.cancelIfOpen(id);
+    const updated = written(await this.repo.cancelIfOpen(id));
     if (updated !== null) this.countTransition("open", "cancelled");
     if (this.beginShadowObservation()) {
       const subject = updated ?? (await this.repo.findById(id));
@@ -668,7 +946,109 @@ export class IntentsService {
         );
       }
     }
+    if (updated === null) return null;
+    // Issue #385: the cancellation is not final until the contract has seen
+    // it — broadcast and park pending_cancelled.
+    if (await this.isOnchainWrite(updated)) {
+      return this.parkWithBroadcast(updated, "cancel", () => [
+        nativeToScVal(updated.intentId, { type: "string" }),
+        new Address(updated.user).toScVal(),
+      ]);
+    }
     return updated;
+  }
+
+  /**
+   * Park an intent in the `pending_*` state matching `op` (issue #385).
+   *
+   * Parking is a confirmation marker, not a lifecycle edge: it records that
+   * the guarded off-chain write for `op` has committed — and, when given, the
+   * hash of its chain broadcast — while the settlement contract has not yet
+   * confirmed it. It therefore writes the state directly rather than through
+   * {@link canTransition}, because `filled → pending_filled` would otherwise
+   * be an illegal edge out of a terminal state. {@link confirmIntent} settles
+   * the marker back to the base state.
+   *
+   * @param intentId - Intent to park.
+   * @param op - Chain write whose confirmation is being awaited.
+   * @param txHash - Broadcast transaction hash, when one was obtained.
+   * @returns The parked intent, or null when it does not exist.
+   */
+  async transitionToOnChainPending(
+    id: string,
+    op: PendingIntentOp,
+    txHash?: string,
+  ): Promise<Intent | null> {
+    const intent = await this.repo.findById(id);
+    if (!intent) return null;
+    const updated = written(
+      await this.repo.update(id, {
+        state: PENDING_STATE_BY_OP[op],
+        pendingOp: op,
+        pendingTxHash: txHash,
+      }),
+    );
+    if (updated !== null) this.countTransition(intent.state, updated.state);
+    return updated;
+  }
+
+  /**
+   * Resolve a `pending_*` marker to its confirmed base state (issue #385),
+   * clearing `pendingTxHash`/`pendingOp`.
+   *
+   * @param intentId - Intent whose in-flight write has been observed on chain.
+   * @returns The confirmed intent, or null when it does not exist or is not
+   *   in a pending state — confirmation only means something for a write that
+   *   is actually in flight.
+   */
+  async confirmIntent(id: string): Promise<Intent | null> {
+    const intent = await this.repo.findById(id);
+    if (!intent) return null;
+    const confirmed = CONFIRMED_STATE_BY_PENDING[intent.state];
+    if (!confirmed) return null;
+    const updated = written(
+      await this.repo.update(id, {
+        state: confirmed,
+        pendingTxHash: undefined,
+        pendingOp: undefined,
+      }),
+    );
+    if (updated !== null) this.countTransition(intent.state, confirmed);
+    return updated;
+  }
+
+  /**
+   * Issue #385: attempt the settlement-contract broadcast for a committed
+   * write, then park the intent in its `pending_*` state.
+   *
+   * The park is unconditional — with the onchain rollout on, the base state
+   * is never claimed final — while the broadcast is best-effort: argument
+   * encoding (a malformed address) or an RPC failure logs and parks without
+   * a hash instead of failing a write that has already committed. Settling
+   * the marker is {@link confirmIntent}'s job.
+   */
+  private async parkWithBroadcast(
+    intent: Intent,
+    op: PendingIntentOp,
+    buildArgs: () => xdr.ScVal[],
+  ): Promise<Intent> {
+    let txHash: string | undefined;
+    try {
+      const contractId = this.configService.get("stellar.settlementContractId", { infer: true });
+      if (!contractId) throw new Error("SETTLEMENT_CONTRACT_ID is not configured");
+      const result = await this.stellarTxService.invokeContract({
+        contractId,
+        method: ONCHAIN_METHOD_BY_OP[op],
+        args: buildArgs(),
+      });
+      txHash = result.hash;
+    } catch (err) {
+      this.logger.error(
+        `On-chain ${op} broadcast failed for intent ${intent.intentId}: ` +
+          `${(err as Error).message} — parked pending without a tx hash`,
+      );
+    }
+    return (await this.transitionToOnChainPending(intent.intentId, op, txHash)) ?? intent;
   }
 
   /**
@@ -677,7 +1057,7 @@ export class IntentsService {
    * always wins the race.
    */
   async expireIfOpen(id: string): Promise<Intent | null> {
-    const updated = await this.repo.expireIfOpen(id);
+    const updated = written(await this.repo.expireIfOpen(id));
     if (updated !== null) this.countTransition("open", "expired");
     if (this.beginShadowObservation()) {
       const subject = updated ?? (await this.repo.findById(id));
@@ -705,7 +1085,7 @@ export class IntentsService {
     id: string,
     patch: { slashedAt: number; slashReason: string },
   ): Promise<Intent | null> {
-    const updated = await this.repo.slashIfAccepted(id, patch);
+    const updated = written(await this.repo.slashIfAccepted(id, patch));
     if (updated !== null) this.countTransition("accepted", "slashed");
     if (this.beginShadowObservation()) {
       const subject = updated ?? (await this.repo.findById(id));
@@ -738,7 +1118,9 @@ export class IntentsService {
    * or already has a later deadline.
    */
   async extendDeadlineIfAccepted(id: string, newDeadline: number): Promise<Intent | null> {
-    return this.repo.extendDeadlineIfAccepted(id, newDeadline);
+    const updated = written(await this.repo.extendDeadlineIfAccepted(id, newDeadline));
+    if (updated) this.deadlines?.scheduleFillWindow(updated);
+    return updated;
   }
 
   // ---------------------------------------------------------------------------

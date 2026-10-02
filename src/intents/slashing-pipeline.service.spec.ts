@@ -78,8 +78,6 @@ describe("SlashingPipelineService (#397)", () => {
       { get: jest.fn().mockReturnValue(false) } as unknown as ConfigService<AppConfig, true>,
       {} as StellarTxService,
       { intentAuditLog: { create: jest.fn().mockResolvedValue({}) } } as unknown as PrismaService,
-      undefined,
-      undefined,
       {
         snapshotForChain: jest.fn().mockReturnValue({ version: 0, feeBps: 30, deadlineSeconds: 1800, fillWindowSeconds: 600 }),
       } as unknown as ProtocolParamsService,

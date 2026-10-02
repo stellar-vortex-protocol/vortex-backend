@@ -17,7 +17,7 @@ import type { AppConfig } from "../config/configuration";
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const CONTRACT_ID = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M";
-const SOLVER_STRKEY = "GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGKW7MW8X2ONKGZGK6XOMP";
+const SOLVER_STRKEY = "GCZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFMVSWKZLFF6T";
 
 function fakeEvent(ledger: number, idx = 0): SorobanRpc.Api.EventResponse {
   return {

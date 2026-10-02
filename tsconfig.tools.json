@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist-tools",
+    "declaration": false,
+    "declarationMap": false,
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["tools/**/*", "src/**/*"]
+}
