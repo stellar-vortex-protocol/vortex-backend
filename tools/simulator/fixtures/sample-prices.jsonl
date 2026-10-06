@@ -1,0 +1,9 @@
+# Sample archived price snapshots (JSONL) for the simulation harness.
+# `decimals` is optional (default: 7 on stellar, 18 elsewhere).
+{"ts":1759247000,"chain":"ethereum","symbol":"USDC","priceUsd":1,"decimals":6}
+{"ts":1759247000,"chain":"base","symbol":"USDC","priceUsd":1,"decimals":6}
+{"ts":1759247000,"chain":"polygon","symbol":"USDC","priceUsd":1,"decimals":6}
+{"ts":1759247000,"chain":"arbitrum","symbol":"USDC","priceUsd":1,"decimals":6}
+{"ts":1759247000,"chain":"optimism","symbol":"USDC","priceUsd":1,"decimals":6}
+{"ts":1759247000,"chain":"avalanche","symbol":"USDC","priceUsd":1,"decimals":6}
+{"ts":1759247000,"chain":"stellar","symbol":"USDC","priceUsd":1,"decimals":7}
