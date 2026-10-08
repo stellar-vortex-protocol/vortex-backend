@@ -3,6 +3,16 @@
   "rootDir": "..",
   "testEnvironment": "node",
   "testRegex": "test/.*\\.(e2e-spec|test)\\.ts$",
+  // Every suite here stands up a real Nest application (via createTestApp, or
+  // a Test.createTestingModule + app.init) in a `beforeAll` hook, then drives it
+  // over HTTP and WebSockets with supertest. That bootstrap compiles the whole
+  // controller/provider graph, so Jest's 5s default is far too tight: suites
+  // failed with "Exceeded timeout of 5000 ms for a hook" the moment the suite
+  // ran alongside its siblings on a loaded machine, which says nothing about
+  // the behaviour under test. These budgets are sized for a real bootstrap and
+  // still fail on a genuine hang.
+  "testTimeout": 60000,
+  "hookTimeout": 120000,
   "transform": {
     "^.+\\.ts$": ["ts-jest", { "diagnostics": false }]
   },

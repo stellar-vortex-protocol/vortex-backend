@@ -2,6 +2,27 @@
 
 ## Verifying build artifacts (issue #467)
 
+> **Status: currently unenforced.** The signing and verification workflow,
+> `.github/workflows/cd.yml`, was removed along with every other GitHub Actions
+> workflow in this repository. Nothing signs images any more, so **no published
+> image currently carries a signature or an attestation**, and the
+> `cosign verify` procedures below will fail for every image.
+>
+> This section is retained rather than deleted: the threat model and the
+> verification commands are still the correct specification of what signing is
+> supposed to guarantee. Restoring `cd.yml` reinstates the control; deleting
+> this section would quietly retire it instead, which is a security decision
+> that belongs to the maintainers rather than to a cleanup change. Until a
+> maintainer decides, treat published images as unverified and do not rely on
+> these procedures.
+
+Every container image this repository publishes is signed **keylessly** with
+[cosign](https://docs.sigstore.dev/cosign/signing/overview/) and carries two
+[attestations](https://slsa.dev/spec/v1.0/): SLSA build provenance and a
+CycloneDX SBOM. Nothing is ever signed with a stored key — the signing
+credential is a short-lived GitHub OIDC token minted for the specific workflow
+run, so there is no long-lived secret to exfiltrate.
+
 Every container image this repository publishes is signed **keylessly** with
 [cosign](https://docs.sigstore.dev/cosign/signing/overview/) and carries two
 [attestations](https://slsa.dev/spec/v1.0/): SLSA build provenance and a

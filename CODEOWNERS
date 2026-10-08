@@ -16,5 +16,12 @@
 # account compromise and an attacker-signed production image. CODEOWNERS is
 # what makes a swapped action SHA, a widened `permissions:` block or a new
 # `id-token: write` a review question rather than a diff line.
+#
+# NOTE: all workflows, and dependabot, were removed in the CI cleanup, so these
+# two patterns currently match nothing. They are kept deliberately as a
+# tripwire rather than deleted: the day anyone re-adds a workflow or an
+# automated dependency updater — reintroducing cd.yml and image signing being
+# the case that matters — it lands in security review automatically. Deleting
+# them would quietly remove that.
 .github/workflows/                  @vortex-protocol/security-reviewers
 /.github/dependabot.yml              @vortex-protocol/security-reviewers
