@@ -21,6 +21,19 @@ class VersionedTestController {
 @Module({ controllers: [VersionedTestController] })
 class VersionedTestModule {}
 
+/**
+ * Budget for tests that stand up a real Nest application and/or generate a
+ * Swagger document.
+ *
+ * These are not unit tests: they pay a full `NestFactory.create` + `app.init`
+ * plus `SwaggerModule.createDocument` walk over the module graph. That is
+ * comfortably more than Jest's 5s default once the suite runs in parallel with
+ * its siblings on a loaded machine, and a bootstrap that overran the default
+ * failed as "Exceeded timeout of 5000 ms" — a statement about machine load, not
+ * about the behaviour under test. Only bootstrap-heavy cases opt in.
+ */
+const BOOTSTRAP_TIMEOUT_MS = 60_000;
+
 describe("API versioning helpers", () => {
   it("extracts a URI version without treating unversioned paths as v1", () => {
     expect(getApiVersionFromUrl("/api/v1/intents?limit=10")).toBe("1");
@@ -114,5 +127,5 @@ describe("API versioning helpers", () => {
     } finally {
       await app.close();
     }
-  });
+  }, BOOTSTRAP_TIMEOUT_MS);
 });

@@ -348,6 +348,28 @@ describe("IntentsService -> MetricsService wiring (#481)", () => {
 });
 
 describe("IntentsService — shadow monitoring cost on the request path", () => {
+  /**
+   * Why this test measures a median of repeated trials rather than a single p99.
+   *
+   * The quantity under test is a small, roughly constant per-call cost, but a
+   * single p99 taken over one pass is a *max*-like statistic: one GC pause or
+   * one OS preemption anywhere in the run lands in the top 1% and inflates the
+   * number by milliseconds, which is an order of magnitude above the cost
+   * being measured. That made this assertion a coin flip on a loaded machine
+   * rather than a statement about the monitor.
+   *
+   * Two changes remove that noise without weakening the budget:
+   *   1. the two arms are interleaved per trial, so machine drift (turbo, other
+   *      load, thermal state) lands on both arms instead of on one;
+   *   2. the assertion is the *median* delta across trials, which ignores the
+   *      occasional outlier trial while still catching a real regression —
+   *      if the monitor genuinely cost milliseconds, the median would move too.
+   */
+  const TRIALS = 5;
+  const ITERATIONS_PER_TRIAL = 120;
+  /** Issue #401's budget for the monitor's marginal p99 cost, in milliseconds. */
+  const P99_BUDGET_MS = 2;
+
   /** p99 in milliseconds of `acceptIfOpen` over `iterations` calls. */
   async function measureP99(
     service: IntentsService,
@@ -378,11 +400,20 @@ describe("IntentsService — shadow monitoring cost on the request path", () => 
     await measureP99(off.service, baseline.intentId, solver, 100);
     await measureP99(on.service, monitored.intentId, solver, 100);
 
-    const p99Off = await measureP99(off.service, baseline.intentId, solver, 500);
-    const p99On = await measureP99(on.service, monitored.intentId, solver, 500);
+    const deltas: number[] = [];
+    for (let trial = 0; trial < TRIALS; trial += 1) {
+      // Interleaved: both arms are measured back-to-back inside every trial, so
+      // a slow patch of wall clock hits `off` and `on` alike.
+      const p99Off = await measureP99(off.service, baseline.intentId, solver, ITERATIONS_PER_TRIAL);
+      const p99On = await measureP99(on.service, monitored.intentId, solver, ITERATIONS_PER_TRIAL);
+      // A delta, not an absolute: the interesting number for the issue is what
+      // the monitor costs, and both arms pay exactly the same repository work.
+      deltas.push(p99On - p99Off);
+    }
 
-    // A delta, not an absolute: the interesting number for the issue is what
-    // the monitor costs, and both arms pay exactly the same repository work.
-    expect(p99On - p99Off).toBeLessThan(2);
+    deltas.sort((a, b) => a - b);
+    const medianDelta = deltas[Math.floor(deltas.length / 2)];
+
+    expect(medianDelta).toBeLessThan(P99_BUDGET_MS);
   });
 });

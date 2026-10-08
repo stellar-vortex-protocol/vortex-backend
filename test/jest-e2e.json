@@ -7,6 +7,20 @@
     "^.+\\.ts$": ["ts-jest", { "diagnostics": false }]
   },
   "moduleNameMapper": {
-    "^@stellar/stellar-sdk$": "<rootDir>/test/__mocks__/@stellar/stellar-sdk.ts"
+    "^@stellar/stellar-sdk$": "<rootDir>/test/__mocks__/@stellar/stellar-sdk.ts",
+    // @nestjs/event-emitter@12 and @nestjs/schedule@12 are published as
+    // ESM-only ("type": "module", no CommonJS build), so Jest's CommonJS
+    // runtime cannot `require` them: it fails with
+    // "SyntaxError: Unexpected token 'export'" while parsing
+    // node_modules/@nestjs/event-emitter/dist/index.js. Because
+    // ts-jest here only transforms `.ts` files, the packages cannot simply be
+    // transformed either.
+    //
+    // The unit config (jest.config.js) already maps both to the stand-ins in
+    // test/__mocks__; the e2e config needs the same mappings, because the Nest
+    // application graph reached from these tests pulls those packages in
+    // transitively and every e2e suite failed to load without them.
+    "^@nestjs/event-emitter$": "<rootDir>/test/__mocks__/nestjs-event-emitter.ts",
+    "^@nestjs/schedule$": "<rootDir>/test/__mocks__/nestjs-schedule.ts"
   }
 }
