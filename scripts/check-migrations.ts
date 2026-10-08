@@ -5,8 +5,7 @@
  * that flags unsafe DDL in migrations a change adds or modifies, and enforces
  * that every such migration ships a `down.sql`.
  *
- * It is invoked by the `migration-lint` CI job (see .github/workflows/ci.yml)
- * as `npm run check:migrations -- --base <sha>`. Only migrations changed between
+ * It is invoked as `npm run check:migrations -- --base <sha>`. Only migrations changed between
  * `<base>...HEAD` are linted, so older migrations can never fail retroactively.
  *
  * Rules (see prisma/migrations/README.md):

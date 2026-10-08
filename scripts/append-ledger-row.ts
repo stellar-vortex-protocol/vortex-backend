@@ -1,8 +1,8 @@
 /**
  * append-ledger-row.ts
  *
- * Called by .github/workflows/drips-ledger.yml on every merged PR.
- * Reads environment variables injected by the workflow, resolves the
+ * Invoked on every merged PR by the (now removed) DRIPs ledger automation.
+ * Reads environment variables provided by the caller, resolves the
  * contribution, and appends a row to docs/DRIPS_WAVE_LEDGER.md.
  *
  * Sets GitHub Actions output variables:

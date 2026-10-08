@@ -26,7 +26,7 @@
  *      job, which halts the rollout because `staging`/`production` need it.
  *
  * Runs inside the Kubernetes Job rendered from `deploy/k8s/migration-job.yaml`
- * by `.github/workflows/cd.yml`, i.e. with the exact image digest that is about
+ * by the deployment pipeline, i.e. with the exact image digest that is about
  * to be rolled out — "the image that deploys is the image that migrates".
  *
  * Why plain JavaScript (not TypeScript)
