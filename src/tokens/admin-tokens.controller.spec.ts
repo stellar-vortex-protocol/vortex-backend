@@ -10,6 +10,19 @@ import { AdminTokensService } from "./admin-tokens.service";
 
 const SECRET = "ops:admin:this-is-a-long-secret";
 
+/**
+ * Budget for a suite that stands up a real Nest application and drives it over
+ * HTTP with supertest.
+ *
+ * Applied per test and to the `beforeAll` bootstrap below. Jest's 5s default is
+ * a poor fit here: these assertions are about RBAC decisions, not about how fast
+ * a container can compile a controller graph, and under parallel load the
+ * bootstrap and the supertest round-trips overran the default and failed as
+ * "Exceeded timeout of 5000 ms" — a statement about machine load rather than
+ * about the guard.
+ */
+const HTTP_SUITE_TIMEOUT_MS = 60_000;
+
 describe("AdminTokensController RBAC", () => {
   let app: INestApplication;
   const tokens = {
@@ -34,7 +47,7 @@ describe("AdminTokensController RBAC", () => {
     enableApiVersioning(app);
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
     await app.init();
-  });
+  }, HTTP_SUITE_TIMEOUT_MS);
 
   afterAll(async () => {
     await app.close();
@@ -45,7 +58,7 @@ describe("AdminTokensController RBAC", () => {
   it("rejects a missing admin key", async () => {
     await request(app.getHttpServer()).post("/api/v1/admin/tokens").send(body).expect(401);
     expect(tokens.create).not.toHaveBeenCalled();
-  });
+  }, HTTP_SUITE_TIMEOUT_MS);
 
   it("rejects an unknown admin key", async () => {
     await request(app.getHttpServer())
@@ -53,7 +66,7 @@ describe("AdminTokensController RBAC", () => {
       .set("x-admin-key", "not-the-secret")
       .send(body)
       .expect(401);
-  });
+  }, HTTP_SUITE_TIMEOUT_MS);
 
   it("allows an admin key to create, update and delist", async () => {
     await request(app.getHttpServer()).post("/api/v1/admin/tokens").set("x-admin-key", "this-is-a-long-secret").send(body).expect(201);
@@ -70,5 +83,5 @@ describe("AdminTokensController RBAC", () => {
     expect(tokens.create).toHaveBeenCalled();
     expect(tokens.update).toHaveBeenCalled();
     expect(tokens.delist).toHaveBeenCalled();
-  });
+  }, HTTP_SUITE_TIMEOUT_MS);
 });
