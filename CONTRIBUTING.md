@@ -34,7 +34,8 @@ Before opening a PR, pick a task from the GitHub issue tracker and keep the work
 3. Validate the affected commands locally (`npm run lint`, `npm run typecheck`, and the relevant test targets).
 4. Open a PR with a clear summary and a link to the issue.
 
-Commit messages follow Conventional Commits and are enforced by the `commitlint` job in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml). The typical format is:
+Commit messages follow Conventional Commits and are enforced by the local
+`commit-msg` husky hook (`.husky/commit-msg`, see `commitlint.config.js`). The typical format is:
 
 ```bash
 <type>(<scope>): <summary>
@@ -203,16 +204,26 @@ environmental (timing, a shared fixture, upstream RPC). Before opening a PR
 that adds an entry, expect a maintainer to ask why the test cannot be made
 deterministic.
 
-### Required status checks
+### Checks before opening a pull request
 
-`Backend (Nest) – Node 20` and `Backend (Nest) – Node 22` (note the en dash —
-branch protection matches the check name exactly) cover lint,
-type-check and build only. The test gates are separate checks —
-`Unit tests (shard n/4)`, `E2E tests (shard n/2)` and `Coverage merge and gate`
-— so a red unit test cannot hide behind a green build job. If you change the
-shard counts in `.github/workflows/ci.yml`, update `--expect-shards` in the
-`coverage` job in the same commit; the merge job fails loudly on a mismatch
-rather than silently gating on a partial union.
+There are no automated CI checks on this repository any more — the GitHub
+Actions workflows have been removed. Verification is therefore a local
+responsibility, and the same commands the removed workflows used to run are
+the ones to run before asking for review:
+
+```bash
+npm run lint      # eslint, 0 errors
+npm run typecheck # tsc --noEmit
+npm run build     # nest build
+npm test          # unit suite
+npm run test:e2e  # e2e suite (needs a Postgres instance)
+```
+
+If CI is reintroduced later, note that the test gates must stay separate from
+the lint/build job — a red unit test should not be able to hide behind a green
+build — and that `scripts/ci/coverage-merge.mjs` fails loudly when the shard
+count it is given does not match the shards that actually ran, rather than
+silently gating coverage on a partial union.
 
 ---
 
