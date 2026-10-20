@@ -104,6 +104,31 @@ export const envValidationSchema = Joi.object({
   WS_REPLAY_STORE: Joi.string().valid("memory", "redis").default("memory"),
   WS_REPLAY_MAX_COUNT: Joi.number().integer().min(1).default(500),
 
+  // ── Read-path cache (issue #414) ──────────────────────────────────────────
+  // memory = per-process (default), redis = shared store + pub/sub
+  // invalidation over REDIS_URL, off = no caching.
+  CACHE_DRIVER: Joi.string().valid("memory", "redis", "off").default("memory"),
+  // TTL for aggregate read models (stats, leaderboard). Token lists use a
+  // longer fixed TTL; every cached keyspace is also invalidated on writes.
+  CACHE_TTL_SECONDS: Joi.number().integer().min(0).max(3600).default(15),
+  // Fraction of the TTL each write is randomly spread by (stampede guard).
+  CACHE_TTL_JITTER: Joi.number().min(0).max(0.9).default(0.1),
+
+  // ── Materialised stats views (issue #416) ─────────────────────────────────
+  // auto = read the views when INTENTS_PERSISTENCE=prisma, live aggregation
+  // otherwise; views = always the views; live = always aggregate in code.
+  STATS_SOURCE: Joi.string().valid("auto", "views", "live").default("auto"),
+  STATS_VIEW_REFRESH_INTERVAL_MS: Joi.number().integer().min(1000).default(30000),
+
+  // ── Durable idempotency keys (issue #418) ─────────────────────────────────
+  // auto = Postgres when INTENTS_PERSISTENCE=prisma, in-process otherwise.
+  IDEMPOTENCY_STORE: Joi.string().valid("auto", "memory", "prisma").default("auto"),
+  IDEMPOTENCY_TTL_SECONDS: Joi.number().integer().min(60).default(86400),
+  // How long an in-progress key blocks duplicates before a crashed request's
+  // claim is considered abandoned and may be retaken.
+  IDEMPOTENCY_LEASE_SECONDS: Joi.number().integer().min(1).max(3600).default(30),
+  IDEMPOTENCY_CLEANUP_INTERVAL_MS: Joi.number().integer().min(1000).default(3600000),
+
   // ── Persistence adapter selection ─────────────────────────────────────────
   // Controls which repository adapter is used for intents and solvers.
   // "memory" (default) keeps everything in-process — no database required.

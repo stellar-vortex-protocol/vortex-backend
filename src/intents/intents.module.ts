@@ -6,7 +6,14 @@ import { IntentsGateway } from "./intents.gateway";
 import { WsDocsController } from "./ws-docs.controller";
 import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsMaintenanceJobs } from "./intents-maintenance.jobs";
-import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
+import { INTENTS_REPOSITORY, IIntentsRepository, InMemoryIntentsRepository } from "./intents.repository";
+import {
+  FILL_LEDGER_UNIT_OF_WORK,
+  IFillLedgerUnitOfWork,
+  InMemoryFillLedgerUnitOfWork,
+  PrismaFillLedgerUnitOfWork,
+} from "./fill-ledger.unit-of-work";
+import { ISolverFillsRepository, SOLVER_FILLS_REPOSITORY } from "../solvers/solver-fills.repository";
 import { PrismaIntentsRepository } from "./prisma-intents.repository";
 import { IntentCapabilityIndex } from "./solver-intent-matcher";
 import { SolversModule } from "../solvers/solvers.module";
@@ -69,6 +76,23 @@ import { RedisReplayStore } from "./backplane/redis-replay.store";
           });
         }
         return new MemoryReplayStore({ maxCount, maxAgeMs });
+      },
+    },
+    // Issue #417 — fill/failure transitions write their solver_fills row in
+    // the same transaction (Prisma) or step (memory) as the state change.
+    {
+      provide: FILL_LEDGER_UNIT_OF_WORK,
+      inject: [INTENTS_REPOSITORY, PrismaService, { token: SOLVER_FILLS_REPOSITORY, optional: true }],
+      useFactory: (
+        intents: IIntentsRepository,
+        prisma: PrismaService,
+        fills?: ISolverFillsRepository,
+      ): IFillLedgerUnitOfWork | null => {
+        if (!fills) return null;
+        if ((process.env.INTENTS_PERSISTENCE ?? "memory") === "prisma") {
+          return new PrismaFillLedgerUnitOfWork(prisma);
+        }
+        return new InMemoryFillLedgerUnitOfWork(intents, fills);
       },
     },
     IntentsService,

@@ -9,7 +9,13 @@ import { ConfigService } from "@nestjs/config";
 import { v4 as uuidv4 } from "uuid";
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Intent, IntentAuditEntry, IntentState, PendingIntentOp } from "./intents.types";
-import { INTENTS_REPOSITORY, IIntentsRepository, isVersionConflict, MutationResult } from "./intents.repository";
+import {
+  INTENTS_REPOSITORY,
+  IIntentsRepository,
+  IntentPatch,
+  isVersionConflict,
+  MutationResult,
+} from "./intents.repository";
 import { INTENTS_UNIT_OF_WORK, IIntentsUnitOfWork } from "./intents.unit-of-work";
 import { IntentDeadlineScheduler } from "./intents-deadline.jobs";
 import { IOutboxWriter, NewOutboxEntry } from "../soroban/outbox.repository";
@@ -28,6 +34,11 @@ import { MetricsService } from "../metrics/metrics.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { ProtocolParamsService } from "../governance/params.service";
 import { FeatureFlagService } from "../flags/feature-flag.service";
+import { CacheService } from "../cache/cache.service";
+import { TokensService } from "../tokens/tokens.service";
+import { FILL_LEDGER_UNIT_OF_WORK, IFillLedgerUnitOfWork } from "./fill-ledger.unit-of-work";
+import { usdValueOf } from "../solvers/solver-fills.repository";
+import { SolverFillOutcome, SolverFillRecord } from "../solvers/solver-fills.types";
 
 const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slashed"];
 
@@ -230,7 +241,137 @@ export class IntentsService {
      * construct this service directly without one.
      */
     @Optional() private readonly deadlines?: IntentDeadlineScheduler,
+    /**
+     * Per-fill ledger (issue #417). When wired, fill and failure transitions
+     * commit their `solver_fills` row atomically with the state change.
+     * Optional (and possibly null) so direct-construction harnesses keep the
+     * plain repository path.
+     */
+    @Optional() @Inject(FILL_LEDGER_UNIT_OF_WORK)
+    private readonly fillLedger?: IFillLedgerUnitOfWork | null,
+    /** Price oracle for the fill-time USD snapshot (issue #417). */
+    @Optional() private readonly tokens?: TokensService,
+    /** Read cache (issue #414): every intent write invalidates stats + leaderboard. */
+    @Optional() private readonly cache?: CacheService,
   ) {}
+
+  /**
+   * Drop the cached read models derived from intents (issue #414). Awaited
+   * by every write so a read issued after it on this replica is never served
+   * the pre-write value; never throws.
+   */
+  private async changed(): Promise<void> {
+    await this.cache?.invalidate("stats", "leaderboard");
+  }
+
+  /**
+   * Run a fill/failure transition and, when it wins, append its
+   * `solver_fills` row in the same unit of work (issue #417).
+   */
+  private async withFillRecord(
+    outcome: Exclude<SolverFillOutcome, "reversed">,
+    now: number,
+    mutate: (repo: IIntentsRepository) => Promise<MutationResult> | MutationResult,
+  ): Promise<MutationResult> {
+    if (!this.fillLedger) return mutate(this.repo);
+    return this.fillLedger.run(async ({ intents, fills }) => {
+      const result = await mutate(intents);
+      if (result !== null && !isVersionConflict(result) && result.solver) {
+        await fills.record(await this.buildFillRecord(result, outcome, now));
+      }
+      return result;
+    });
+  }
+
+  /**
+   * Build the immutable fill row for `intent` (issue #417). The USD value is
+   * snapshotted from the token price oracle now — delivered destination
+   * amount for a fill, source amount at stake for a failure — and is never
+   * recomputed afterwards.
+   */
+  private async buildFillRecord(
+    intent: Intent,
+    outcome: Exclude<SolverFillOutcome, "reversed">,
+    now: number,
+  ): Promise<SolverFillRecord> {
+    const base = {
+      intentId: intent.intentId,
+      solver: intent.solver as string,
+      chain: intent.srcChain,
+      srcAmount: /^\d+$/.test(intent.srcAmount) ? intent.srcAmount : "0",
+      ledger: null,
+    };
+    if (outcome === "filled") {
+      const dstAmount = intent.fillAmount && /^\d+$/.test(intent.fillAmount) ? intent.fillAmount : "0";
+      const filledAt = intent.filledAt ?? now;
+      const price = await this.oraclePrice(() => this.tokens?.resolveDstToken(intent.dstToken.contract));
+      return {
+        ...base,
+        dstAmount,
+        usdValue: usdValueOf(dstAmount, intent.dstToken.decimals, price),
+        fillSeconds: filledAt - intent.createdAt,
+        outcome,
+        createdAt: filledAt,
+      };
+    }
+    const price = await this.oraclePrice(() =>
+      this.tokens?.resolveSrcToken(intent.srcChain, intent.srcToken.address),
+    );
+    return {
+      ...base,
+      dstAmount: null,
+      usdValue: usdValueOf(base.srcAmount, intent.srcToken.decimals, price),
+      fillSeconds: null,
+      outcome,
+      createdAt: intent.slashedAt ?? now,
+    };
+  }
+
+  /** Current oracle price, or undefined when unknown; a lookup failure never fails the write. */
+  private async oraclePrice(
+    lookup: () => Promise<{ priceUSD: number } | undefined> | undefined,
+  ): Promise<number | undefined> {
+    try {
+      const token = await lookup();
+      return token && token.priceUSD > 0 ? token.priceUSD : undefined;
+    } catch (err) {
+      this.logger.warn(`[fills] price lookup failed, recording usd_value=null: ${(err as Error).message}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Settle a slashed intent whose slash the slashing saga cancelled
+   * (issue #397): move it to `filled` (a fill proof landed) or `expired`,
+   * and append the compensating `reversed` fill row — plus a `filled` row
+   * when the fill landed — in the same unit of work (issue #417).
+   *
+   * @returns the updated intent, or null when it is no longer `slashed`.
+   */
+  async settleCancelledSlash(
+    id: string,
+    toState: "filled" | "expired",
+    fillTxHash?: string,
+    now = Math.floor(Date.now() / 1000),
+  ): Promise<Intent | null> {
+    const run = async (repo: IIntentsRepository, fills?: { record: (f: SolverFillRecord) => Promise<void> }) => {
+      const current = await repo.findById(id);
+      if (!current || current.state !== "slashed") return null;
+      const patch: IntentPatch = toState === "filled" ? { state: "filled", txHash: fillTxHash } : { state: "expired" };
+      const updated = written(await repo.update(id, patch));
+      if (updated && fills && current.solver) {
+        const failure = await this.buildFillRecord(current, "failed", now);
+        await fills.record({ ...failure, outcome: "reversed" });
+        if (toState === "filled") await fills.record(await this.buildFillRecord(updated, "filled", now));
+      }
+      return updated;
+    };
+    const updated = this.fillLedger
+      ? await this.fillLedger.run(({ intents, fills }) => run(intents, fills))
+      : await run(this.repo);
+    if (updated) await this.changed();
+    return updated;
+  }
 
   /**
    * Lifecycle hook (Nest `OnModuleDestroy`): drops the in-memory idempotency
@@ -501,6 +642,7 @@ export class IntentsService {
     // dashboard would start every conversion ratio from zero. `from_state` is
     // the sentinel "none" — an intent that does not exist yet has no state.
     this.countTransition(NONE_STATE, intent.state);
+    await this.changed();
     return intent;
   }
 
@@ -772,7 +914,9 @@ export class IntentsService {
           `this bypasses the guarded transitions and their observers`,
       );
     }
-    return written(await this.repo.update(id, patch, expectedVersion));
+    const updated = written(await this.repo.update(id, patch, expectedVersion));
+    if (updated) await this.changed();
+    return updated;
   }
 
   /**
@@ -795,7 +939,10 @@ export class IntentsService {
       const pending = mutate(current);
       if (pending === undefined) return null;
       last = await pending;
-      if (!isVersionConflict(last)) return last;
+      if (!isVersionConflict(last)) {
+        if (last !== null) await this.changed();
+        return last;
+      }
     }
     this.logger.warn(`[occ] gave up on intent ${id} after ${maxAttempts} version conflicts`);
     return last;
@@ -807,7 +954,9 @@ export class IntentsService {
     patch: Pick<Intent, "minDstAmount" | "deadline">,
     now = Math.floor(Date.now() / 1000),
   ): Promise<Intent | null> {
-    return this.repo.amendIfOpen(id, patch, now);
+    const amended = await this.repo.amendIfOpen(id, patch, now);
+    if (amended) await this.changed();
+    return amended;
   }
 
   /**
@@ -830,6 +979,7 @@ export class IntentsService {
     const updated = written(await this.repo.acceptIfOpen(id, solver, nowSec + fillWindow, nowSec));
     if (updated !== null) {
       this.countTransition("open", "accepted");
+      await this.changed();
       // Issue #550: the fill window is now the binding deadline — schedule the
       // fill-window job so the sweeper settles it through the jobs queue.
       this.deadlines?.scheduleFillWindow(updated);
@@ -878,8 +1028,13 @@ export class IntentsService {
     now?: number,
   ): Promise<Intent | null> {
     const nowSec = now ?? Math.floor(Date.now() / 1000);
-    const updated = written(await this.repo.fillIfAccepted(id, solver, patch, nowSec));
-    if (updated !== null) this.countTransition("accepted", "filled");
+    const updated = written(
+      await this.withFillRecord("filled", nowSec, (repo) => repo.fillIfAccepted(id, solver, patch, nowSec)),
+    );
+    if (updated !== null) {
+      this.countTransition("accepted", "filled");
+      await this.changed();
+    }
     if (this.beginShadowObservation()) {
       // Report from `patch` rather than re-reading: on a lost race the stored
       // record belongs to whoever won, so its fill amount is not the amount
@@ -930,7 +1085,10 @@ export class IntentsService {
    */
   async cancelIfOpen(id: string): Promise<Intent | null> {
     const updated = written(await this.repo.cancelIfOpen(id));
-    if (updated !== null) this.countTransition("open", "cancelled");
+    if (updated !== null) {
+      this.countTransition("open", "cancelled");
+      await this.changed();
+    }
     if (this.beginShadowObservation()) {
       const subject = updated ?? (await this.repo.findById(id));
       if (subject) {
@@ -988,7 +1146,10 @@ export class IntentsService {
         pendingTxHash: txHash,
       }),
     );
-    if (updated !== null) this.countTransition(intent.state, updated.state);
+    if (updated !== null) {
+      this.countTransition(intent.state, updated.state);
+      await this.changed();
+    }
     return updated;
   }
 
@@ -1013,7 +1174,10 @@ export class IntentsService {
         pendingOp: undefined,
       }),
     );
-    if (updated !== null) this.countTransition(intent.state, confirmed);
+    if (updated !== null) {
+      this.countTransition(intent.state, confirmed);
+      await this.changed();
+    }
     return updated;
   }
 
@@ -1058,7 +1222,10 @@ export class IntentsService {
    */
   async expireIfOpen(id: string): Promise<Intent | null> {
     const updated = written(await this.repo.expireIfOpen(id));
-    if (updated !== null) this.countTransition("open", "expired");
+    if (updated !== null) {
+      this.countTransition("open", "expired");
+      await this.changed();
+    }
     if (this.beginShadowObservation()) {
       const subject = updated ?? (await this.repo.findById(id));
       if (subject) {
@@ -1085,8 +1252,13 @@ export class IntentsService {
     id: string,
     patch: { slashedAt: number; slashReason: string },
   ): Promise<Intent | null> {
-    const updated = written(await this.repo.slashIfAccepted(id, patch));
-    if (updated !== null) this.countTransition("accepted", "slashed");
+    const updated = written(
+      await this.withFillRecord("failed", patch.slashedAt, (repo) => repo.slashIfAccepted(id, patch)),
+    );
+    if (updated !== null) {
+      this.countTransition("accepted", "slashed");
+      await this.changed();
+    }
     if (this.beginShadowObservation()) {
       const subject = updated ?? (await this.repo.findById(id));
       // An "accepted" intent always carries a solver. A record without one is

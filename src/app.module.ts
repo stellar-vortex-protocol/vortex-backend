@@ -25,6 +25,9 @@ import { AbuseModule } from "./abuse/abuse.module";
 import { ApiKeysModule } from "./auth/api-keys/api-keys.module";
 import { Sep10Module } from "./auth/sep10/sep10.module";
 import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
+import { CacheModule } from "./cache/cache.module";
+import { IdempotencyModule } from "./common/idempotency/idempotency.module";
+import { SolverFillsModule } from "./solvers/solver-fills.module";
 
 @Module({
   imports: [
@@ -53,6 +56,15 @@ import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
     // providers never become visible to other modules (e.g. IntentsSweeperService)
     // and Nest fails to resolve MetricsService at boot.
     MetricsModule,
+    // Issue #414 — @Global() read-path cache (memory or Redis) with
+    // event-driven invalidation; imported after MetricsModule for hit/miss metrics.
+    CacheModule,
+    // Issue #418 — @Global() durable idempotency-key store + interceptor used
+    // by the intent write routes.
+    IdempotencyModule,
+    // Issue #417 — @Global() per-fill metrics store shared by IntentsModule
+    // (writes) and SolversModule (windowed stats).
+    SolverFillsModule,
     // Emergency pause control plane (issue #477). @Global() so KillSwitchGuard
     // can gate write handlers in any module.
     KillSwitchModule,

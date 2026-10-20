@@ -549,7 +549,9 @@ export class IntentsController {
       throw new ConflictException(`Intent is ${current?.state ?? "unknown"}, cannot fill`);
     }
 
-    await this.solversService.recordSuccessfulFill(dto.solver);
+    // Legacy counters are a compatibility projection of solver_fills (#417);
+    // pass the amount so `totalVolume` tracks the fill ledger.
+    await this.solversService.recordSuccessfulFill(dto.solver, dto.fillAmount);
 
     this.intentsService.appendAuditEntry(id, "filled", dto.solver, "solver filled", {
       fillAmount: dto.fillAmount,
@@ -654,7 +656,7 @@ export class IntentsController {
   })
   @ApiOkResponse({ type: QuoteResponseDto })
   async quote(@Body() dto: QuoteRequestDto): Promise<QuoteResponseDto> {
-    const solvers = (await this.solversService.getAll()).filter((s) => s.isActive);
+    const solvers = await this.solversService.getActiveForQuote();
 
     // #219: use typed resolveSrcToken / resolveDstToken — no more any casts.
     // #276: a quote may be requested by symbol alone (no contract/address), but
@@ -783,7 +785,7 @@ export class IntentsController {
       );
     }
 
-    const solvers = (await this.solversService.getAll()).filter((s) => s.isActive);
+    const solvers = await this.solversService.getActiveForQuote();
     const srcToken = intent.srcToken;
     const dstToken = intent.dstToken;
     const srcAmountBigInt = BigInt(intent.srcAmount);

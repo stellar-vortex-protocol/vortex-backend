@@ -4,8 +4,10 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from "@nestjs/common";
+import { CacheService } from "../cache/cache.service";
 import { AdminPrincipal } from "../admin/admin-auth";
 import { AdminAuditService } from "../admin/admin-audit.service";
 import { SupportedChain } from "../intents/intents.types";
@@ -42,6 +44,8 @@ export class AdminTokensService {
     private readonly verifier: TokenVerifierService,
     private readonly audit: AdminAuditService,
     private readonly publisher: TokenListPublisher,
+    /** Read cache (issue #414): every registry write drops the cached token lists. */
+    @Optional() private readonly cache?: CacheService,
   ) {}
 
   /** Register a token. Client decimals/symbol/name must match the chain when supplied. */
@@ -199,6 +203,7 @@ export class AdminTokensService {
   }
 
   private async emit(action: TokenListUpdatedEvent["action"], record: TokenRecord): Promise<void> {
+    await this.cache?.invalidate("tokens");
     await this.publisher.publish({
       type: "token_list_updated",
       action,

@@ -123,6 +123,9 @@ services:
       PROCESS_ROLE: all
       JOBS_DRIVER: bullmq
       FLAGS_PUBSUB: redis
+      # Issue #414 — hot read paths (tokens, leaderboard, /stats) are cached in
+      # the redis service; invalidations fan out over its pub/sub.
+      CACHE_DRIVER: ${CACHE_DRIVER:-redis}
       ADMIN_API_KEYS: ${ADMIN_API_KEYS:-}
       CANARY_ADDRESSES: ${CANARY_ADDRESSES:-}
     ports:

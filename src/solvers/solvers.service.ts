@@ -3,6 +3,10 @@ import { SupportedChain } from "../intents/intents.types";
 import { SOLVERS_REPOSITORY, ISolversRepository } from "./solvers.repository";
 import { SolverRecord, SolverPendingPenalty } from "./solvers.types";
 import { GuardianStateService } from "../governance/guardian-state.service";
+import { CacheService } from "../cache/cache.service";
+
+/** Active solvers feed every quote; a short TTL bounds staleness across replicas (issue #414). */
+const QUOTE_SOLVERS_CACHE_TTL_SECONDS = 15;
 
 export type LeaderboardWindow = "24h" | "7d" | "30d" | "all";
 
@@ -63,7 +67,31 @@ export class SolversService {
     @Inject(SOLVERS_REPOSITORY)
     private readonly repo: ISolversRepository,
     @Optional() private readonly guardian?: GuardianStateService,
+    /** Read cache (issue #414): solver writes invalidate solvers, leaderboard and stats. */
+    @Optional() private readonly cache?: CacheService,
   ) {}
+
+  /**
+   * Persist a solver record and drop every cached read model that embeds
+   * solver data. Awaited so a read issued after a write on this replica can
+   * never be served the pre-write entry.
+   */
+  private async persist(solver: SolverRecord): Promise<SolverRecord> {
+    const saved = await this.repo.save(solver);
+    await this.cache?.invalidate("solvers", "leaderboard", "stats");
+    return saved;
+  }
+
+  /**
+   * Active solvers, as used to build quotes (issue #414). Cached briefly and
+   * invalidated on every solver write; use {@link getAll} wherever a
+   * write-path decision depends on the current record.
+   */
+  async getActiveForQuote(): Promise<SolverRecord[]> {
+    const load = async () => (await this.repo.findAll()).filter((s) => s.isActive);
+    if (!this.cache) return load();
+    return this.cache.getOrLoad("solvers", "active", QUOTE_SOLVERS_CACHE_TTL_SECONDS, load);
+  }
 
   /**
    * True while an active guardian blacklist covers `address` (issue #507).
@@ -109,7 +137,7 @@ export class SolversService {
     if (patch.supportedTokens !== undefined) applied.supportedTokens = patch.supportedTokens;
 
     const updated: SolverRecord = { ...solver, ...applied };
-    return this.repo.save(updated);
+    return this.persist(updated);
   }
 
   async register(
@@ -127,35 +155,35 @@ export class SolversService {
       registeredAt: now,
       lastActiveAt: now,
     };
-    return this.repo.save(solver);
+    return this.persist(solver);
   }
 
   async deregister(address: string): Promise<SolverRecord | undefined> {
     const solver = await this.repo.findByAddress(address);
     if (!solver) return undefined;
     const updated = { ...solver, isActive: false, lastActiveAt: Math.floor(Date.now() / 1000) };
-    return this.repo.save(updated);
+    return this.persist(updated);
   }
 
   async markLive(address: string): Promise<SolverRecord | undefined> {
     const solver = await this.repo.findByAddress(address);
     if (!solver) return undefined;
     const updated = { ...solver, isActive: true, lastActiveAt: Math.floor(Date.now() / 1000) };
-    return this.repo.save(updated);
+    return this.persist(updated);
   }
 
   async markOffline(address: string): Promise<SolverRecord | undefined> {
     const solver = await this.repo.findByAddress(address);
     if (!solver) return undefined;
     const updated = { ...solver, isActive: false, lastActiveAt: Math.floor(Date.now() / 1000) };
-    return this.repo.save(updated);
+    return this.persist(updated);
   }
 
   async deactivate(address: string): Promise<SolverRecord | null> {
     const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
     const updated = { ...solver, isActive: false, lastActiveAt: Math.floor(Date.now() / 1000) };
-    return this.repo.save(updated);
+    return this.persist(updated);
   }
 
   async reactivate(address: string): Promise<SolverRecord | null> {
@@ -165,7 +193,7 @@ export class SolversService {
     const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
     const updated = { ...solver, isActive: true };
-    return this.repo.save(updated);
+    return this.persist(updated);
   }
 
   /**
@@ -202,7 +230,7 @@ export class SolversService {
       source: "chain",
       chainUpdatedLedger: params.chainUpdatedLedger,
     };
-    return this.repo.save(solver);
+    return this.persist(solver);
   }
 
   /**
@@ -222,7 +250,7 @@ export class SolversService {
     const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
     const updated: SolverRecord = { ...solver, ...update, lastActiveAt: Math.floor(Date.now() / 1000) };
-    return this.repo.save(updated);
+    return this.persist(updated);
   }
 
   /**
@@ -264,7 +292,7 @@ export class SolversService {
       totalVolume,
       lastActiveAt: now,
     };
-    return this.repo.save(updated);
+    return this.persist(updated);
   }
 
   /**
@@ -284,7 +312,7 @@ export class SolversService {
     const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
     const updated = { ...solver, fillsFailed: solver.fillsFailed + 1 };
-    const saved = await this.repo.save(updated);
+    const saved = await this.persist(updated);
 
     // Track this as a pending penalty until on-chain confirmation.
     this.pendingPenalties.set(intentId, {
@@ -332,7 +360,7 @@ export class SolversService {
     const newBond = current > slash ? current - slash : 0n;
 
     const updated = { ...solver, bondAmount: newBond.toString() };
-    const saved = await this.repo.save(updated);
+    const saved = await this.persist(updated);
 
     this.pendingPenalties.set(intentId, {
       ...penalty,
@@ -370,7 +398,7 @@ export class SolversService {
       this.logger.warn(
         `[penalty] rolled back without in-memory record: solver=${solverAddress} intent=${intentId}`,
       );
-      return this.repo.save({ ...solver, fillsFailed: Math.max(0, solver.fillsFailed - 1) });
+      return this.persist({ ...solver, fillsFailed: Math.max(0, solver.fillsFailed - 1) });
     }
     if (!penalty || penalty.state !== "pending") {
       this.logger.warn(
@@ -390,7 +418,7 @@ export class SolversService {
     // Clamp at 0 to guard against double-rollback edge cases.
     const newFailed = Math.max(0, solver.fillsFailed - 1);
     const updated = { ...solver, fillsFailed: newFailed };
-    const saved = await this.repo.save(updated);
+    const saved = await this.persist(updated);
 
     this.pendingPenalties.set(intentId, { ...penalty, state: "failed" });
 

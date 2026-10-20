@@ -91,6 +91,9 @@ function makeConfigService(
     wsMaxConnections: 1000,
     wsBackplane: "memory",
     redisUrl: "redis://localhost:6379",
+    cache: { driver: "off", ttlSeconds: 15, ttlJitter: 0.1 },
+    stats: { source: "live", viewRefreshIntervalMs: 30000 },
+    idempotency: { store: "memory", ttlSeconds: 86400, leaseSeconds: 30, cleanupIntervalMs: 3600000 },
     // Resource-exhaustion limits (issue #476) — test defaults
     jsonMaxDepth: 10,
     wsMaxFilterChains: 20,

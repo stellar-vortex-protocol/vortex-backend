@@ -189,6 +189,27 @@ export interface AppConfig {
   wsBackplane: "memory" | "redis";
   redisUrl: string;
 
+  /** Read-path cache (issue #414). */
+  cache: {
+    driver: "memory" | "redis" | "off";
+    /** TTL for aggregate read models (stats, leaderboard), seconds. */
+    ttlSeconds: number;
+    /** TTL spread as a fraction of the TTL. */
+    ttlJitter: number;
+  };
+  /** Materialised stats views (issue #416). */
+  stats: {
+    source: "auto" | "views" | "live";
+    viewRefreshIntervalMs: number;
+  };
+  /** Durable idempotency keys (issue #418). */
+  idempotency: {
+    store: "auto" | "memory" | "prisma";
+    ttlSeconds: number;
+    leaseSeconds: number;
+    cleanupIntervalMs: number;
+  };
+
   // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
   /** Maximum JSON nesting depth accepted by the body parser middleware. */
   jsonMaxDepth: number;
@@ -496,6 +517,22 @@ export default (): AppConfig => ({
   wsMaxConnections: parseInt(process.env.WS_MAX_CONNECTIONS ?? "1000", 10),
   wsBackplane: (process.env.WS_BACKPLANE ?? "memory") as "memory" | "redis",
   redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
+
+  cache: {
+    driver: (process.env.CACHE_DRIVER ?? "memory") as AppConfig["cache"]["driver"],
+    ttlSeconds: parseInt(process.env.CACHE_TTL_SECONDS ?? "15", 10),
+    ttlJitter: Number(process.env.CACHE_TTL_JITTER ?? "0.1"),
+  },
+  stats: {
+    source: (process.env.STATS_SOURCE ?? "auto") as AppConfig["stats"]["source"],
+    viewRefreshIntervalMs: parseInt(process.env.STATS_VIEW_REFRESH_INTERVAL_MS ?? "30000", 10),
+  },
+  idempotency: {
+    store: (process.env.IDEMPOTENCY_STORE ?? "auto") as AppConfig["idempotency"]["store"],
+    ttlSeconds: parseInt(process.env.IDEMPOTENCY_TTL_SECONDS ?? "86400", 10),
+    leaseSeconds: parseInt(process.env.IDEMPOTENCY_LEASE_SECONDS ?? "30", 10),
+    cleanupIntervalMs: parseInt(process.env.IDEMPOTENCY_CLEANUP_INTERVAL_MS ?? "3600000", 10),
+  },
 
   // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
   jsonMaxDepth: parseInt(process.env.JSON_MAX_DEPTH ?? "10", 10),
