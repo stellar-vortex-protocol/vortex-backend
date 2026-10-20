@@ -24,3 +24,27 @@ export function initSentry(): void {
 export function captureException(err: unknown): void {
   Sentry.captureException(err);
 }
+
+/** Context attached to an operator alert raised through {@link captureAlert}. */
+export interface AlertContext {
+  /** Indexed Sentry tags (low-cardinality strings). */
+  tags?: Record<string, string>;
+  /** Free-form structured detail shown on the event. */
+  extra?: Record<string, unknown>;
+  /** Groups repeat alerts for the same subject into one Sentry issue. */
+  fingerprint?: string[];
+}
+
+/**
+ * Raise an operator alert as an `error`-level Sentry event (the level the
+ * paging rules route on). Like {@link captureException} it is a quiet no-op
+ * when Sentry was never initialised.
+ */
+export function captureAlert(message: string, ctx: AlertContext = {}): void {
+  Sentry.captureMessage(message, {
+    level: "error",
+    tags: ctx.tags,
+    extra: ctx.extra,
+    fingerprint: ctx.fingerprint,
+  });
+}

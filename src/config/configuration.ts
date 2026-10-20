@@ -189,6 +189,22 @@ export interface AppConfig {
   wsBackplane: "memory" | "redis";
   redisUrl: string;
 
+  // ── Abuse detector (issues #605, #606) ─────────────────────────────────────
+  abuse: {
+    /** Transport that tells other replicas to reload the allowlist after an admin change. */
+    allowlistPubsub: "memory" | "redis";
+    /** Safety-net allowlist reload interval (ms), in case a pub/sub message is missed. */
+    allowlistRefreshMs: number;
+    /** Captcha alternative to the proof-of-work challenge. Empty provider disables it. */
+    captcha: {
+      provider: "" | "hcaptcha" | "turnstile";
+      /** Server-side secret for the provider's siteverify API. */
+      secret: string;
+      /** Upper bound on the outbound verification call (ms). */
+      timeoutMs: number;
+    };
+  };
+
   // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
   /** Maximum JSON nesting depth accepted by the body parser middleware. */
   jsonMaxDepth: number;
@@ -496,6 +512,18 @@ export default (): AppConfig => ({
   wsMaxConnections: parseInt(process.env.WS_MAX_CONNECTIONS ?? "1000", 10),
   wsBackplane: (process.env.WS_BACKPLANE ?? "memory") as "memory" | "redis",
   redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
+
+  abuse: {
+    allowlistPubsub: (process.env.ABUSE_ALLOWLIST_PUBSUB ||
+      process.env.FLAGS_PUBSUB ||
+      "memory") as AppConfig["abuse"]["allowlistPubsub"],
+    allowlistRefreshMs: parseInt(process.env.ABUSE_ALLOWLIST_REFRESH_MS ?? "30000", 10),
+    captcha: {
+      provider: (process.env.ABUSE_CAPTCHA_PROVIDER ?? "") as AppConfig["abuse"]["captcha"]["provider"],
+      secret: process.env.ABUSE_CAPTCHA_SECRET ?? "",
+      timeoutMs: parseInt(process.env.ABUSE_CAPTCHA_TIMEOUT_MS ?? "3000", 10),
+    },
+  },
 
   // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
   jsonMaxDepth: parseInt(process.env.JSON_MAX_DEPTH ?? "10", 10),

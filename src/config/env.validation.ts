@@ -371,6 +371,24 @@ export const envValidationSchema = Joi.object({
     .pattern(/^([a-z0-9-]+=(true|false))(,[a-z0-9-]+=(true|false))*$/)
     .default(""),
 
+  // ── Abuse detector (issues #604–#606) ───────────────────────────────────────
+  // Comma-separated seed allowlist (addresses, exact IPs, key:<api-key>). Runtime
+  // entries are managed via /api/v1/abuse/allowlist and stored in Postgres.
+  ABUSE_ALLOWLIST: Joi.string().allow("").default(""),
+  // Allowlist change propagation across replicas. Empty = follow FLAGS_PUBSUB.
+  ABUSE_ALLOWLIST_PUBSUB: Joi.string().valid("", "memory", "redis"),
+  ABUSE_ALLOWLIST_REFRESH_MS: Joi.number().integer().min(0).default(30000),
+  // Sustained-block alert: N blocks of one actor within the window raise one Sentry alert.
+  ABUSE_BLOCK_ALERT_THRESHOLD: Joi.number().integer().min(0).default(5),
+  ABUSE_BLOCK_ALERT_WINDOW_SECONDS: Joi.number().integer().min(0).default(600),
+  // Captcha alternative to PoW for the challenge action. Empty provider disables it.
+  ABUSE_CAPTCHA_PROVIDER: Joi.string().valid("", "hcaptcha", "turnstile").default(""),
+  ABUSE_CAPTCHA_SECRET: Joi.string().allow("").default("").when("ABUSE_CAPTCHA_PROVIDER", {
+    is: Joi.valid("hcaptcha", "turnstile"),
+    then: Joi.string().min(1).required(),
+  }),
+  ABUSE_CAPTCHA_TIMEOUT_MS: Joi.number().integer().min(100).max(30000).default(3000),
+
   // ── Admin RBAC ────────────────────────────────────────────────────────────
   // Comma-separated "id:role:secret" entries; role is "admin" or "superadmin".
   // Empty disables every admin endpoint (401).

@@ -6,8 +6,10 @@
  * Response ladder
  * ───────────────
  *  pass      → request proceeds normally
- *  challenge → 428 PreconditionRequired: client must present a PoW nonce or
- *              re-authenticate with a higher-tier API key
+ *  challenge → 428 PreconditionRequired: client must present a PoW nonce
+ *              (X-Vortex-PoW-Response) or a captcha token
+ *              (X-Vortex-Captcha-Response, for browser users — issue #606),
+ *              or re-authenticate with a higher-tier API key
  *  throttle  → 429 TooManyRequests: caller is rate-limited to 5 req/min
  *  block     → 403 Forbidden: request rejected; logged and audited
  *
@@ -31,6 +33,7 @@ import {
 import { Request } from "express";
 import { AbuseScoreService } from "./abuse-score.service";
 import { AllowlistService } from "./allowlist.service";
+import { ChallengeVerifier } from "./challenge-verifier";
 import { AbuseContext } from "./abuse.types";
 import { logger as winstonLogger } from "../common/logger";
 import { createHash } from "crypto";
@@ -64,6 +67,7 @@ export class AbuseDetectorGuard implements CanActivate {
   constructor(
     private readonly scorer: AbuseScoreService,
     private readonly allowlist: AllowlistService,
+    private readonly challengeVerifier: ChallengeVerifier,
   ) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
@@ -120,16 +124,21 @@ export class AbuseDetectorGuard implements CanActivate {
           "Request rate limited due to suspicious activity. Please slow down.",
         );
 
-      case "challenge":
-        // 428 signals the client must present a PoW nonce header
-        // (X-Vortex-PoW-Response) or upgrade their API key tier.
-        if (!this.validatePoWResponse(req)) {
+      case "challenge": {
+        // 428 signals the client must present an accepted proof: a PoW nonce
+        // (X-Vortex-PoW-Response) or a captcha token (X-Vortex-Captcha-Response).
+        // Either one is enough. A captcha outage leaves PoW as the only way through.
+        const proof = await this.challengeVerifier.verify(req.headers, clientIp);
+        if (!proof.passed) {
           throw new PreconditionRequiredException(
-            "Proof-of-work challenge required. Include a valid X-Vortex-PoW-Response header or use a higher-tier API key.",
+            proof.captcha === "unavailable"
+              ? "Captcha verification is unavailable. Include a valid X-Vortex-PoW-Response header or use a higher-tier API key."
+              : "Challenge required. Include a valid X-Vortex-PoW-Response or X-Vortex-Captcha-Response header, or use a higher-tier API key.",
           );
         }
         // Challenge passed — fall through to allow
         break;
+      }
 
       case "pass":
       default:
@@ -202,20 +211,5 @@ export class AbuseDetectorGuard implements CanActivate {
       .update(JSON.stringify(relevant))
       .digest("hex")
       .slice(0, 16);
-  }
-
-  /**
-   * Basic PoW validation: the client must supply a nonce in
-   * `X-Vortex-PoW-Response` whose SHA-256 hash starts with DIFFICULTY leading
-   * zeroes (hex).  This is intentionally simple — the goal is to add CPU cost
-   * for bots, not cryptographic security.
-   */
-  private validatePoWResponse(req: Request): boolean {
-    const DIFFICULTY = parseInt(process.env.ABUSE_POW_DIFFICULTY ?? "4", 10);
-    const nonce = req.headers["x-vortex-pow-response"];
-    if (typeof nonce !== "string" || nonce.length === 0) return false;
-
-    const hash = createHash("sha256").update(nonce).digest("hex");
-    return hash.startsWith("0".repeat(DIFFICULTY));
   }
 }

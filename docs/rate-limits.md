@@ -315,3 +315,65 @@ rate limits, contact the network operator or configure environment variables in
 dedicated self-hosted instances.  All resource-exhaustion limits can be raised
 via the env vars listed in the table above — see `.env.example` for the full
 list and defaults.
+
+## Abuse detector
+
+Intent-mutation routes run behind `AbuseDetectorGuard`, which scores each
+request and answers with `pass`, `challenge` (428), `throttle` (429) or
+`block` (403). Callers can see their own score and recent signals with the
+signed self-service endpoints described in
+[public-transparency-contract.md](public-transparency-contract.md).
+
+### Clearing a challenge (428)
+
+Send either proof with the retried request. One is enough.
+
+| Header | Proof |
+|--------|-------|
+| `X-Vortex-PoW-Response` | A nonce whose SHA-256 hex digest starts with `ABUSE_POW_DIFFICULTY` zeroes (default 4). Suited to bots and solver clients. |
+| `X-Vortex-Captcha-Response` | An hCaptcha or Cloudflare Turnstile token, verified server-side. Suited to people in a browser. |
+
+The captcha path is on only when `ABUSE_CAPTCHA_PROVIDER` (`hcaptcha` or
+`turnstile`) and `ABUSE_CAPTCHA_SECRET` are set. The verification call goes
+through `HttpEgressService`, limited to the provider's hostname and bounded by
+`ABUSE_CAPTCHA_TIMEOUT_MS` (default 3000). It fails closed: if the token is
+rejected, or the provider is down, slow or returns something unexpected, the
+request still needs a valid PoW nonce. The 428 message says so when the
+provider was unavailable. Captcha tokens are never logged.
+
+### Allowlist
+
+Allowlisted requests are still scored and audited, but are always allowed.
+Entries come from two places, and a match in either one counts:
+
+- `ABUSE_ALLOWLIST` env var: read once at boot. Use it as a seed or fallback.
+- `abuse_allowlist_entries` table: managed live by admins (`ADMIN_API_KEYS`,
+  role `admin`) with no restart:
+
+| Method | Path | Body / result |
+|--------|------|---------------|
+| `GET` | `/api/v1/abuse/allowlist` | `{ entries, envSeed }`; `envSeed` counts the env entries, which cannot be edited here |
+| `POST` | `/api/v1/abuse/allowlist` | `{ type: "address" \| "ip" \| "api_key", value, label? }` → the stored entry (201; 409 if it already exists) |
+| `DELETE` | `/api/v1/abuse/allowlist/:id` | the removed entry (404 if unknown) |
+
+- API keys are SHA-256 hashed before storage. The raw key is never stored or returned.
+- IPs are exact-address only. CIDR ranges are rejected with 400.
+- Every add and remove writes an `admin_audit_log` row; if that write fails, the change is refused.
+- The replica that made a change reloads at once and publishes on Redis
+  pub/sub (`ABUSE_ALLOWLIST_PUBSUB`, which follows `FLAGS_PUBSUB` when empty),
+  so the other replicas reload too. Every replica also reloads every
+  `ABUSE_ALLOWLIST_REFRESH_MS` (default 30 s) in case a message is lost.
+- Removing a database entry does not remove a matching env entry.
+- Per-entry expiry is not supported yet.
+
+### Sustained-block alerts
+
+When the same address or IP is blocked `ABUSE_BLOCK_ALERT_THRESHOLD` times
+(default 5) within `ABUSE_BLOCK_ALERT_WINDOW_SECONDS` (default 600), one
+`error`-level Sentry event is raised (and logged at `error`). It is tagged
+`alert=abuse_sustained_block` with the actor key, and includes the triggering
+signals and the path of the audit history to look at
+(`/api/v1/abuse/audit/:address`). The window opens at the actor's first block,
+and there is one alert per actor per window, however many blocks follow. Set
+the threshold to 0 to turn alerts off. If Redis or Sentry is unavailable, the
+alert is skipped quietly and requests are unaffected.
