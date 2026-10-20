@@ -75,4 +75,76 @@ describe("AnalyticsService", () => {
     expect(points[0].avgMs).toBe(30_000);
     expect(points[0].count).toBe(1);
   });
+
+  describe("getSolverBenchmark", () => {
+    const at = (h: number, m = 0) => Date.UTC(2026, 0, 1, h, m, 0);
+    const fill = (eventId: string, solver: string, timestamp: number, durationMs: number, volume: bigint) => ({
+      eventId,
+      timestamp,
+      chain: "stellar",
+      srcToken: "USDC",
+      dstToken: "XLM",
+      solver,
+      volume,
+      fees: 0n,
+      durationMs,
+    });
+    const query = { interval: "1h" as const, from: at(0), to: at(23) };
+
+    it("compares the solver with the median solver, odd number of solvers", async () => {
+      const { service, store } = makeService();
+      await store.ingest([
+        fill("a1", "A", at(1), 100, 10n),
+        fill("a2", "A", at(1, 5), 300, 10n), // A: avg 200, volume 20
+        fill("b1", "B", at(1), 600, 50n), // B: avg 600, volume 50
+        fill("c1", "C", at(1), 400, 30n), // C: avg 400, volume 30
+      ]);
+
+      const [point] = await service.getSolverBenchmark(query, "A");
+      expect(point).toEqual({
+        start: "2026-01-01T01:00:00.000Z",
+        solver: { avgMs: 200, volume: "20", count: 2 },
+        protocol: { medianAvgMs: 400, medianVolume: "30", solverCount: 3 },
+      });
+    });
+
+    it("averages the two middle solvers for an even number of solvers", async () => {
+      const { service, store } = makeService();
+      await store.ingest([
+        fill("a", "A", at(1), 100, 10n),
+        fill("b", "B", at(1), 200, 20n),
+        fill("c", "C", at(1), 300, 31n),
+        fill("d", "D", at(1), 900, 90n),
+      ]);
+
+      const [point] = await service.getSolverBenchmark(query, "D");
+      expect(point.protocol).toEqual({ medianAvgMs: 250, medianVolume: "25", solverCount: 4 });
+      expect(point.solver).toEqual({ avgMs: 900, volume: "90", count: 1 });
+    });
+
+    it("keeps buckets where the solver had no fills, with solver: null", async () => {
+      const { service, store } = makeService();
+      await store.ingest([
+        fill("a", "A", at(1), 100, 10n),
+        fill("b", "B", at(2), 500, 40n), // A is absent from the 02:00 bucket
+      ]);
+
+      const points = await service.getSolverBenchmark(query, "A");
+      expect(points).toHaveLength(2);
+      expect(points[0].solver).not.toBeNull();
+      expect(points[1]).toEqual({
+        start: "2026-01-01T02:00:00.000Z",
+        solver: null,
+        protocol: { medianAvgMs: 500, medianVolume: "40", solverCount: 1 },
+      });
+    });
+
+    it("ignores a solver filter on the incoming query for the protocol side", async () => {
+      const { service, store } = makeService();
+      await store.ingest([fill("a", "A", at(1), 100, 10n), fill("b", "B", at(1), 300, 30n)]);
+      const [point] = await service.getSolverBenchmark({ ...query, solver: "B" }, "A");
+      expect(point.protocol.solverCount).toBe(2);
+      expect(point.solver?.avgMs).toBe(100);
+    });
+  });
 });

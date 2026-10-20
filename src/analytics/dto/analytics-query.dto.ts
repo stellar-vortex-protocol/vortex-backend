@@ -25,4 +25,9 @@ export class AnalyticsQueryDto {
   @IsOptional()
   @IsString()
   token?: string;
+
+  /** Only count fills by this solver address (ignored by solver-benchmark). */
+  @IsOptional()
+  @IsString()
+  solver?: string;
 }

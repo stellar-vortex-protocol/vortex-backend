@@ -6,7 +6,7 @@
  * buckets. See docs/adr/0001-analytics-store.md.
  */
 
-export const ANALYTICS_METRICS = ["volume", "fees", "latency", "solver-share"] as const;
+export const ANALYTICS_METRICS = ["volume", "fees", "latency", "solver-share", "token-pair"] as const;
 export type AnalyticsMetric = (typeof ANALYTICS_METRICS)[number];
 
 export const ANALYTICS_INTERVALS = ["1m", "1h", "1d"] as const;
@@ -45,6 +45,8 @@ export interface AnalyticsQuery {
   chain?: string;
   /** Optional token filter (matches source or destination token symbol). */
   token?: string;
+  /** Optional solver filter (exact match on the filling solver's address). */
+  solver?: string;
 }
 
 export interface VolumePoint {
@@ -74,6 +76,54 @@ export interface SolverSharePoint {
   volume: string;
   /** Solver's share of the bucket's total volume, 0..1. */
   share: number;
+}
+
+/**
+ * Volume and fees for one exact `(srcToken, dstToken)` swap pair in a bucket.
+ *
+ * Known limitation: token symbols carry no chain qualifier in
+ * `AnalyticsFillEvent`, so the same symbol on two chains (e.g. USDC on Stellar
+ * and on Ethereum) lands in the same pair. Combine with the `chain` filter to
+ * separate them.
+ */
+export interface TokenPairPoint {
+  start: string;
+  srcToken: string;
+  dstToken: string;
+  /** Summed filled volume for the pair (base-unit string). */
+  volume: string;
+  /** Summed protocol fees for the pair (base-unit string). */
+  fees: string;
+}
+
+/** One solver's activity in a bucket — the raw input to solver benchmarks. */
+export interface PerSolverPoint {
+  start: string;
+  solver: string;
+  /** Mean fill latency for this solver in the bucket, ms (rounded). */
+  avgMs: number;
+  /** Summed filled volume for this solver (base-unit string). */
+  volume: string;
+  /** Number of fills by this solver in the bucket. */
+  count: number;
+}
+
+/**
+ * One bucket of `GET /analytics/solver-benchmark/:address`: the solver's own
+ * figures next to the median across every active solver in the same bucket.
+ * `solver` is `null` when the requested solver had no fills in the bucket.
+ */
+export interface SolverBenchmarkPoint {
+  start: string;
+  solver: { avgMs: number; volume: string; count: number } | null;
+  protocol: {
+    /** Median of each active solver's mean latency, ms. */
+    medianAvgMs: number;
+    /** Median of each active solver's volume (base-unit string, floored). */
+    medianVolume: string;
+    /** Number of solvers with at least one fill in the bucket. */
+    solverCount: number;
+  };
 }
 
 /** Milliseconds per aggregation bucket for each interval. */

@@ -75,3 +75,38 @@ while staying isolated from OLTP writes and tolerating late-arriving data.
 - **Negative**: the deployment Postgres must be the `timescale/timescaledb` image
   (`docker-compose.yml` is updated; the `migration-rollback` CI job's service
   container must follow). p95 is approximate (sketch error ≈ 1 %).
+
+## Addendum: token-pair breakdown and solver benchmark (2026-10-20)
+
+### `token-pair` metric (issue #599)
+
+`GET /api/v1/analytics/token-pair` breaks volume and fees down by the exact
+`(srcToken, dstToken)` pair per bucket, so USDC→XLM and XLM→USDC are separate
+rows. The existing `token` filter still answers "volume that touched USDC"; this
+metric answers "volume that swapped USDC into XLM". Rows are sorted by bucket,
+then volume descending, then pair. No new event field or migration is needed:
+the continuous aggregates already group by `src_token` and `dst_token`.
+
+**Known limitation**: token symbols carry no chain qualifier in
+`AnalyticsFillEvent`, so USDC on Stellar and USDC on Ethereum share a pair.
+Combine with the `chain` filter to separate them. This comes from the existing
+event shape and is not new to this metric.
+
+### Solver benchmark (issue #600)
+
+`GET /api/v1/analytics/solver-benchmark/:address` returns, per bucket, the
+solver's own `avgMs`/`volume`/`count` next to the protocol median:
+
+- `AnalyticsQuery` gained an optional `solver` filter (also accepted by every
+  `:metric` route). The solver's own figures are `queryLatency` and
+  `queryVolume` with that filter applied.
+- The protocol side uses `queryPerSolver` (the same buckets, grouped by solver,
+  without the filter) and takes the **median across active solvers** of each
+  solver's mean latency and volume. A median over solvers describes the typical
+  solver; a fill-weighted average would be dominated by the largest solver.
+- The median is a true median: the mean of the two middle values when the
+  count is even. This is deliberately different from `percentile(values, 0.5)`,
+  whose nearest-rank rule returns the lower middle value. Volume medians are
+  bigint base units, floored.
+- Every bucket with any protocol fills is returned. When the solver had no
+  fills in a bucket, `solver` is `null` and the protocol median is still given.

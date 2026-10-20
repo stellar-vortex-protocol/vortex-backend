@@ -1,4 +1,4 @@
-import { InMemoryAnalyticsStore, percentile } from "./analytics.store";
+import { InMemoryAnalyticsStore, median, medianBigInt, percentile } from "./analytics.store";
 import { AnalyticsFillEvent, AnalyticsQuery } from "./analytics.types";
 
 function evt(overrides: Partial<AnalyticsFillEvent> = {}): AnalyticsFillEvent {
@@ -122,6 +122,103 @@ describe("InMemoryAnalyticsStore", () => {
       const bySolver = new Map(points.map((p) => [p.solver, p.share]));
       expect(bySolver.get("A")).toBeCloseTo(0.6);
       expect(bySolver.get("B")).toBeCloseTo(0.4);
+    });
+  });
+
+  describe("queryTokenPair", () => {
+    it("aggregates each exact (srcToken, dstToken) pair separately within a bucket", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        evt({ eventId: "a", srcToken: "USDC", dstToken: "XLM", volume: 100n, fees: 1n }),
+        evt({ eventId: "b", srcToken: "USDC", dstToken: "XLM", volume: 50n, fees: 2n }),
+        // Reverse direction must not merge with USDC→XLM.
+        evt({ eventId: "c", srcToken: "XLM", dstToken: "USDC", volume: 400n, fees: 4n }),
+        evt({ eventId: "d", srcToken: "USDC", dstToken: "EURC", volume: 10n, fees: 0n }),
+      ]);
+
+      const points = await store.queryTokenPair(q());
+      expect(points).toEqual([
+        { start: "2026-01-01T12:00:00.000Z", srcToken: "XLM", dstToken: "USDC", volume: "400", fees: "4" },
+        { start: "2026-01-01T12:00:00.000Z", srcToken: "USDC", dstToken: "XLM", volume: "150", fees: "3" },
+        { start: "2026-01-01T12:00:00.000Z", srcToken: "USDC", dstToken: "EURC", volume: "10", fees: "0" },
+      ]);
+    });
+
+    it("sorts by bucket first, then by volume descending, then by pair", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        evt({ eventId: "late", timestamp: Date.UTC(2026, 0, 1, 2, 0, 0), srcToken: "A", dstToken: "B", volume: 999n }),
+        evt({ eventId: "e1", timestamp: Date.UTC(2026, 0, 1, 1, 0, 0), srcToken: "B", dstToken: "C", volume: 5n }),
+        evt({ eventId: "e2", timestamp: Date.UTC(2026, 0, 1, 1, 0, 0), srcToken: "A", dstToken: "C", volume: 5n }),
+        evt({ eventId: "e3", timestamp: Date.UTC(2026, 0, 1, 1, 0, 0), srcToken: "C", dstToken: "A", volume: 7n }),
+      ]);
+
+      const points = await store.queryTokenPair(q());
+      expect(points.map((p) => `${p.start.slice(11, 13)} ${p.srcToken}:${p.dstToken}`)).toEqual([
+        "01 C:A",
+        "01 A:C",
+        "01 B:C",
+        "02 A:B",
+      ]);
+    });
+
+    it("honors the chain filter", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        evt({ eventId: "a", chain: "stellar", srcToken: "USDC", dstToken: "XLM", volume: 1n }),
+        evt({ eventId: "b", chain: "ethereum", srcToken: "USDC", dstToken: "XLM", volume: 2n }),
+      ]);
+      const points = await store.queryTokenPair(q({ chain: "ethereum" }));
+      expect(points).toHaveLength(1);
+      expect(points[0].volume).toBe("2");
+    });
+  });
+
+  describe("solver filter", () => {
+    it("restricts every query to fills by the given solver", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        evt({ eventId: "a", solver: "A", volume: 60n, durationMs: 100 }),
+        evt({ eventId: "b", solver: "B", volume: 40n, durationMs: 900 }),
+      ]);
+      const volume = await store.queryVolume(q({ solver: "A" }));
+      const latency = await store.queryLatency(q({ solver: "B" }));
+      expect(volume[0].volume).toBe("60");
+      expect(latency[0]).toMatchObject({ avgMs: 900, count: 1 });
+    });
+  });
+
+  describe("queryPerSolver", () => {
+    it("reports avgMs, volume, and count per solver per bucket", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        evt({ eventId: "a", solver: "A", volume: 10n, durationMs: 100 }),
+        evt({ eventId: "b", solver: "A", volume: 20n, durationMs: 300 }),
+        evt({ eventId: "c", solver: "B", volume: 5n, durationMs: 50 }),
+      ]);
+      const points = await store.queryPerSolver(q());
+      expect(points).toEqual([
+        { start: "2026-01-01T12:00:00.000Z", solver: "A", avgMs: 200, volume: "30", count: 2 },
+        { start: "2026-01-01T12:00:00.000Z", solver: "B", avgMs: 50, volume: "5", count: 1 },
+      ]);
+    });
+  });
+
+  describe("median", () => {
+    it("returns the middle value for an odd count", () => {
+      expect(median([300, 100, 200])).toBe(200);
+      expect(medianBigInt([30n, 10n, 20n])).toBe(20n);
+    });
+
+    it("averages the two middle values for an even count (unlike nearest-rank percentile)", () => {
+      expect(median([100, 400, 200, 300])).toBe(250);
+      expect(percentile([100, 400, 200, 300], 0.5)).toBe(200);
+      expect(medianBigInt([1n, 2n, 3n, 4n])).toBe(2n); // (2 + 3) / 2 floored
+    });
+
+    it("returns 0 for empty input", () => {
+      expect(median([])).toBe(0);
+      expect(medianBigInt([])).toBe(0n);
     });
   });
 
