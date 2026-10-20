@@ -14,9 +14,20 @@
  *   scoring result but not the counter writes (which use a background write).
  * - Allowlist wins: an API-key-allowlisted actor is scored (for transparency)
  *   but the action is always "pass".
+ *
+ * Runtime rule tuning (issue #603)
+ * ────────────────────────────────
+ * Rule settings are layered: persisted overrides > `ABUSE_<RULE>_*` env vars >
+ * `DEFAULT_ABUSE_RULES`. Admins change overrides with
+ * `PATCH /api/v1/abuse/rules/:signal` (see AbuseController); they are stored as
+ * one JSON blob at the Redis key `vortex:abuse:config`, loaded on boot, and
+ * take effect on this instance's next request. Other instances pick the change
+ * up within `RULES_REFRESH_MS`. If the overrides cannot be loaded, the last
+ * known config (env/defaults on boot) stays in force. Every change is logged
+ * with the rule and its before/after values.
  */
 
-import { Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger, OnModuleInit, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import Redis from "ioredis";
 import {
@@ -33,6 +44,15 @@ import {
   AbuseAuditEvent,
 } from "./abuse.types";
 import { AppConfig } from "../config/configuration";
+import { logger as winstonLogger } from "../common/logger";
+import {
+  ABUSE_RULES_STORE,
+  AbuseRuleOverrides,
+  AbuseRulesStore,
+  InMemoryAbuseRulesStore,
+  RuleFieldValue,
+  mergeRules,
+} from "./abuse-rules";
 
 /** Redis key prefix for all abuse counters. */
 const KEY_PREFIX = "vortex:abuse";
@@ -46,13 +66,38 @@ const AUDIT_TTL_SECONDS = 7 * 86_400;
 /** TTL for score snapshots (seconds). */
 const SCORE_TTL_SECONDS = 3 * 86_400;
 
+/** How often persisted rule overrides are re-read, so other instances' changes apply. */
+const RULES_REFRESH_MS = 5_000;
+
+/** Upper bound on one load of persisted overrides, so a hung Redis can't stall requests or boot. */
+const RULES_LOAD_TIMEOUT_MS = 1_000;
+
+/** Result of a rule change: the rule before and after. */
+export interface AbuseRuleChange {
+  signal: AbuseSignal;
+  before: AbuseRulesConfig[AbuseSignal];
+  after: AbuseRulesConfig[AbuseSignal];
+}
+
 @Injectable()
-export class AbuseScoreService {
+export class AbuseScoreService implements OnModuleInit {
   private readonly logger = new Logger(AbuseScoreService.name);
   private readonly redis: Redis;
-  private readonly rules: AbuseRulesConfig;
+  /** DEFAULT_ABUSE_RULES with env overrides applied; fixed for the process lifetime. */
+  private readonly baseRules: AbuseRulesConfig;
+  /** Effective rules: baseRules with persisted overrides layered on top. */
+  private rules: AbuseRulesConfig;
+  private readonly rulesStore: AbuseRulesStore;
+  private lastRulesRefresh = 0;
+  private rulesRefresh: Promise<void> | null = null;
+  /** Bumped on every local change so an older in-flight refresh cannot undo it. */
+  private rulesGeneration = 0;
+  private rulesLoadFailing = false;
 
-  constructor(private readonly config: ConfigService<AppConfig, true>) {
+  constructor(
+    private readonly config: ConfigService<AppConfig, true>,
+    @Optional() @Inject(ABUSE_RULES_STORE) rulesStore?: AbuseRulesStore,
+  ) {
     const url = config.get("redisUrl", { infer: true });
     this.redis = new Redis(url, {
       maxRetriesPerRequest: 1,
@@ -63,9 +108,111 @@ export class AbuseScoreService {
       this.logger.warn(`[abuse-scorer] Redis error — scoring will fail open: ${err.message}`),
     );
 
-    // Rules live in config so operators can override them via env vars or
-    // future runtime flag integration without touching code.
-    this.rules = this.loadRulesFromConfig();
+    // Env/default rules are the base; persisted admin overrides are layered
+    // on top in onModuleInit and on every refresh.
+    this.baseRules = this.loadRulesFromConfig();
+    this.rules = structuredClone(this.baseRules);
+    this.rulesStore = rulesStore ?? new InMemoryAbuseRulesStore();
+  }
+
+  async onModuleInit(): Promise<void> {
+    await this.refreshRules();
+  }
+
+  // ── Rule configuration ──────────────────────────────────────────────────────
+
+  /** The effective rule configuration (a copy). */
+  getRules(): AbuseRulesConfig {
+    return structuredClone(this.rules);
+  }
+
+  /** Whether a rule is currently enabled. */
+  isRuleEnabled(signal: AbuseSignal): boolean {
+    return this.rules[signal].enabled;
+  }
+
+  /**
+   * Persist an override for one rule's fields and apply it immediately.
+   * `patch` must already be validated (see `validateRulePatch`). Throws if the
+   * overrides cannot be persisted, in which case nothing changes.
+   */
+  async updateRule(signal: AbuseSignal, patch: Record<string, RuleFieldValue>): Promise<AbuseRuleChange> {
+    return this.changeRule(signal, (current) => ({
+      ...current,
+      [signal]: { ...(current[signal] ?? {}), ...patch },
+    }));
+  }
+
+  /** Drop every persisted override for one rule, reverting it to env/defaults. */
+  async resetRule(signal: AbuseSignal): Promise<AbuseRuleChange> {
+    return this.changeRule(signal, (current) => {
+      const next = { ...current };
+      delete next[signal];
+      return next;
+    });
+  }
+
+  private async changeRule(
+    signal: AbuseSignal,
+    mutate: (current: AbuseRuleOverrides) => AbuseRuleOverrides,
+  ): Promise<AbuseRuleChange> {
+    let before: AbuseRulesConfig[AbuseSignal] | undefined;
+    const overrides = await this.rulesStore.update((current) => {
+      // Read "before" from the persisted value the update is applied to, so
+      // the log is accurate even if another instance changed it moments ago.
+      before = mergeRules(this.baseRules, current)[signal];
+      return mutate(current);
+    });
+    this.rulesGeneration++;
+    this.applyOverrides(overrides);
+    const change: AbuseRuleChange = {
+      signal,
+      before: before ?? structuredClone(this.baseRules[signal]),
+      after: structuredClone(this.rules[signal]),
+    };
+    winstonLogger.info("[abuse-rules] rule configuration changed", {
+      timestamp: new Date().toISOString(),
+      actor: "admin-key",
+      signal,
+      before: change.before,
+      after: change.after,
+    });
+    return change;
+  }
+
+  private applyOverrides(overrides: AbuseRuleOverrides): void {
+    this.rules = mergeRules(this.baseRules, overrides);
+    this.lastRulesRefresh = Date.now();
+  }
+
+  /** Re-read persisted overrides; keeps the current rules if the store fails. */
+  private refreshRules(): Promise<void> {
+    if (!this.rulesRefresh) {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${RULES_LOAD_TIMEOUT_MS}ms`)), RULES_LOAD_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      const generation = this.rulesGeneration;
+      this.rulesRefresh = Promise.race([this.rulesStore.load(), timeout])
+        .then((overrides) => {
+          this.rulesLoadFailing = false;
+          if (generation === this.rulesGeneration) this.applyOverrides(overrides);
+        })
+        .catch((err: Error) => {
+          // Back off until the next interval rather than retrying per request.
+          this.lastRulesRefresh = Date.now();
+          const message = `[abuse-scorer] could not load rule overrides, keeping current rules: ${err.message}`;
+          if (this.rulesLoadFailing) this.logger.debug(message);
+          else this.logger.warn(message);
+          this.rulesLoadFailing = true;
+        })
+        .finally(() => {
+          clearTimeout(timer);
+          this.rulesRefresh = null;
+        });
+    }
+    return this.rulesRefresh;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -77,6 +224,10 @@ export class AbuseScoreService {
    */
   async score(ctx: AbuseContext, allowlisted: boolean): Promise<AbuseScore> {
     const signals: SignalFiring[] = [];
+
+    if (Date.now() - this.lastRulesRefresh >= RULES_REFRESH_MS) {
+      await this.refreshRules();
+    }
 
     try {
       const now = Math.floor(Date.now() / 1000);
