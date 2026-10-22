@@ -10,6 +10,7 @@ import {
   SEP10_NONCE_STORE,
   type Sep10NonceStore,
 } from "./nonce.store";
+import { JwksController } from "./jwks.controller";
 import { Sep10Controller } from "./sep10.controller";
 import { Sep10Service } from "./sep10.service";
 import { SEP10_KEYS, sep10Keys } from "./sep10-keys";
@@ -22,7 +23,7 @@ import { SEP10_KEYS, sep10Keys } from "./sep10-keys";
  */
 @Module({
   imports: [SolversModule],
-  controllers: [Sep10Controller],
+  controllers: [Sep10Controller, JwksController],
   providers: [
     Sep10Service,
     {

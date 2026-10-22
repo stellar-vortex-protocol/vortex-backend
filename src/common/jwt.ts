@@ -1,4 +1,5 @@
 import {
+  createHash,
   createHmac,
   createPrivateKey,
   createPublicKey,
@@ -84,6 +85,36 @@ export function loadEd25519PrivateKey(secret: string): KeyObject | null {
  */
 export function ed25519PublicKeyFor(privateKey: KeyObject): KeyObject {
   return createPublicKey(privateKey);
+}
+
+/** A public Ed25519 key in JWKS form (RFC 8037 / RFC 7517). */
+export interface Ed25519Jwk {
+  kty: "OKP";
+  crv: "Ed25519";
+  x: string;
+  use: "sig";
+  alg: "EdDSA";
+  kid: string;
+}
+
+/**
+ * Exports an Ed25519 public key as a JWK for the JWKS endpoint (issue #712).
+ *
+ * The raw `x` coordinate comes straight from Node's JWK export rather than
+ * hand-rolled DER parsing, and `kid` is a deterministic hash of `x` so it is
+ * stable across restarts with the same signing key. Returns null when the key
+ * is missing or is not an Ed25519 public key.
+ */
+export function ed25519JwkFor(publicKey: KeyObject | null | undefined): Ed25519Jwk | null {
+  if (!publicKey) return null;
+  try {
+    const jwk = publicKey.export({ format: "jwk" }) as { kty?: string; crv?: string; x?: string };
+    if (jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || typeof jwk.x !== "string" || !jwk.x) return null;
+    const kid = createHash("sha256").update(jwk.x).digest("base64url");
+    return { kty: "OKP", crv: "Ed25519", x: jwk.x, use: "sig", alg: "EdDSA", kid };
+  } catch {
+    return null;
+  }
 }
 
 /**

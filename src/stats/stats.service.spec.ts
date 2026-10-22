@@ -311,4 +311,187 @@ describe("StatsService", () => {
       expect(solversService.getAll).toHaveBeenCalledTimes(2);
     });
   });
+
+  // ── computeStatsForWindow ──────────────────────────────────────────────────
+
+  describe("computeStatsForWindow()", () => {
+    const NOW = 10_000_000;
+    let nowSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      nowSpy = jest.spyOn(Date, "now").mockReturnValue(NOW * 1000);
+    });
+
+    afterEach(() => {
+      nowSpy.mockRestore();
+    });
+
+    it("includes only intents created at or after the window start", async () => {
+      const intents = [
+        baseIntent({ intentId: "recent", state: "filled", fillAmount: "100", createdAt: NOW - 60 }),
+        baseIntent({ intentId: "old", state: "filled", fillAmount: "900", createdAt: NOW - 7200 }),
+      ];
+      const { service } = makeDeps(intents, []);
+      const stats = await service.computeStatsForWindow(NOW - 3600);
+      expect(stats.totalIntents).toBe(1);
+      expect(stats.totalVolume).toBe("100");
+    });
+
+    it("treats an intent created exactly at the window boundary as inside the window", async () => {
+      const intents = [
+        baseIntent({ intentId: "boundary", state: "filled", fillAmount: "42", createdAt: NOW - 3600 }),
+      ];
+      const { service } = makeDeps(intents, []);
+      const stats = await service.computeStatsForWindow(NOW - 3600);
+      expect(stats.totalIntents).toBe(1);
+      expect(stats.totalVolume).toBe("42");
+    });
+
+    it("excludes intents created one second before the window start", async () => {
+      const intents = [
+        baseIntent({ intentId: "just-outside", state: "filled", fillAmount: "42", createdAt: NOW - 3601 }),
+      ];
+      const { service } = makeDeps(intents, []);
+      const stats = await service.computeStatsForWindow(NOW - 3600);
+      expect(stats.totalIntents).toBe(0);
+      expect(stats.totalVolume).toBe("0");
+    });
+
+    it("returns zero-safe avgFillTime and fillRate for an empty window", async () => {
+      const intents = [baseIntent({ intentId: "old", state: "filled", fillAmount: "100", createdAt: NOW - 100_000 })];
+      const { service } = makeDeps(intents, []);
+      const stats = await service.computeStatsForWindow(NOW - 3600);
+      expect(stats.avgFillTime).toBe(0);
+      expect(stats.fillRate).toBe(0);
+      expect(Number.isNaN(stats.avgFillTime)).toBe(false);
+      expect(Number.isFinite(stats.fillRate)).toBe(true);
+    });
+
+    it("computes avgFillTime and fillRate only from in-window intents", async () => {
+      const intents = [
+        baseIntent({ intentId: "a", state: "filled", fillAmount: "100", createdAt: NOW - 100, filledAt: NOW - 40 }),
+        baseIntent({ intentId: "b", state: "open", createdAt: NOW - 200 }),
+        baseIntent({ intentId: "c", state: "filled", fillAmount: "999", createdAt: NOW - 100_000, filledAt: NOW - 99_000 }),
+      ];
+      const { service } = makeDeps(intents, []);
+      const stats = await service.computeStatsForWindow(NOW - 3600);
+      expect(stats.totalIntents).toBe(2);
+      expect(stats.avgFillTime).toBe(60);
+      expect(stats.fillRate).toBeCloseTo(0.5);
+    });
+
+    it("counts uniqueUsers and activeSolvers within the window", async () => {
+      const intents = [
+        baseIntent({ intentId: "a", user: "GUSER1", createdAt: NOW - 100 }),
+        baseIntent({ intentId: "b", user: "GUSER1", createdAt: NOW - 200 }),
+        baseIntent({ intentId: "c", user: "GUSER2", createdAt: NOW - 100_000 }),
+      ];
+      const solvers = [baseSolver({ address: "S1", isActive: true })];
+      const { service } = makeDeps(intents, solvers);
+      const stats = await service.computeStatsForWindow(NOW - 3600);
+      expect(stats.uniqueUsers).toBe(1);
+      expect(stats.activeSolvers).toBe(1);
+    });
+
+    it("excludes canary intents from the window", async () => {
+      const intents = [
+        baseIntent({ intentId: "real", state: "filled", fillAmount: "100", createdAt: NOW - 100 }),
+        baseIntent({ intentId: "canary", state: "filled", fillAmount: "5000", createdAt: NOW - 100, isCanary: true }),
+      ];
+      const { service } = makeDeps(intents, []);
+      const stats = await service.computeStatsForWindow(NOW - 3600);
+      expect(stats.totalIntents).toBe(1);
+      expect(stats.totalVolume).toBe("100");
+    });
+  });
+
+  // ── getWindowedStats ───────────────────────────────────────────────────────
+
+  describe("getWindowedStats()", () => {
+    const NOW = 10_000_000;
+    let nowSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      nowSpy = jest.spyOn(Date, "now").mockReturnValue(NOW * 1000);
+    });
+
+    afterEach(() => {
+      nowSpy.mockRestore();
+    });
+
+    it("returns 1h, 24h, 7d and allTime keys", async () => {
+      const { service } = makeDeps([], []);
+      const windows = await service.getWindowedStats();
+      expect(Object.keys(windows).sort()).toEqual(["1h", "24h", "7d", "allTime"].sort());
+    });
+
+    it("buckets intents by age into the correct windows", async () => {
+      const intents = [
+        baseIntent({ intentId: "fresh", state: "filled", fillAmount: "1", createdAt: NOW - 60 }),
+        baseIntent({ intentId: "day", state: "filled", fillAmount: "10", createdAt: NOW - 3600 * 5 }),
+        baseIntent({ intentId: "week", state: "filled", fillAmount: "100", createdAt: NOW - 3600 * 24 * 3 }),
+        baseIntent({ intentId: "ancient", state: "filled", fillAmount: "1000", createdAt: NOW - 3600 * 24 * 30 }),
+      ];
+      const { service } = makeDeps(intents, []);
+      const windows = await service.getWindowedStats();
+
+      expect(windows["1h"].totalIntents).toBe(1);
+      expect(windows["1h"].totalVolume).toBe("1");
+
+      expect(windows["24h"].totalIntents).toBe(2);
+      expect(windows["24h"].totalVolume).toBe("11");
+
+      expect(windows["7d"].totalIntents).toBe(3);
+      expect(windows["7d"].totalVolume).toBe("111");
+
+      expect(windows.allTime.totalIntents).toBe(4);
+      expect(windows.allTime.totalVolume).toBe("1111");
+    });
+
+    it("never includes an intent in a window older than its age", async () => {
+      const intents = [
+        baseIntent({ intentId: "two-hours", state: "filled", fillAmount: "7", createdAt: NOW - 3600 * 2 }),
+      ];
+      const { service } = makeDeps(intents, []);
+      const windows = await service.getWindowedStats();
+
+      expect(windows["1h"].totalIntents).toBe(0);
+      expect(windows["24h"].totalIntents).toBe(1);
+      expect(windows["7d"].totalIntents).toBe(1);
+      expect(windows.allTime.totalIntents).toBe(1);
+    });
+
+    it("returns zero-safe metrics for empty windows", async () => {
+      const { service } = makeDeps([], []);
+      const windows = await service.getWindowedStats();
+      for (const key of ["1h", "24h", "7d", "allTime"] as const) {
+        expect(windows[key].avgFillTime).toBe(0);
+        expect(windows[key].fillRate).toBe(0);
+        expect(windows[key].totalVolume).toBe("0");
+      }
+    });
+
+    it("excludes canary intents from every window", async () => {
+      const intents = [
+        baseIntent({ intentId: "canary", state: "filled", fillAmount: "5000", createdAt: NOW - 60, isCanary: true }),
+      ];
+      const { service } = makeDeps(intents, []);
+      const windows = await service.getWindowedStats();
+      for (const key of ["1h", "24h", "7d", "allTime"] as const) {
+        expect(windows[key].totalIntents).toBe(0);
+        expect(windows[key].totalVolume).toBe("0");
+      }
+    });
+
+    it("allTime matches getProtocolStats()", async () => {
+      const intents = [
+        baseIntent({ intentId: "a", state: "filled", fillAmount: "100", createdAt: NOW - 60, filledAt: NOW - 30 }),
+        baseIntent({ intentId: "b", state: "open", createdAt: NOW - 3600 * 24 * 10 }),
+      ];
+      const { service } = makeDeps(intents, []);
+      const windows = await service.getWindowedStats();
+      const allTime = await service.getProtocolStats();
+      expect(windows.allTime).toEqual(allTime);
+    });
+  });
 });

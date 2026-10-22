@@ -6,6 +6,16 @@ import { IntentsService } from "../intents/intents.service";
 import { SUPPORTED_CHAINS } from "../intents/intents.types";
 import { SolversService } from "../solvers/solvers.service";
 import { IntentsGateway } from "../intents/intents.gateway";
+import { CanaryRegistryService } from "../admin/canary-registry.service";
+
+/** Rolling window definitions (in seconds) exposed by `GET /api/v1/stats/windows`. */
+export const STATS_WINDOWS = {
+  "1h": 3_600,
+  "24h": 86_400,
+  "7d": 604_800,
+} as const;
+
+export type StatsWindowKey = keyof typeof STATS_WINDOWS;
 
 @Injectable()
 export class StatsService {
@@ -13,24 +23,44 @@ export class StatsService {
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
     private readonly intentsGateway: IntentsGateway,
+    @Optional() private readonly canaryRegistry?: CanaryRegistryService,
     @Optional() config?: ConfigService<AppConfig, true>,
   ) {
-    this.canary = new Set(config?.get("canaryAddresses", { infer: true }) ?? []);
+    // Seed fallback only: used when no registry is wired (e.g. isolated unit tests).
+    this.seedCanary = new Set(config?.get("canaryAddresses", { infer: true }) ?? []);
   }
 
-  /** Canary addresses (issue #496) — their intents and solvers never count toward public stats. */
-  private readonly canary: ReadonlySet<string>;
+  /** Bootstrap canary addresses (issue #496) used only when no registry is available. */
+  private readonly seedCanary: ReadonlySet<string>;
 
-  private async publicIntents() {
-    return (await this.intentsService.getAll()).filter((i) => !isCanaryIntent(i, this.canary));
+  /**
+   * Canary addresses (issue #496) — their intents and solvers never count toward public stats.
+   * Read from the runtime registry on every call so add/remove takes effect without a restart.
+   */
+  private async canaryAddresses(): Promise<ReadonlySet<string>> {
+    if (!this.canaryRegistry) return this.seedCanary;
+    return new Set(await this.canaryRegistry.getAddresses());
   }
 
-  async getProtocolStats() {
-    const intents = await this.publicIntents();
-    const solvers = (await this.solversService.getAll()).filter((s) => !this.canary.has(s.address));
+  private async publicIntents(canary?: ReadonlySet<string>) {
+    const canarySet = canary ?? (await this.canaryAddresses());
+    return (await this.intentsService.getAll()).filter((i) => !isCanaryIntent(i, canarySet));
+  }
 
-    const open = intents.filter((i) => i.state === "open").length;
-    const filled = intents.filter((i) => i.state === "filled");
+  /**
+   * Compute the protocol stats shape for a single window.
+   * `sinceEpochSeconds` is inclusive; `null` means all-time.
+   */
+  private computeStatsForWindow(
+    intents: ReadonlyArray<{ state: string; fillAmount?: string | null; filledAt?: number | null; createdAt: number; user: string }>,
+    activeSolvers: number,
+    sinceEpochSeconds: number | null,
+  ) {
+    const windowed =
+      sinceEpochSeconds == null ? intents : intents.filter((i) => i.createdAt >= sinceEpochSeconds);
+
+    const open = windowed.filter((i) => i.state === "open").length;
+    const filled = windowed.filter((i) => i.state === "filled");
     const totalVolume = filled.reduce((sum, i) => sum + BigInt(i.fillAmount ?? "0"), 0n);
 
     const fillTimes = filled
@@ -41,14 +71,44 @@ export class StatsService {
       : 0;
 
     return {
-      totalIntents: intents.length,
+      totalIntents: windowed.length,
       openIntents: open,
       totalVolume: totalVolume.toString(),
-      uniqueUsers: new Set(intents.map((i) => i.user)).size,
-      activeSolvers: solvers.filter((s) => s.isActive).length,
+      uniqueUsers: new Set(windowed.map((i) => i.user)).size,
+      activeSolvers,
       avgFillTime: Math.round(avgFillTime),
-      fillRate: intents.length ? filled.length / intents.length : 0,
+      fillRate: windowed.length ? filled.length / windowed.length : 0,
     };
+  }
+
+  async getProtocolStats() {
+    const canary = await this.canaryAddresses();
+    const intents = await this.publicIntents(canary);
+    const solvers = (await this.solversService.getAll()).filter((s) => !canary.has(s.address));
+    const activeSolvers = solvers.filter((s) => s.isActive).length;
+
+    return this.computeStatsForWindow(intents, activeSolvers, null);
+  }
+
+  /**
+   * Rolling window breakdown: `1h`, `24h`, `7d` and `allTime`, computed in a single pass
+   * over the public (canary-excluded) intent set.
+   */
+  async getWindowedStats() {
+    const canary = await this.canaryAddresses();
+    const intents = await this.publicIntents(canary);
+    const solvers = (await this.solversService.getAll()).filter((s) => !canary.has(s.address));
+    const activeSolvers = solvers.filter((s) => s.isActive).length;
+
+    const now = Math.floor(Date.now() / 1000);
+    const result = {} as Record<StatsWindowKey | "allTime", ReturnType<StatsService["computeStatsForWindow"]>>;
+
+    for (const [key, seconds] of Object.entries(STATS_WINDOWS) as [StatsWindowKey, number][]) {
+      result[key] = this.computeStatsForWindow(intents, activeSolvers, now - seconds);
+    }
+    result.allTime = this.computeStatsForWindow(intents, activeSolvers, null);
+
+    return result;
   }
 
   async getTreasuryStats() {
