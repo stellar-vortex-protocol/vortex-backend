@@ -24,6 +24,7 @@ import { DatasetsModule } from "./datasets/datasets.module";
 import { AbuseModule } from "./abuse/abuse.module";
 import { ApiKeysModule } from "./auth/api-keys/api-keys.module";
 import { Sep10Module } from "./auth/sep10/sep10.module";
+import { WellKnownModule } from "./well-known/well-known.module";
 import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
 
 @Module({
@@ -48,6 +49,10 @@ import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
     // Issue #442 — SEP-10 challenge auth: challenge/token endpoints plus the
     // key material the WS gateway and JWT guards use to verify issued tokens.
     Sep10Module,
+    // Issue #701 — SEP-1 stellar.toml discovery endpoint
+    // (GET /.well-known/stellar.toml). Served outside the /api/v1 versioned
+    // surface so standard SEP-10 clients can auto-configure.
+    WellKnownModule,
     // @Global() — registers MetricsService / MetricsInterceptor / MetricsController
     // for the whole app. Must be imported once in the root module or the global
     // providers never become visible to other modules (e.g. IntentsSweeperService)

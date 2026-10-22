@@ -13,6 +13,8 @@ export const SOLVER_SCOPES = [
   "quote:respond",
   "intents:accept",
   "intents:fill",
+  "solver:update",
+  "solver:deregister",
 ] as const;
 
 export type SolverScope = (typeof SOLVER_SCOPES)[number];
@@ -36,6 +38,13 @@ export const SCOPE_REQUIREMENTS: Record<string, SolverScope> = {
   "quote:respond": "quote:respond",
   "intents:accept": "intents:accept",
   "intents:fill": "intents:fill",
+  // Solver self-service profile management (issue #703).
+  "solver:update": "solver:update",
+  // Solver deregistration (issue #703). A credential's scopes are fixed at
+  // creation/rotation time, so granting this to a long-lived automation
+  // credential is a meaningful trust decision: deregistration is irreversible
+  // for that registration epoch.
+  "solver:deregister": "solver:deregister",
 };
 
 /** Whether `grantedScopes` satisfies the scope required for `operation`. */

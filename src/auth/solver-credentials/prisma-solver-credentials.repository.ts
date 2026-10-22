@@ -55,6 +55,21 @@ export class PrismaSolverCredentialsRepository {
     return this.toRecord(row);
   }
 
+  /**
+   * Replace a credential's IP allowlist in a single write (issue #702).
+   * Passing `null` clears the restriction (allow all).
+   */
+  async updateIpAllowlist(
+    id: string,
+    ipAllowlist: string[] | null,
+  ): Promise<SolverCredentialRecord> {
+    const row = await this.prisma.solverCredential.update({
+      where: { id },
+      data: { ipAllowlist: ipAllowlist as unknown as object },
+    });
+    return this.toRecord(row);
+  }
+
   /** Revoke a credential at the given epoch seconds. */
   async revoke(id: string, nowSec: number): Promise<void> {
     await this.prisma.solverCredential.update({

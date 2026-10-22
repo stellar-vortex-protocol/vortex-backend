@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import Redis from "ioredis";
 import type { AppConfig } from "../../config/configuration";
 import { SolversModule } from "../../solvers/solvers.module";
+import { WellKnownController } from "../../well-known/well-known.controller";
 import { HorizonAccountInfoLoader, SEP10_ACCOUNT_INFO_LOADER } from "./account-info";
 import {
   InMemorySep10NonceStore,
@@ -51,6 +52,19 @@ import { SEP10_KEYS, sep10Keys } from "./sep10-keys";
         new HorizonAccountInfoLoader(config.get("stellar.horizonUrl", { infer: true })),
     },
   ],
-  exports: [Sep10Service],
+  exports: [Sep10Service, SEP10_KEYS],
 })
 export class Sep10Module {}
+
+/**
+ * SEP-1 discovery surface (issue #701): serves
+ * `GET /.well-known/stellar.toml` so off-the-shelf SEP-10 clients can
+ * resolve `WEB_AUTH_ENDPOINT`/`SIGNING_KEY` without out-of-band config.
+ * Kept separate from `Sep10Module` because `.well-known` routes are
+ * unauthenticated and live outside the `/api/v1` versioned prefix.
+ */
+@Module({
+  imports: [Sep10Module],
+  controllers: [WellKnownController],
+})
+export class WellKnownModule {}

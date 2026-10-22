@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   Req,
   UseGuards,
@@ -18,6 +19,7 @@ import {
 import type { Request } from "express";
 import { SolverCredentialService } from "./solver-credential.service";
 import { CreateSolverCredentialDto } from "./dto/create-solver-credential.dto";
+import { UpdateIpAllowlistDto } from "./dto/update-ip-allowlist.dto";
 import { SolverJwtGuard } from "./solver-jwt.guard";
 
 /**
@@ -86,6 +88,42 @@ export class SolverCredentialController {
       createdAt: rotated.record.createdAt,
       expiresAt: rotated.record.expiresAt,
       plaintext: rotated.plaintext,
+    };
+  }
+
+  @Patch(":id/ip-allowlist")
+  @ApiOperation({
+    summary: "Update a solver credential's IP allowlist",
+    description:
+      "Replaces the credential's IP allowlist in place without rotating the secret. " +
+      "Every entry is validated before anything is persisted; an invalid entry rejects " +
+      "the whole request. Scopes and expiry remain rotation-only.",
+  })
+  @ApiOkResponse({ description: "Credential IP allowlist updated" })
+  @ApiUnauthorizedResponse({ description: "Missing or invalid SEP-10 JWT" })
+  async updateIpAllowlist(
+    @Param("address") address: string,
+    @Param("id") id: string,
+    @Body() dto: UpdateIpAllowlistDto,
+  ) {
+    const current = await this.credentials.listCredentials(address);
+    if (!current.some((c) => c.id === id)) {
+      throw new BadRequestException("Credential not found for this solver");
+    }
+    const updated = await this.credentials.updateIpAllowlist(id, dto.ipAllowlist ?? null);
+    if (!updated) {
+      throw new BadRequestException("Credential not found");
+    }
+    return {
+      id: updated.id,
+      credPrefix: updated.credPrefix,
+      scopes: updated.scopes,
+      ipAllowlist: updated.ipAllowlist,
+      createdAt: updated.createdAt,
+      expiresAt: updated.expiresAt,
+      revokedAt: updated.revokedAt,
+      rotatedAt: updated.rotatedAt,
+      lastUsedAt: updated.lastUsedAt,
     };
   }
 

@@ -1,10 +1,11 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, Logger, OnModuleDestroy, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../../config/configuration";
 import { AdminAuditService } from "../../admin/admin-audit.service";
 import { PrismaSolverCredentialsRepository, SolverCredentialRecord } from "./prisma-solver-credentials.repository";
 import { generateCredential, verifyCredential } from "../credential-hashing";
 import { scopeAllows, SolverScope } from "./solver-scopes";
+import { describeAllowlistEntry, parseAllowlistEntry } from "./ip-allowlist";
 import {
   CREDENTIAL_REVOCATION_BUS,
   CredentialRevocationBus,
@@ -196,6 +197,49 @@ export class SolverCredentialService implements OnModuleDestroy {
     });
 
     return { record, plaintext: credential.plaintext };
+  }
+
+  /**
+   * Update a credential's IP allowlist in place, without rotating the secret
+   * (issue #702).
+   *
+   * Every entry is validated up front via {@link parseAllowlistEntry}; if any
+   * entry is invalid the whole request is rejected and nothing is written
+   * (all-or-nothing).  On success the in-process cache entry for the
+   * credential's prefix is dropped so the guard cannot keep enforcing a stale
+   * allowlist for up to {@link CACHE_TTL_MS}.
+   *
+   * @returns the updated record, or `null` if the credential does not exist.
+   */
+  async updateIpAllowlist(id: string, entries: string[] | null): Promise<SolverCredentialRecord | null> {
+    if (entries !== null) {
+      for (const entry of entries) {
+        const parsed = parseAllowlistEntry(entry);
+        if (parsed.kind === "invalid") {
+          throw new BadRequestException(describeAllowlistEntry(parsed));
+        }
+      }
+    }
+
+    const current = await this.repo.findById(id);
+    if (!current) return null;
+
+    const record = await this.repo.updateIpAllowlist(id, entries);
+
+    // Drop the cached principal so the next verification re-reads the new
+    // allowlist from the database instead of serving the stale one.
+    this.activeCache.delete(record.credPrefix);
+
+    await this.audit.record({
+      actor: current.solverAddress,
+      action: "solver-credential.ip-allowlist.update",
+      target: `solver-credential:${id}`,
+      before: { ipAllowlist: current.ipAllowlist },
+      after: { ipAllowlist: record.ipAllowlist },
+    });
+
+    this.logger.log(`solver credential ip-allowlist updated id=${id} solver=${current.solverAddress}`);
+    return record;
   }
 
   /**
