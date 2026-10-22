@@ -1,6 +1,11 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { KILL_SWITCH_REPOSITORY, KillSwitchRecord, KillSwitchRepository } from "./killswitch.repository";
+import {
+  KILL_SWITCH_REPOSITORY,
+  KillSwitchRecord,
+  KillSwitchRepository,
+  ScheduledKillSwitchWindow,
+} from "./killswitch.repository";
 import {
   KillSwitchOperation,
   KillSwitchScope,
@@ -11,6 +16,7 @@ import {
 } from "./killswitch.types";
 import { evaluate } from "./killswitch.evaluate";
 import { GuardianStateService } from "../governance/guardian-state.service";
+import { MetricsService } from "../metrics/metrics.service";
 
 /** Redis channel every replica subscribes to for invalidation notices. */
 export const KILL_SWITCH_CHANNEL = "vortex:killswitch:invalidate";
@@ -64,10 +70,17 @@ export class KillSwitchService implements OnModuleInit, OnModuleDestroy {
   private snapshot: SwitchSnapshotEntry[] = [];
   private lastUpdatedAt = 0;
   private ready = false;
+  /** Cached scheduled windows (upcoming + active) for the status endpoint. */
+  private scheduledWindows: { upcoming: ScheduledKillSwitchWindow[]; active: ScheduledKillSwitchWindow[] } = {
+    upcoming: [],
+    active: [],
+  };
 
   private redis: RedisLike | null = null;
   private subscriber: RedisLike | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
+  /** Background timer that fires due scheduled maintenance windows (#685). */
+  private schedulerTimer: NodeJS.Timeout | null = null;
   /** Serialises refreshes so a burst of invalidations cannot pile up queries. */
   private refreshInFlight: Promise<void> | null = null;
 
@@ -83,6 +96,7 @@ export class KillSwitchService implements OnModuleInit, OnModuleDestroy {
     @Inject(KILL_SWITCH_REPOSITORY) private readonly repo: KillSwitchRepository,
     private readonly config: ConfigService,
     @Optional() private readonly guardian?: GuardianStateService,
+    @Optional() private readonly metrics?: MetricsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -98,10 +112,12 @@ export class KillSwitchService implements OnModuleInit, OnModuleDestroy {
 
     await this.startPropagation();
     this.startPolling();
+    this.startScheduler();
   }
 
   async onModuleDestroy(): Promise<void> {
     if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.schedulerTimer) clearInterval(this.schedulerTimer);
     await this.disconnectRedis();
   }
 
@@ -167,12 +183,218 @@ export class KillSwitchService implements OnModuleInit, OnModuleDestroy {
     lastUpdatedAt: number;
     propagation: "redis" | "db-poll";
     switches: SwitchSnapshotEntry[];
+    scheduledWindows: { upcoming: ScheduledKillSwitchWindow[]; active: ScheduledKillSwitchWindow[] };
   } {
     return {
       ready: this.ready,
       lastUpdatedAt: this.lastUpdatedAt,
       propagation: this.redis ? "redis" : "db-poll",
       switches: this.snapshot,
+      scheduledWindows: this.scheduledWindows,
+    };
+  }
+
+  /**
+   * Upcoming and currently-active scheduled maintenance windows (#685),
+   * surfaced alongside ad hoc pauses on the status endpoint.
+   */
+  async listScheduledWindows(now: number = Date.now()): Promise<{
+    upcoming: ScheduledKillSwitchWindow[];
+    active: ScheduledKillSwitchWindow[];
+  }> {
+    const windows = await this.repo.listScheduledWindows();
+    return {
+      upcoming: windows.filter((w) => w.status === "pending" && w.scheduledAt > now),
+      active: windows.filter(
+        (w) => w.status === "active" || (w.status === "pending" && w.scheduledAt <= now),
+      ),
+    };
+  }
+
+  // ── scheduled maintenance windows (#685) ────────────────────────────────
+
+  /**
+   * Persist a one-shot scheduled maintenance window. The pause activates
+   * automatically at `scheduledAt` and auto-resumes at `autoResumeAt` without
+   * the two-operator approval `approveResume()` normally requires, because the
+   * scope and resume time were already operator-approved here.
+   */
+  async scheduleWindow(input: {
+    scope: KillSwitchScope;
+    chain?: string | null;
+    token?: string | null;
+    operation?: KillSwitchOperation | null;
+    reasonCode: string;
+    reason: string;
+    scheduledBy: string;
+    scheduledAt: number;
+    autoResumeAt: number;
+  }): Promise<ScheduledKillSwitchWindow> {
+    const normalised = KillSwitchService.normaliseScope(input);
+    if (!Number.isFinite(input.scheduledAt) || !Number.isFinite(input.autoResumeAt)) {
+      throw new Error("A scheduled window requires numeric scheduledAt and autoResumeAt timestamps");
+    }
+    if (input.autoResumeAt <= input.scheduledAt) {
+      throw new Error("autoResumeAt must be after scheduledAt");
+    }
+
+    const window = await this.repo.createScheduledWindow({
+      ...input,
+      ...normalised,
+    });
+
+    this.log.warn(
+      `Kill-switch window SCHEDULED id=${window.id} scope=${window.scope} chain=${window.chain ?? "*"} ` +
+        `token=${window.token ?? "*"} operation=${window.operation ?? "*"} reason=${window.reasonCode} ` +
+        `by=${window.scheduledBy} at=${new Date(window.scheduledAt).toISOString()} ` +
+        `autoResumeAt=${new Date(window.autoResumeAt).toISOString()}`,
+    );
+    return window;
+  }
+
+  /**
+   * Background timer that fires due scheduled transitions. Every replica runs
+   * it, but the repository's conditional claims mean only one replica's write
+   * lands; the others get `null` and skip cleanly.
+   */
+  private startScheduler(): void {
+    const interval = this.config.get<number>("killswitch.schedulerMs") ?? 1000;
+    this.schedulerTimer = setInterval(() => {
+      void this.runScheduledTransitions().catch((err: Error) =>
+        this.log.warn(`Kill-switch scheduler tick failed: ${err.message}`),
+      );
+    }, interval);
+    // Never hold the event loop open for a background timer.
+    this.schedulerTimer.unref?.();
+  }
+
+  /** One scheduler tick: activate due windows, then auto-resume expired ones. */
+  async runScheduledTransitions(now: number = Date.now()): Promise<void> {
+    const dueActivations = await this.repo.claimDueActivation(now);
+    for (const window of dueActivations) {
+      try {
+        await this.repo.activate({
+          scope: window.scope,
+          chain: window.chain,
+          token: window.token,
+          operation: window.operation,
+          reasonCode: window.reasonCode,
+          reason: window.reason,
+          activatedBy: `scheduled:${window.scheduledBy}`,
+          now,
+        });
+        await this.refresh();
+        await this.broadcast();
+        this.log.warn(
+          `Kill-switch window ACTIVATED id=${window.id} scope=${window.scope} chain=${window.chain ?? "*"} ` +
+            `token=${window.token ?? "*"} operation=${window.operation ?? "*"} reason=${window.reasonCode}`,
+        );
+        await this.announce("paused", {
+          scope: window.scope,
+          chain: window.chain,
+          token: window.token,
+          operation: window.operation,
+          reasonCode: window.reasonCode,
+          reason: window.reason,
+        });
+      } catch (err) {
+        this.log.warn(`Kill-switch window activation failed id=${window.id}: ${(err as Error).message}`);
+      }
+    }
+
+    const dueResumes = await this.repo.claimDueAutoResume(now);
+    for (const window of dueResumes) {
+      try {
+        // Conditional resume: the claim already proved the row still matched
+        // its expected pre-state, so a manual resume in the meantime makes the
+        // claim return null and we never reach here.
+        const record = await this.repo.resumeScheduled(window.id, now);
+        if (!record) {
+          this.log.log(`Kill-switch window auto-resume skipped id=${window.id}: state changed`);
+          continue;
+        }
+        await this.refresh();
+        await this.broadcast();
+        this.log.warn(
+          `Kill-switch window AUTO-RESUMED id=${window.id} scope=${window.scope} chain=${window.chain ?? "*"} ` +
+            `token=${window.token ?? "*"} operation=${window.operation ?? "*"}`,
+        );
+        await this.announce("resumed", {
+          scope: window.scope,
+          chain: window.chain,
+          token: window.token,
+          operation: window.operation,
+          reasonCode: window.reasonCode,
+          reason: window.reason,
+        });
+      } catch (err) {
+        this.log.warn(`Kill-switch window auto-resume failed id=${window.id}: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  // ── pause-impact preview (#687) ─────────────────────────────────────────
+
+  /**
+   * Read-only blast-radius preview: evaluates a hypothetical scope against the
+   * current snapshot (reusing the pure `evaluate()`) and estimates how many
+   * recent requests it would affect. Never writes a row or calls `pause()`.
+   */
+  previewPause(input: {
+    scope: KillSwitchScope;
+    chain?: string | null;
+    token?: string | null;
+    operation?: KillSwitchOperation | null;
+    windowMs?: number;
+  }): {
+    wouldPause: boolean;
+    matchedChain: SwitchSnapshotEntry[];
+    overlappingActive: SwitchSnapshotEntry[];
+    estimatedAffectedRequests: number;
+    windowMs: number;
+  } {
+    const normalised = KillSwitchService.normaliseScope(input);
+    const windowMs = input.windowMs ?? 5 * 60 * 1000;
+
+    const hypothetical: SwitchSnapshotEntry = {
+      scope: normalised.scope,
+      chain: normalised.chain,
+      token: normalised.token,
+      operation: normalised.operation,
+      active: true,
+      reasonCode: "PREVIEW",
+      reason: "Hypothetical pause (preview only)",
+      activatedBy: "preview",
+      updatedAt: Date.now(),
+    };
+
+    const decision = evaluate([...this.snapshot, hypothetical], {
+      chain: normalised.chain,
+      token: normalised.token,
+      operation: normalised.operation ?? "fill",
+    });
+
+    const overlappingActive = decision.matchedChain.filter(
+      (entry) => entry.active && entry.reasonCode !== "PREVIEW",
+    );
+
+    const estimatedAffectedRequests = this.metrics
+      ? this.metrics.estimateAffectedRequests(
+          {
+            chain: normalised.chain,
+            token: normalised.token,
+            operation: normalised.operation,
+          },
+          windowMs,
+        )
+      : 0;
+
+    return {
+      wouldPause: decision.paused,
+      matchedChain: decision.matchedChain,
+      overlappingActive,
+      estimatedAffectedRequests,
+      windowMs,
     };
   }
 
@@ -298,6 +520,7 @@ export class KillSwitchService implements OnModuleInit, OnModuleDestroy {
           updatedAt: record.updatedAt,
         }));
         this.lastUpdatedAt = await this.repo.maxUpdatedAt();
+        this.scheduledWindows = await this.listScheduledWindows();
         this.ready = true;
       } finally {
         this.refreshInFlight = null;

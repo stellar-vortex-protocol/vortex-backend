@@ -299,3 +299,87 @@ environment (see the Docker production deployment section in `README.md`).
 applied (`npm run db:migrate:prod`).  No code changes are required —
 `IntentsModule` and `SolversModule` read the env var in their `useFactory`
 provider and instantiate the appropriate adapter.
+
+## Service status announcements
+
+*Implemented — issue #688.* A lightweight, operator-authored banner for
+degraded-but-operational states (elevated latency, a non-critical dependency
+down, scheduled maintenance) that does **not** pause anything. It is
+deliberately independent of the kill switch: the kill switch's
+`protocol_status` event blocks/allows writes, whereas an announcement is
+purely informational free text and never changes what the API accepts.
+
+### Endpoints
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `PUT` | `/admin/announcement` | admin only | Set or clear the announcement |
+| `GET` | `/api/v1/status/announcement` | public | Read the current (non-expired) announcement |
+
+`PUT /admin/announcement` accepts:
+
+```jsonc
+{
+  "message": "Elevated settlement latency — fills may take longer than usual", // null/omitted clears
+  "severity": "warning",          // "info" | "warning" | "critical"
+  "expiresAt": "2025-01-01T12:30:00Z" // optional ISO-8601; omitted = no expiry
+}
+```
+
+Sending `message: null` (or omitting it) clears the announcement. Every set
+and clear is recorded through `AdminAuditService` with the acting admin, the
+new message/severity, and the expiry.
+
+`GET /api/v1/status/announcement` returns the announcement, or
+`{ "announcement": null }` when none is active. It is public and
+unauthenticated so clients can poll it without credentials.
+
+### Persistence
+
+The announcement is stored in Postgres (a single-row table) rather than in
+memory, so it survives a restart and is consistent across horizontally scaled
+replicas. Write volume is negligible (operator-only), so there is no
+in-memory adapter or `INTENTS_PERSISTENCE`-style toggle — the service always
+talks to Prisma.
+
+### Expiry-at-read semantics
+
+An announcement with an `expiresAt` in the past is treated as cleared by
+every reader without requiring an explicit clear call:
+
+- `GET /api/v1/status/announcement` filters out expired rows at read time and
+  returns `null`.
+- The broadcast path treats an expired announcement as absent, so a routine
+  poll/refresh never re-broadcasts a stale banner.
+
+The row itself is left in place (it is simply ignored once expired) so the
+audit trail and the last-authored message remain inspectable; the next
+`PUT` overwrites it.
+
+### WebSocket broadcast
+
+On a real state change the service broadcasts a `status_announcement` event
+through `IntentsGateway.broadcast()`, mirroring the `protocol_status` event
+emitted by `KillSwitchModule`:
+
+```jsonc
+{
+  "type": "status_announcement",
+  "data": {
+    "message": "Elevated settlement latency — fills may take longer than usual",
+    "severity": "warning",
+    "expiresAt": "2025-01-01T12:30:00Z" // null when no expiry
+  }
+}
+```
+
+Clearing (or expiry) broadcasts the same event with `data: null`, so clients
+can distinguish "no announcement" from "no event received yet".
+
+**Broadcast only on real transitions.** The event is emitted only when the
+announcement actually changes: an explicit set, an explicit clear, or the
+expiry transition (an announcement that was active and has now lapsed). A
+routine poll or refresh of an unchanged (or already-expired) announcement
+never re-broadcasts, so connected clients are not spammed. This mirrors the
+kill switch's rule of broadcasting only on paused/resumed transitions rather
+than on every status read.

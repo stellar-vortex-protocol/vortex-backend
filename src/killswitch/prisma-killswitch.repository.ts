@@ -2,8 +2,11 @@ import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   ActivateInput,
+  CreateScheduledInput,
   KillSwitchRecord,
   KillSwitchRepository,
+  ResolvedKillSwitchRecord,
+  ScheduledKillSwitchWindow,
 } from "./killswitch.repository";
 import { KillSwitchOperation, KillSwitchScope, scopeKey } from "./killswitch.types";
 
@@ -21,6 +24,23 @@ interface KillSwitchRow {
   updatedAt: number;
   approvalsRequired: number;
   approvals?: { approver: string }[];
+}
+
+/** Shape of a scheduled-window row, kept loose for the same reason as above. */
+interface ScheduledWindowRow {
+  id: string;
+  scope: KillSwitchScope;
+  chain: string | null;
+  token: string | null;
+  operation: KillSwitchOperation | null;
+  reasonCode: string;
+  reason: string;
+  scheduledBy: string;
+  scheduledAt: number;
+  autoResumeAt: number;
+  activatedAt: number | null;
+  autoResumedAt: number | null;
+  cancelledAt: number | null;
 }
 
 /** `include` used everywhere a record needs its approvers. */
@@ -52,6 +72,24 @@ export class PrismaKillSwitchRepository implements KillSwitchRepository {
       updatedAt: row.updatedAt,
       approvalsRequired: row.approvalsRequired,
       approvers: (row.approvals ?? []).map((approval) => approval.approver),
+    };
+  }
+
+  private static toScheduledWindow(row: ScheduledWindowRow): ScheduledKillSwitchWindow {
+    return {
+      id: row.id,
+      scope: row.scope,
+      chain: row.chain,
+      token: row.token,
+      operation: row.operation,
+      reasonCode: row.reasonCode,
+      reason: row.reason,
+      scheduledBy: row.scheduledBy,
+      scheduledAt: row.scheduledAt,
+      autoResumeAt: row.autoResumeAt,
+      activatedAt: row.activatedAt,
+      autoResumedAt: row.autoResumedAt,
+      cancelledAt: row.cancelledAt,
     };
   }
 
@@ -172,5 +210,115 @@ export class PrismaKillSwitchRepository implements KillSwitchRepository {
       select: { approver: true },
     });
     return rows.map((row) => row.approver);
+  }
+
+  /**
+   * Resolved (no-longer-active) switches, newest resume first. Backed by the
+   * `(resumedAt, chain)` index so this stays cheap as history grows.
+   */
+  async listResolved(since: number, chain?: string): Promise<ResolvedKillSwitchRecord[]> {
+    const rows = await this.prisma.killSwitch.findMany({
+      where: {
+        active: false,
+        lastResumedAt: { not: null, gte: since },
+        ...(chain ? { chain } : {}),
+      },
+      orderBy: { lastResumedAt: "desc" },
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      scope: row.scope,
+      chain: row.chain,
+      token: row.token,
+      operation: row.operation,
+      reasonCode: row.reasonCode,
+      reason: row.reason,
+      startedAt: row.createdAt,
+      resumedAt: row.lastResumedAt as number,
+    }));
+  }
+
+  async createScheduled(input: CreateScheduledInput): Promise<ScheduledKillSwitchWindow> {
+    const row = await this.prisma.scheduledKillSwitch.create({
+      data: {
+        scope: input.scope,
+        chain: input.chain,
+        token: input.token,
+        operation: input.operation,
+        reasonCode: input.reasonCode,
+        reason: input.reason,
+        scheduledBy: input.scheduledBy,
+        scheduledAt: input.scheduledAt,
+        autoResumeAt: input.autoResumeAt,
+        createdAt: input.now,
+      },
+    });
+    return PrismaKillSwitchRepository.toScheduledWindow(row as ScheduledWindowRow);
+  }
+
+  async listScheduled(): Promise<ScheduledKillSwitchWindow[]> {
+    const rows = await this.prisma.scheduledKillSwitch.findMany({
+      where: { cancelledAt: null, autoResumedAt: null },
+      orderBy: { scheduledAt: "asc" },
+    });
+    return rows.map((row) => PrismaKillSwitchRepository.toScheduledWindow(row as ScheduledWindowRow));
+  }
+
+  /**
+   * Claim a due activation with a conditional update. Only the replica whose
+   * `updateMany` matches the still-unactivated row wins; the rest see a count
+   * of 0 and skip. Returns the claimed window, or undefined if another replica
+   * (or a cancellation) got there first.
+   */
+  async claimDueActivation(now: number): Promise<ScheduledKillSwitchWindow | undefined> {
+    const due = await this.prisma.scheduledKillSwitch.findFirst({
+      where: {
+        cancelledAt: null,
+        activatedAt: null,
+        scheduledAt: { lte: now },
+      },
+      orderBy: { scheduledAt: "asc" },
+    });
+    if (!due) return undefined;
+
+    const claimed = await this.prisma.scheduledKillSwitch.updateMany({
+      where: { id: due.id, activatedAt: null, cancelledAt: null },
+      data: { activatedAt: now },
+    });
+    if (claimed.count === 0) return undefined;
+
+    return PrismaKillSwitchRepository.toScheduledWindow({
+      ...(due as ScheduledWindowRow),
+      activatedAt: now,
+    });
+  }
+
+  /**
+   * Claim a due auto-resume. The conditional update requires the window to be
+   * activated and not yet resumed; if an operator already resumed the scope (or
+   * the window was cancelled) the row no longer matches and we skip cleanly.
+   */
+  async claimDueAutoResume(now: number): Promise<ScheduledKillSwitchWindow | undefined> {
+    const due = await this.prisma.scheduledKillSwitch.findFirst({
+      where: {
+        cancelledAt: null,
+        activatedAt: { not: null },
+        autoResumedAt: null,
+        autoResumeAt: { lte: now },
+      },
+      orderBy: { autoResumeAt: "asc" },
+    });
+    if (!due) return undefined;
+
+    const claimed = await this.prisma.scheduledKillSwitch.updateMany({
+      where: { id: due.id, autoResumedAt: null, cancelledAt: null, activatedAt: { not: null } },
+      data: { autoResumedAt: now },
+    });
+    if (claimed.count === 0) return undefined;
+
+    return PrismaKillSwitchRepository.toScheduledWindow({
+      ...(due as ScheduledWindowRow),
+      autoResumedAt: now,
+    });
   }
 }

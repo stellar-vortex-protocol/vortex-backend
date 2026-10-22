@@ -114,6 +114,73 @@ curl -sX POST "$KS/pause" -H "x-operator-token: $TOKEN" -H "x-operator-id: $ME" 
 Pausing is idempotent. Re-pausing an already-paused scope refreshes the reason
 and **clears any pending approvals**.
 
+### Previewing blast radius (read-only)
+
+Before committing to a pause, ask what it would actually affect:
+
+```bash
+curl -sX POST "$KS/preview" -H "x-operator-token: $TOKEN" -H "x-operator-id: $ME" \
+  -H 'content-type: application/json' \
+  -d '{"scope":"operation","chain":"stellar","operation":"fill"}'
+```
+
+The body takes the same `scope`/`chain`/`token`/`operation` shape as `/pause`,
+minus `reasonCode`/`reason`. The preview is **read-only**: it never calls
+`pause()`, never writes a row, and never activates anything. It runs the same
+pure `evaluate()` matching logic against a synthetic hypothetical entry, so the
+answer is exactly what a real pause would match.
+
+```json
+{
+  "scope": "operation",
+  "chain": "stellar",
+  "operation": "fill",
+  "windowSeconds": 300,
+  "estimatedAffectedRequests": 18422,
+  "matchedChain": "stellar",
+  "overlappingSwitches": [
+    { "scope": "chain", "chain": "stellar", "active": true, "reasonCode": "CHAIN_DEGRADED" }
+  ]
+}
+```
+
+- `estimatedAffectedRequests` is an estimate over a **recent window only**
+  (default last 5 minutes), computed from the in-process Prometheus counters
+  `MetricsService` already records — no extra scrape target, no load on
+  Prometheus. It is bounded by whatever retention the metrics backend keeps;
+  there is no historical backtesting.
+- `overlappingSwitches` lists the *other* currently-active switches that would
+  also govern the same requests (from `evaluate()`'s `matchedChain`). If this is
+  non-empty, your new pause may be redundant under an already-active broader
+  switch — consider whether you need it at all.
+
+### Scheduled maintenance windows
+
+For planned work (migrations, contract upgrades) you can schedule a one-shot
+pause ahead of time and have it auto-resume without anyone clicking resume:
+
+```bash
+curl -sX POST "$KS/schedule" -H "x-operator-token: $TOKEN" -H "x-operator-id: $ME" \
+  -H 'content-type: application/json' \
+  -d '{"scope":"operation","chain":"stellar","operation":"fill",
+       "reasonCode":"MAINTENANCE","reason":"intents-store migration",
+       "scheduledAt":"2025-08-27T02:00:00Z","autoResumeAt":"2025-08-27T02:30:00Z"}'
+```
+
+- `scheduledAt` — when the pause activates. `autoResumeAt` — when it lifts.
+  Both are required and `autoResumeAt` must be after `scheduledAt`.
+- This is distinct from `/pause`: nothing is paused at schedule time. A
+  background timer on every replica checks for due transitions; the write is a
+  conditional update, so a double-fire across replicas is harmless.
+- **Auto-resume needs no approvals.** The resume time and scope were already
+  operator-approved when the window was scheduled, so the two-operator rule
+  does not apply to the scheduled lift.
+- **Manual resume wins.** If an operator resumes the scope before
+  `autoResumeAt`, the scheduled job finds the row no longer in its expected
+  pre-state and skips cleanly — it will not error or re-pause.
+- One-shot only: there is no recurring/cron-style window in v1.
+=======
+
 ### What solvers experience
 
 While `fill` is paused, the sweeper will not slash for a missed fill. Instead it
@@ -181,9 +248,18 @@ curl -s "$KS" -H "x-operator-token: $TOKEN" | jq
   "ready": true,
   "propagation": "redis",
   "lastUpdatedAt": 1756300000000,
-  "switches": [ { "scope": "chain", "chain": "stellar", "active": true, "...": "..." } ]
+  "switches": [ { "scope": "chain", "chain": "stellar", "active": true, "...": "..." } ],
+  "scheduledWindows": [
+    { "id": "sw_123", "scope": "operation", "chain": "stellar", "operation": "fill",
+      "scheduledAt": 1756260000000, "autoResumeAt": 1756261800000, "state": "upcoming" }
+  ]
 }
 ```
+
+`scheduledWindows` lists both **upcoming** windows (`state: "upcoming"`, not yet
+active) and **currently-active** scheduled windows (`state: "active"`, paused
+now and due to auto-resume at `autoResumeAt`), alongside the ad hoc `switches`.
+=======
 
 - `ready: false` means this replica has not loaded its snapshot. **Writes are
   being refused.** Check the database.
@@ -238,12 +314,18 @@ If a replica is stuck refusing writes with no active switch, check `ready` in
 | Resume says `resumed: false` forever               | same `x-operator-id` both times, or a re-pause    | Use two operators; check whether anything re-paused the switch            |
 | Pause not taking effect on one replica              | poll/Redis degraded                               | Check `propagation` in `GET $KS`; raise `KILLSWITCH_REDIS_URL` coverage    |
 | Pause lost after a restart                          | `KILLSWITCH_PERSISTENCE=memory`                  | Set `prisma`; in-memory state dies with the process                        |
+| Scheduled window never activated                    | `scheduledAt` in the past / clock skew           | Check `scheduledWindows` in `GET $KS`; re-schedule with a future time      |
+| Scheduled window did not auto-resume                | scope manually resumed first, or timer stalled   | Manual resume is expected to skip the job; otherwise check replica logs    |
+| Preview shows 0 affected requests                   | no traffic in the recent window                  | Widen the window or check the scope matches real traffic                   |
+=======
 
 ---
 
 ## Related
 
 - `src/killswitch/killswitch.evaluate.ts` — the pure hierarchy rules
-- `src/killswitch/killswitch.service.ts` — cache and propagation
+- `src/killswitch/killswitch.service.ts` — cache, propagation, scheduled windows
+- `src/metrics/metrics.service.ts` — request counters backing `/preview`
+=======
 - `docs/adr/` — why evaluation is fail-closed across levels
 - `docs/runbooks/on-call.md` — general on-call procedure

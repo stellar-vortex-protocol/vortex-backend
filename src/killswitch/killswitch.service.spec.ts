@@ -349,6 +349,177 @@ describe("KillSwitchService", () => {
     });
   });
 
+  describe("scheduled maintenance windows", () => {
+    const base = {
+      scope: "chain" as const,
+      chain: "stellar",
+      reasonCode: "MAINTENANCE",
+      reason: "planned migration",
+      activatedBy: "alice",
+    };
+
+    it("activates a scheduled pause once scheduledAt is due", async () => {
+      jest.useFakeTimers();
+      const service = makeService(repo);
+      await service.onModuleInit();
+
+      const scheduledAt = Date.now() + 60_000;
+      const autoResumeAt = scheduledAt + 30 * 60_000;
+      const record = await service.schedule({
+        ...base,
+        scheduledAt,
+        autoResumeAt,
+      });
+
+      // Not yet due: nothing is paused.
+      expect(record.active).toBe(false);
+      expect(service.isBlocked({ chain: "stellar", token: null, operation: "fill" })).toBe(false);
+
+      jest.setSystemTime(scheduledAt + 1);
+      await service.runScheduledTransitions();
+
+      expect(service.isBlocked({ chain: "stellar", token: null, operation: "fill" })).toBe(true);
+      const stored = repo.listAll().find((row) => row.id === record.id);
+      expect(stored?.active).toBe(true);
+      await service.onModuleDestroy();
+    });
+
+    it("auto-resumes at autoResumeAt without two-operator approval", async () => {
+      jest.useFakeTimers();
+      const service = makeService(repo);
+      await service.onModuleInit();
+
+      const scheduledAt = Date.now() + 60_000;
+      const autoResumeAt = scheduledAt + 30 * 60_000;
+      const record = await service.schedule({ ...base, scheduledAt, autoResumeAt });
+
+      jest.setSystemTime(scheduledAt + 1);
+      await service.runScheduledTransitions();
+      expect(service.isBlocked({ chain: "stellar", token: null, operation: "fill" })).toBe(true);
+
+      jest.setSystemTime(autoResumeAt + 1);
+      await service.runScheduledTransitions();
+
+      expect(service.isBlocked({ chain: "stellar", token: null, operation: "fill" })).toBe(false);
+      const stored = repo.listAll().find((row) => row.id === record.id);
+      expect(stored?.active).toBe(false);
+      expect(repo.listApprovals(record.id)).toHaveLength(0);
+      await service.onModuleDestroy();
+    });
+
+    it("is idempotent when two replicas tick the same due window", async () => {
+      jest.useFakeTimers();
+      const replicaA = makeService(repo);
+      const replicaB = makeService(repo);
+      await replicaA.onModuleInit();
+      await replicaB.onModuleInit();
+
+      const scheduledAt = Date.now() + 60_000;
+      const autoResumeAt = scheduledAt + 30 * 60_000;
+      const record = await replicaA.schedule({ ...base, scheduledAt, autoResumeAt });
+
+      jest.setSystemTime(scheduledAt + 1);
+      await Promise.all([
+        replicaA.runScheduledTransitions(),
+        replicaB.runScheduledTransitions(),
+      ]);
+
+      // Exactly one row, still active, no duplicate transitions.
+      expect(repo.listAll().filter((row) => row.id === record.id)).toHaveLength(1);
+      expect(repo.listAll().find((row) => row.id === record.id)?.active).toBe(true);
+
+      jest.setSystemTime(autoResumeAt + 1);
+      await Promise.all([
+        replicaA.runScheduledTransitions(),
+        replicaB.runScheduledTransitions(),
+      ]);
+
+      expect(repo.listAll().find((row) => row.id === record.id)?.active).toBe(false);
+      await replicaA.onModuleDestroy();
+      await replicaB.onModuleDestroy();
+    });
+
+    it("skips cleanly when an operator already resumed the scope", async () => {
+      jest.useFakeTimers();
+      const service = makeService(repo);
+      await service.onModuleInit();
+
+      const scheduledAt = Date.now() + 60_000;
+      const autoResumeAt = scheduledAt + 30 * 60_000;
+      const record = await service.schedule({ ...base, scheduledAt, autoResumeAt });
+
+      jest.setSystemTime(scheduledAt + 1);
+      await service.runScheduledTransitions();
+      expect(service.isBlocked({ chain: "stellar", token: null, operation: "fill" })).toBe(true);
+
+      // Operator resumes manually before the scheduled auto-resume fires.
+      await service.approveResume({ id: record.id, approver: "alice", approvalsRequired: 1 });
+      await service.approveResume({ id: record.id, approver: "bob", approvalsRequired: 1 });
+      expect(service.isBlocked({ chain: "stellar", token: null, operation: "fill" })).toBe(false);
+
+      // The scheduled job must not throw and must leave the resumed row alone.
+      jest.setSystemTime(autoResumeAt + 1);
+      await expect(service.runScheduledTransitions()).resolves.toBeUndefined();
+      expect(repo.listAll().find((row) => row.id === record.id)?.active).toBe(false);
+      await service.onModuleDestroy();
+    });
+
+    it("surfaces upcoming and active scheduled windows in status()", async () => {
+      jest.useFakeTimers();
+      const service = makeService(repo);
+      await service.onModuleInit();
+
+      const scheduledAt = Date.now() + 60_000;
+      const autoResumeAt = scheduledAt + 30 * 60_000;
+      await service.schedule({ ...base, scheduledAt, autoResumeAt });
+
+      const upcoming = service.status();
+      expect(upcoming.scheduled).toHaveLength(1);
+      expect(upcoming.scheduled[0]).toMatchObject({ active: false, scheduledAt, autoResumeAt });
+
+      jest.setSystemTime(scheduledAt + 1);
+      await service.runScheduledTransitions();
+
+      const active = service.status();
+      expect(active.scheduled[0]).toMatchObject({ active: true });
+      await service.onModuleDestroy();
+    });
+  });
+
+  describe("pause-impact preview", () => {
+    it("matches evaluate() against the current snapshot without activating anything", async () => {
+      const service = makeService(repo);
+      await service.onModuleInit();
+      await service.pause({
+        scope: "chain",
+        chain: "stellar",
+        reasonCode: "CHAIN_DEGRADED",
+        reason: "flapping",
+        activatedBy: "alice",
+      });
+
+      const activateSpy = jest.spyOn(repo, "activate");
+      const target = { chain: "stellar", token: null, operation: "fill" as const };
+
+      const preview = await service.preview({
+        scope: "operation",
+        chain: "stellar",
+        operation: "fill",
+      });
+
+      // The preview's matching must agree with evaluate()'s own logic.
+      const decision = service.evaluateTarget(target);
+      expect(preview.paused).toBe(decision.paused);
+      expect(preview.matched?.id).toBe(decision.matched?.id);
+      expect(preview.matchedChain).toBe(decision.matchedChain);
+
+      // Read-only: no repository write occurred.
+      expect(activateSpy).not.toHaveBeenCalled();
+      expect(repo.listAll()).toHaveLength(1);
+      await service.onModuleDestroy();
+    });
+  });
+
   describe("repository token", () => {
     it("is exported for injection", () => {
       expect(typeof KILL_SWITCH_REPOSITORY).toBe("symbol");
