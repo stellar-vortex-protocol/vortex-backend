@@ -497,6 +497,8 @@ export const envValidationSchema = Joi.object({
         "string.min": "DATASETS_WEBHOOK_SECRET must be at least 32 characters.",
       }),
     }),
+  // Widest range (UTC days) POST /api/v1/admin/datasets/export accepts (issue #592).
+  DATASETS_EXPORT_MAX_DAYS: Joi.number().integer().min(1).max(366).default(31),
 
   // ── #412 — Cursor HMAC secret ──────────────────────────────────────────────
   // HMAC-SHA256 key used to sign opaque pagination cursors.

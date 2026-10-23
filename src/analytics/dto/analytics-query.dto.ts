@@ -1,6 +1,6 @@
+import { ApiPropertyOptional } from "@nestjs/swagger";
 import { Type } from "class-transformer";
 import { IsIn, IsInt, IsOptional, IsString, Min } from "class-validator";
-import { ApiPropertyOptional } from "@nestjs/swagger";
 import { ANALYTICS_INTERVALS, AnalyticsInterval } from "../analytics.types";
 
 export const ANALYTICS_FORMATS = ["json", "csv"] as const;
@@ -22,10 +22,12 @@ export class AnalyticsQueryDto {
   @Min(0)
   to!: number;
 
+  /** Source-chain filter. */
   @IsOptional()
   @IsString()
   chain?: string;
 
+  /** Matches the source or destination token symbol. */
   @IsOptional()
   @IsString()
   token?: string;
@@ -35,8 +37,28 @@ export class AnalyticsQueryDto {
   @IsString()
   solver?: string;
 
-  /** Response format. Defaults to JSON; `csv` returns `text/csv`. */
-  @ApiPropertyOptional({ enum: ANALYTICS_FORMATS, default: "json" })
+  @ApiPropertyOptional({
+    description:
+      "Source chain of the corridor. Only valid for the chain-pair metric.",
+  })
+  @IsOptional()
+  @IsString()
+  srcChain?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "Destination chain of the corridor. Only valid for the chain-pair metric.",
+  })
+  @IsOptional()
+  @IsString()
+  dstChain?: string;
+
+  @ApiPropertyOptional({
+    enum: ANALYTICS_FORMATS,
+    default: "json",
+    description:
+      "Response format. `csv` returns text/csv with one row per point. `Accept: text/csv` also works.",
+  })
   @IsOptional()
   @IsIn(ANALYTICS_FORMATS)
   format?: AnalyticsFormat;

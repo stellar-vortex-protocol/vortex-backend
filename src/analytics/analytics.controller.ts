@@ -67,18 +67,18 @@ export class AnalyticsController {
 
   @Get(":metric")
   @ApiOperation({
-    summary: "Query an analytics aggregate (volume, fees, latency, solver-share, or token-pair)",
+    summary:
+      "Query an analytics aggregate (volume, fees, latency, solver-share, token-pair, chain-pair, or slippage)",
     description:
-      "JSON by default. Pass `?format=csv` (or send `Accept: text/csv`) to download the same rows " +
-      "as CSV, with a header row matching the JSON field names.",
+      "Returns JSON by default. Pass `?format=csv` (or `Accept: text/csv`) to download the same points as CSV.",
   })
   @ApiParam({ name: "metric", enum: ANALYTICS_METRICS })
   @ApiProduces("application/json", "text/csv")
   async get(
     @Param("metric") metric: string,
     @Query() query: AnalyticsQueryDto,
-    @Headers("accept") accept: string | undefined,
     @Res({ passthrough: true }) res: Response,
+    @Headers("accept") accept?: string,
   ) {
     const normalized = metric.toLowerCase() as AnalyticsMetric;
     if (!ANALYTICS_METRICS.includes(normalized)) {
@@ -86,18 +86,27 @@ export class AnalyticsController {
         `Unknown analytics metric "${metric}". Expected one of: ${ANALYTICS_METRICS.join(", ")}`,
       );
     }
+    if (normalized !== "chain-pair" && (query.srcChain || query.dstChain)) {
+      throw new BadRequestException(
+        "srcChain and dstChain are only supported by the chain-pair metric",
+      );
+    }
 
     const q = this.toQuery(query);
-
     const points = await this.fetch(normalized, q);
 
     // An explicit ?format wins; otherwise honour an Accept header asking for CSV.
-    const wantsCsv = query.format ? query.format === "csv" : /\btext\/csv\b/i.test(accept ?? "");
+    const wantsCsv = query.format
+      ? query.format === "csv"
+      : /\btext\/csv\b/i.test(accept ?? "");
     if (!wantsCsv) return points;
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="${normalized}.csv"`);
-    return analyticsToCsv(normalized, points);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="analytics-${normalized}-${query.interval}-${query.from}-${query.to}.csv"`,
+    );
+    return analyticsToCsv(normalized, points).toString("utf8");
   }
 
   private fetch(metric: AnalyticsMetric, q: AnalyticsQuery): Promise<object[]> {
@@ -112,6 +121,10 @@ export class AnalyticsController {
         return this.analyticsService.getSolverShare(q);
       case "token-pair":
         return this.analyticsService.getTokenPair(q);
+      case "chain-pair":
+        return this.analyticsService.getChainPair(q);
+      case "slippage":
+        return this.analyticsService.getSlippage(q);
     }
   }
 
@@ -124,6 +137,8 @@ export class AnalyticsController {
       chain: query.chain,
       token: query.token,
       solver: query.solver,
+      srcChain: query.srcChain,
+      dstChain: query.dstChain,
     };
   }
 }

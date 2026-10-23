@@ -115,6 +115,39 @@ webhook URLs.
 There is no subscription-management API; subscribers are configured by the
 operator through environment variables.
 
+### On-demand range export (issue #592)
+
+Operators can export one dataset kind over a range of whole UTC days as a
+single file:
+
+```
+POST /api/v1/admin/datasets/export
+x-admin-key: <admin key>
+
+{ "kind": "intents", "from": "2026-01-01", "to": "2026-01-31", "format": "parquet" }
+```
+
+- `from` and `to` are inclusive `YYYY-MM-DD` UTC days. Ranges longer than
+  `DATASETS_EXPORT_MAX_DAYS` (default 31) are rejected with 400 instead of
+  streaming a huge file.
+- Rows come from the same builders as the daily job (`exportDaily` and
+  `exportRange` share one code path), go through the same `Anonymizer`, and are
+  serialised by the same `toCsv`/`toParquet`. Each row is hashed with the salt
+  window active at its own timestamp, so a range that crosses a salt rotation
+  still links users only within a window.
+- `solver_stats` is a point-in-time snapshot and ignores the range, as in the
+  daily export.
+- The response body is the file. Its manifest is sent in response headers:
+  `X-Dataset-Schema`, `X-Dataset-Schema-Version`, `X-Dataset-Kind`,
+  `X-Dataset-From`, `X-Dataset-To`, `X-Dataset-Row-Count`, `X-Dataset-Sha256`,
+  `X-Dataset-Generated-At` and, when rows exist, `X-Dataset-Watermark`.
+- Parquet cannot represent an empty file, so a Parquet request for a range with
+  no rows returns 404. CSV returns a header-only file.
+- Exports are returned, not published: they do not create a revision under
+  `datasets/YYYY-MM-DD/`, and the daily publication stays the public contract.
+  The endpoint is admin-only and not part of
+  `docs/public-transparency-contract.md`.
+
 ## Alternatives considered
 
 - **Hosted query engine (DuckDB/SQL endpoint).** Rejected — explicitly out of

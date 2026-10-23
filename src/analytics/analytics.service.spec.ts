@@ -82,12 +82,14 @@ describe("AnalyticsService", () => {
       eventId,
       timestamp,
       chain: "stellar",
+      dstChain: "stellar",
       srcToken: "USDC",
       dstToken: "XLM",
       solver,
       volume,
       fees: 0n,
       durationMs,
+      quotedDstAmount: null,
     });
     const query = { interval: "1h" as const, from: at(0), to: at(23) };
 
@@ -146,5 +148,26 @@ describe("AnalyticsService", () => {
       expect(point.protocol.solverCount).toBe(2);
       expect(point.solver?.avgMs).toBe(100);
     });
+  });
+
+  it("records the Stellar destination chain for chain-pair queries", async () => {
+    const { service } = makeService();
+    await service.recordFill(filledIntent({ srcChain: "ethereum" }));
+
+    const points = await service.getChainPair({ interval: "1d", from: 0, to: 2_000_000_000_000 });
+    expect(points).toHaveLength(1);
+    expect(points[0]).toMatchObject({ srcChain: "ethereum", dstChain: "stellar", volume: "5000000" });
+  });
+
+  it("carries quotedDstAmount into slippage and excludes intents without a quote", async () => {
+    const { service } = makeService();
+    await service.backfill([
+      filledIntent({ intentId: "quoted", quotedDstAmount: "5050000", fillAmount: "5000000" }),
+      filledIntent({ intentId: "unquoted", quotedDstAmount: undefined }),
+    ]);
+
+    const [point] = await service.getSlippage({ interval: "1d", from: 0, to: 2_000_000_000_000 });
+    // (5_050_000 - 5_000_000) / 5_050_000 = 99.0099… bps, truncated to 99.
+    expect(point).toMatchObject({ avgBps: 99, p95Bps: 99, count: 1, excludedCount: 1 });
   });
 });

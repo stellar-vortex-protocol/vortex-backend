@@ -19,12 +19,14 @@ function evt(overrides: Partial<AnalyticsFillEvent>): AnalyticsFillEvent {
     eventId: "fill:x",
     timestamp: H(1),
     chain: "stellar",
+    dstChain: "stellar",
     srcToken: "USDC",
     dstToken: "USDC",
     solver: "A",
     volume: 0n,
     fees: 0n,
     durationMs: 0,
+    quotedDstAmount: null,
     ...overrides,
   };
 }

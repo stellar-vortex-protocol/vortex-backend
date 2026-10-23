@@ -21,6 +21,7 @@ import { JobsModule } from "./jobs/jobs.module";
 import { FlagsModule } from "./flags/flags.module";
 import { GuardianStateModule } from "./governance/guardian-state.service";
 import { DatasetsModule } from "./datasets/datasets.module";
+import { AnalyticsModule } from "./analytics/analytics.module";
 import { AbuseModule } from "./abuse/abuse.module";
 import { AnalyticsModule } from "./analytics/analytics.module";
 import { ApiKeysModule } from "./auth/api-keys/api-keys.module";
@@ -92,6 +93,10 @@ import { SolverFillsModule } from "./solvers/solver-fills.module";
     RoutingModule,
     TreasuryModule,
     GovernanceModule,
+    // Issues #592-#596 — both modules were defined but never registered, so
+    // /api/v1/analytics/* and /api/v1/datasets/* were not routed.
+    DatasetsModule,
+    AnalyticsModule,
   ],
   controllers: [],
   providers: [

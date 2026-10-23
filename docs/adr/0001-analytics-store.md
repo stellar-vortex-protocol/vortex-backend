@@ -67,6 +67,41 @@ while staying isolated from OLTP writes and tolerating late-arriving data.
 - The application accesses the store behind an `IAnalyticsStore` interface, so the
   in-memory implementation (used in dev/tests) and the Timescale implementation
   (production) are interchangeable. See `src/analytics/`.
+- **Chain-pair aggregates** `analytics_fills_chain_pair_1m/1h/1d` group by
+  `(src_chain, dst_chain, src_token, dst_token)` with the same rollup chain,
+  retention and refresh policies as the main aggregates.
+
+### Metrics
+
+`GET /api/v1/analytics/:metric` serves six metrics. All accept `interval`
+(`1m`/`1h`/`1d`), `from`/`to` (Unix seconds, `[from, to)`), and the optional
+`chain` (source chain) and `token` filters.
+
+| Metric | Point shape | Source |
+|--------|-------------|--------|
+| `volume` | `{ start, volume }` | `analytics_fills_{interval}` |
+| `fees` | `{ start, fees }` | `analytics_fills_{interval}` |
+| `latency` | `{ start, avgMs, p95Ms, count }` | `analytics_fills_{interval}` (p95 from the sketch) |
+| `solver-share` | `{ start, solver, volume, share }` | `analytics_fills_{interval}` |
+| `chain-pair` | `{ start, srcChain, dstChain, volume }` | `analytics_fills_chain_pair_{interval}` |
+| `slippage` | `{ start, avgBps, p95Bps, count, excludedCount }` | raw `analytics_fills` |
+
+- **`chain-pair`** (issue #593) reports volume per source→destination corridor.
+  It also accepts `srcChain` and `dstChain` filters; other metrics reject them
+  with 400. Intents always settle on Stellar today, so new fills record
+  `dst_chain = 'stellar'`. Rows written before migration
+  `20261020000000_analytics_chain_pair_slippage` are not backfilled and appear as
+  `dstChain: "unknown"`.
+- **`slippage`** (issue #594) is `(quotedDstAmount - fillAmount) / quotedDstAmount`
+  in basis points (the unit of `MAX_USER_SLIPPAGE_BPS`), truncated toward zero
+  per fill. Negative values mean the fill beat the quote and are not clamped.
+  Fills with no recorded quote are left out of `avgBps`, `p95Bps` and `count`
+  and are counted in `excludedCount` instead. A p95 of a ratio does not roll up
+  through continuous aggregates, so this metric reads the raw hypertable and
+  only covers its 30-day retention window.
+- **CSV** (issue #596): any metric returns `text/csv` with `?format=csv` or
+  `Accept: text/csv`. Columns match the JSON point keys in the same order, and
+  base-unit amounts stay strings so they are not rounded. JSON stays the default.
 
 ### Consequences
 

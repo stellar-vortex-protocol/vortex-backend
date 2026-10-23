@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { IntentsModule } from "../intents/intents.module";
 import { SolversModule } from "../solvers/solvers.module";
 import { AppConfig } from "../config/configuration";
+import { AdminDatasetsController } from "./admin-datasets.controller";
 import { DatasetsController } from "./datasets.controller";
 import { DatasetsService } from "./datasets.service";
 import { DatasetWebhookNotifier } from "./dataset-webhook.notifier";
@@ -12,7 +13,7 @@ import { InMemoryObjectStorage, LocalFilesystemStorage, ObjectStorage } from "./
 
 @Module({
   imports: [IntentsModule, SolversModule],
-  controllers: [DatasetsController],
+  controllers: [DatasetsController, AdminDatasetsController],
   providers: [
     {
       provide: DATASETS_CONFIG,
@@ -31,6 +32,7 @@ import { InMemoryObjectStorage, LocalFilesystemStorage, ObjectStorage } from "./
           webhookUrls: datasets.webhookUrls,
           webhookSecret: datasets.webhookSecret,
           webhookAllowlist: datasets.webhookAllowlist,
+          exportMaxDays: datasets.exportMaxDays,
         };
       },
     },

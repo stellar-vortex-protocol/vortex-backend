@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException, Optional } from "@nestjs/common";
 import { IntentsService } from "../intents/intents.service";
 import { Intent } from "../intents/intents.types";
 import { SolversService } from "../solvers/solvers.service";
@@ -8,10 +8,12 @@ import {
   DATASET_KINDS,
   DatasetKind,
   DatasetManifest,
+  DatasetRangeExport,
+  DatasetRangeExportRequest,
   DatasetRow,
   DatasetsConfig,
 } from "./datasets.types";
-import { buildManifest, ManifestFileInput } from "./manifest";
+import { buildManifest, checksum, ManifestFileInput } from "./manifest";
 import { ObjectStorage } from "./object-storage";
 import { toParquet } from "./parquet-exporter";
 import { Anonymizer } from "./privacy";
@@ -38,6 +40,22 @@ export interface DatasetPublication {
 }
 
 const DAY_MS = 86_400_000;
+const DEFAULT_EXPORT_MAX_DAYS = 31;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Half-open range of intent creation times, Unix epoch seconds. */
+interface SecondsRange {
+  startSec: number;
+  endSec: number;
+}
+
+/** Source records the row builders read from. */
+interface DatasetSources {
+  intents: Intent[];
+  solvers: SolverRecord[];
+}
+
+const CONTENT_TYPES = { csv: "text/csv; charset=utf-8", parquet: "application/vnd.apache.parquet" } as const;
 
 @Injectable()
 export class DatasetsService {
@@ -115,21 +133,13 @@ export class DatasetsService {
   async exportDaily(targetDate: Date = new Date()): Promise<DatasetManifest> {
     const { dateKey, startSec, endSec } = this.dayBounds(targetDate);
 
-    const [intents, solvers] = await Promise.all([
-      this.intentsService.getAll(),
-      this.solversService.getAll(),
-    ]);
+    const range = { startSec, endSec };
+    const sources = await this.loadSources();
+    const dayIntents = this.intentsInRange(sources.intents, range);
 
-    const dayIntents = intents.filter((i) => i.createdAt >= startSec && i.createdAt < endSec);
-
-    const rows: Record<DatasetKind, DatasetRow[]> = {
-      intents: dayIntents.map((i) => this.toIntentRow(i)),
-      fills: dayIntents.filter((i) => i.state === "filled").map((i) => this.toFillRow(i)),
-      solver_stats: solvers.map((s) => this.toSolverRow(s)),
-      fees: dayIntents
-        .filter((i) => i.state === "filled" && typeof i.feeAmount === "string" && i.feeAmount.length > 0)
-        .map((i) => this.toFeeRow(i)),
-    };
+    const rows = Object.fromEntries(
+      DATASET_KINDS.map((kind) => [kind, this.rowsForRange(kind, range, sources)]),
+    ) as Record<DatasetKind, DatasetRow[]>;
 
     const rowCounts = Object.fromEntries(
       DATASET_KINDS.map((k) => [k, rows[k].length]),
@@ -186,7 +196,115 @@ export class DatasetsService {
     return manifest;
   }
 
+  /**
+   * On-demand export of one dataset kind over a range of whole UTC days
+   * (issue #592). Uses the same row builders, anonymiser and serialisers as
+   * {@link exportDaily}; the result is returned, not published.
+   */
+  async exportRange(request: DatasetRangeExportRequest): Promise<DatasetRangeExport> {
+    const { kind, from, to, format } = request;
+    const range = this.rangeFromDays(from, to);
+
+    const sources = await this.loadSources();
+    const rows = this.rowsForRange(kind, range, sources);
+    const schema = DATASET_SCHEMAS[kind];
+
+    const body =
+      format === "csv"
+        ? toCsv(schema, rows)
+        : await toParquet(schema, rows, { schema: schemaId(schema), from, to });
+    if (!body) {
+      // toParquet() cannot write a file with no rows.
+      throw new NotFoundException(
+        `No ${kind} rows between ${from} and ${to}; an empty range can only be exported as csv`,
+      );
+    }
+
+    const watermark = this.computeWatermark(this.intentsInRange(sources.intents, range));
+    const fileName = `${kind}_${from}_${to}.${format}`;
+    return {
+      body,
+      contentType: CONTENT_TYPES[format],
+      manifest: {
+        schema: schemaId(schema),
+        schemaVersion: `${schema.version.major}.${schema.version.minor}`,
+        kind,
+        format,
+        from,
+        to,
+        generatedAt: new Date().toISOString(),
+        watermark: watermark ? watermark.toISOString() : null,
+        rowCount: rows.length,
+        sizeBytes: body.length,
+        sha256: checksum(body),
+        fileName,
+      },
+    };
+  }
+
+  /** Rows for one dataset kind whose intents were created in [startSec, endSec). */
+  async buildRowsForRange(kind: DatasetKind, startSec: number, endSec: number): Promise<DatasetRow[]> {
+    return this.rowsForRange(kind, { startSec, endSec }, await this.loadSources());
+  }
+
   // ── internal helpers ──────────────────────────────────────────────────────
+
+  private async loadSources(): Promise<DatasetSources> {
+    const [intents, solvers] = await Promise.all([
+      this.intentsService.getAll(),
+      this.solversService.getAll(),
+    ]);
+    return { intents, solvers };
+  }
+
+  private intentsInRange(intents: Intent[], { startSec, endSec }: SecondsRange): Intent[] {
+    return intents.filter((i) => i.createdAt >= startSec && i.createdAt < endSec);
+  }
+
+  /**
+   * The single row-building path for every export. Each row is anonymised with
+   * the salt window active at that row's own timestamp, so a range crossing a
+   * salt rotation hashes each side with its own salt. `solver_stats` is a
+   * point-in-time snapshot and ignores the range.
+   */
+  private rowsForRange(kind: DatasetKind, range: SecondsRange, sources: DatasetSources): DatasetRow[] {
+    if (kind === "solver_stats") return sources.solvers.map((s) => this.toSolverRow(s));
+
+    const intents = this.intentsInRange(sources.intents, range);
+    switch (kind) {
+      case "intents":
+        return intents.map((i) => this.toIntentRow(i));
+      case "fills":
+        return intents.filter((i) => i.state === "filled").map((i) => this.toFillRow(i));
+      case "fees":
+        return intents
+          .filter((i) => i.state === "filled" && typeof i.feeAmount === "string" && i.feeAmount.length > 0)
+          .map((i) => this.toFeeRow(i));
+    }
+  }
+
+  /** Validate inclusive YYYY-MM-DD bounds and turn them into a seconds range. */
+  private rangeFromDays(from: string, to: string): SecondsRange {
+    const start = this.parseDay(from, "from");
+    const last = this.parseDay(to, "to");
+    if (last < start) throw new BadRequestException("`to` must be on or after `from`");
+
+    const days = (last - start) / DAY_MS + 1;
+    const maxDays = this.config.exportMaxDays ?? DEFAULT_EXPORT_MAX_DAYS;
+    if (days > maxDays) {
+      throw new BadRequestException(`Range covers ${days} days; the maximum is ${maxDays}`);
+    }
+    return { startSec: start / 1000, endSec: (last + DAY_MS) / 1000 };
+  }
+
+  private parseDay(value: string, field: string): number {
+    const ms = DATE_RE.test(value) ? Date.parse(`${value}T00:00:00Z`) : NaN;
+    // The round-trip rejects dates JS would roll over, like 2026-02-30.
+    if (Number.isNaN(ms) || new Date(ms).toISOString().slice(0, 10) !== value) {
+      throw new BadRequestException(`\`${field}\` must be a valid UTC date in YYYY-MM-DD form`);
+    }
+    return ms;
+  }
 
   private dayBounds(date: Date): { dateKey: string; startSec: number; endSec: number } {
     const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());

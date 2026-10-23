@@ -347,6 +347,8 @@ export interface AppConfig {
     webhookSecret: string;
     /** Hostnames webhook deliveries may reach (WEBHOOK_ALLOWLIST). */
     webhookAllowlist: string[];
+    /** Widest range, in UTC days, the on-demand admin export accepts. */
+    exportMaxDays: number;
   };
   secrets: {
     /** Provider name: "env" | "aws-secrets-manager" | "vault-kv". */
@@ -632,6 +634,7 @@ export default (): AppConfig => ({
     webhookUrls: splitList(process.env.DATASETS_WEBHOOK_URLS),
     webhookSecret: process.env.DATASETS_WEBHOOK_SECRET ?? "",
     webhookAllowlist: splitList(process.env.WEBHOOK_ALLOWLIST),
+    exportMaxDays: parseInt(process.env.DATASETS_EXPORT_MAX_DAYS ?? "31", 10),
   },
   secrets: {
     provider: (process.env.SECRETS_PROVIDER ?? "env") as "env" | "aws-secrets-manager" | "vault-kv",

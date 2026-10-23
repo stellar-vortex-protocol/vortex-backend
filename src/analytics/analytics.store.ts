@@ -4,16 +4,18 @@ import {
   AnalyticsGroupedQuery,
   AnalyticsInterval,
   AnalyticsQuery,
+  ChainPairPoint,
   FeesPoint,
   GroupByDimension,
   GroupedMetric,
   GroupedPoint,
   LatencyPoint,
   PerSolverPoint,
-  normalizeGroupBy,
+  SlippagePoint,
   SolverSharePoint,
   TokenPairPoint,
   VolumePoint,
+  normalizeGroupBy,
 } from "./analytics.types";
 
 /** Abstraction over the analytics store so dev/tests (in-memory) and production
@@ -35,6 +37,13 @@ export interface IAnalyticsStore {
    * `queryVolume`/`queryFees`.
    */
   queryGrouped(query: AnalyticsGroupedQuery): Promise<GroupedPoint[]>;
+  /** Volume per source→destination chain corridor per bucket. */
+  queryChainPair(query: AnalyticsQuery): Promise<ChainPairPoint[]>;
+  /**
+   * Realized slippage (quotedDstAmount vs fillAmount) per bucket.
+   * Events with a null quotedDstAmount are excluded from the calculation.
+   */
+  querySlippage(query: AnalyticsQuery): Promise<SlippagePoint[]>;
 }
 
 /** Value of a group-by dimension for a raw fill event. */
@@ -107,6 +116,8 @@ function matches(event: AnalyticsFillEvent, query: AnalyticsQuery): boolean {
   if (query.chain && event.chain !== query.chain) return false;
   if (query.token && event.srcToken !== query.token && event.dstToken !== query.token) return false;
   if (query.solver && event.solver !== query.solver) return false;
+  if (query.srcChain && event.chain !== query.srcChain) return false;
+  if (query.dstChain && event.dstChain !== query.dstChain) return false;
   return true;
 }
 
@@ -275,6 +286,68 @@ export class InMemoryAnalyticsStore implements IAnalyticsStore {
     }
     return points.sort(compareGrouped(dims));
   }
+
+  async queryChainPair(query: AnalyticsQuery): Promise<ChainPairPoint[]> {
+    const intervalMs = intervalToMs(query.interval);
+    // Key: `${bucketStart}::${srcChain}::${dstChain}`
+    const buckets = new Map<string, bigint>();
+
+    for (const event of this.matching(query)) {
+      const start = bucketStart(event.timestamp, intervalMs);
+      const key = `${start}::${event.chain}::${event.dstChain}`;
+      buckets.set(key, (buckets.get(key) ?? 0n) + event.volume);
+    }
+
+    const points: ChainPairPoint[] = [];
+    for (const [key, volume] of buckets) {
+      const [startStr, srcChain, dstChain] = key.split("::");
+      points.push({
+        start: new Date(Number(startStr)).toISOString(),
+        srcChain,
+        dstChain,
+        volume: volume.toString(),
+      });
+    }
+    return points.sort(
+      (a, b) =>
+        a.start.localeCompare(b.start) ||
+        a.srcChain.localeCompare(b.srcChain) ||
+        a.dstChain.localeCompare(b.dstChain),
+    );
+  }
+
+  async querySlippage(query: AnalyticsQuery): Promise<SlippagePoint[]> {
+    const points: SlippagePoint[] = [];
+    for (const [start, events] of this.bucketEvents(query)) {
+      const slippageBps: number[] = [];
+      let excludedCount = 0;
+
+      for (const event of events) {
+        if (event.quotedDstAmount === null || event.quotedDstAmount === 0n) {
+          excludedCount++;
+          continue;
+        }
+        // slippage = (quoted - filled) / quoted × 10_000 (basis points)
+        // Can be negative when the fill is better than quoted.
+        const bps =
+          Number(((event.quotedDstAmount - event.volume) * 10_000n) / event.quotedDstAmount);
+        slippageBps.push(bps);
+      }
+
+      const count = slippageBps.length;
+      const avgBps = count ? slippageBps.reduce((a, b) => a + b, 0) / count : 0;
+      const p95Bps = percentile(slippageBps, 0.95);
+
+      points.push({
+        start: new Date(start).toISOString(),
+        avgBps: Math.round(avgBps),
+        p95Bps,
+        count,
+        excludedCount,
+      });
+    }
+    return points.sort((a, b) => a.start.localeCompare(b.start));
+  }
 }
 
 /**
@@ -296,7 +369,9 @@ const GROUPED_METRIC_COLUMNS: Record<GroupedMetric, string> = {
 
 /**
  * TimescaleDB store. Queries the continuous aggregates created by
- * `prisma/migrations/*_analytics/migration.sql` (`analytics_fills_1m/1h/1d`).
+ * `prisma/migrations/*_analytics/migration.sql` (`analytics_fills_1m/1h/1d`)
+ * and `*_analytics_chain_pair_slippage/migration.sql`
+ * (`analytics_fills_chain_pair_1m/1h/1d`).
  * Ingestion is idempotent via `ON CONFLICT (event_id, time) DO NOTHING`.
  */
 export class TimescaleAnalyticsStore implements IAnalyticsStore {
@@ -309,11 +384,11 @@ export class TimescaleAnalyticsStore implements IAnalyticsStore {
         (e) =>
           `(${this.lit(e.eventId)}, to_timestamp(${Math.floor(e.timestamp / 1000)}), ${this.lit(
             e.chain,
-          )}, ${this.lit(e.srcToken)}, ${this.lit(e.dstToken)}, ${this.lit(e.solver)}, ${e.volume.toString()}, ${e.fees.toString()}, ${e.durationMs})`,
+          )}, ${this.lit(e.dstChain)}, ${this.lit(e.srcToken)}, ${this.lit(e.dstToken)}, ${this.lit(e.solver)}, ${e.volume.toString()}, ${e.fees.toString()}, ${e.durationMs}, ${e.quotedDstAmount !== null ? e.quotedDstAmount.toString() : "NULL"})`,
       )
       .join(",");
     const result = await this.prisma.$executeRawUnsafe(
-      `INSERT INTO analytics_fills (event_id, time, chain, src_token, dst_token, solver, volume, fees, duration_ms)
+      `INSERT INTO analytics_fills (event_id, time, chain, dst_chain, src_token, dst_token, solver, volume, fees, duration_ms, quoted_dst_amount)
        VALUES ${values}
        ON CONFLICT (event_id, time) DO NOTHING`,
     );
@@ -464,6 +539,71 @@ export class TimescaleAnalyticsStore implements IAnalyticsStore {
       point[query.metric] = String(r.value);
       return point;
     });
+  }
+
+  async queryChainPair(query: AnalyticsQuery): Promise<ChainPairPoint[]> {
+    const parts = [
+      `bucket >= to_timestamp(${Math.floor(query.from / 1000)})`,
+      `bucket < to_timestamp(${Math.ceil(query.to / 1000)})`,
+    ];
+    const srcChain = query.srcChain ?? query.chain;
+    if (srcChain) parts.push(`src_chain = ${this.lit(srcChain)}`);
+    if (query.dstChain) parts.push(`dst_chain = ${this.lit(query.dstChain)}`);
+    if (query.token) parts.push(`(src_token = ${this.lit(query.token)} OR dst_token = ${this.lit(query.token)})`);
+
+    const rows = await this.prisma.$queryRawUnsafe<
+      { bucket: Date; src_chain: string; dst_chain: string; volume: string }[]
+    >(
+      `SELECT time_bucket('1 ${unit(query.interval)}', bucket) AS bucket,
+              src_chain, dst_chain, sum(volume)::text AS volume
+       FROM analytics_fills_chain_pair_${query.interval}
+       WHERE ${parts.join(" AND ")}
+       GROUP BY 1, src_chain, dst_chain
+       ORDER BY 1, src_chain, dst_chain`,
+    );
+    return rows.map((r) => ({
+      start: r.bucket.toISOString(),
+      srcChain: r.src_chain,
+      dstChain: r.dst_chain,
+      volume: String(r.volume),
+    }));
+  }
+
+  /**
+   * Slippage reads the raw hypertable: a p95 over a ratio does not roll up
+   * through the continuous aggregates, so this metric is bounded by the raw
+   * table's 30-day retention.
+   */
+  async querySlippage(query: AnalyticsQuery): Promise<SlippagePoint[]> {
+    const parts = [
+      `time >= to_timestamp(${Math.floor(query.from / 1000)})`,
+      `time < to_timestamp(${Math.ceil(query.to / 1000)})`,
+    ];
+    if (query.chain) parts.push(`chain = ${this.lit(query.chain)}`);
+    if (query.token) parts.push(`(src_token = ${this.lit(query.token)} OR dst_token = ${this.lit(query.token)})`);
+
+    const quoted = "quoted_dst_amount IS NOT NULL AND quoted_dst_amount <> 0";
+    // Integer bps truncated toward zero, matching InMemoryAnalyticsStore.
+    const bps = "trunc((quoted_dst_amount - volume) * 10000 / quoted_dst_amount)";
+    const rows = await this.prisma.$queryRawUnsafe<
+      { bucket: Date; avg_bps: string | null; p95_bps: string | null; fills: bigint; excluded: bigint }[]
+    >(
+      `SELECT time_bucket('1 ${unit(query.interval)}', time) AS bucket,
+              avg(${bps}) FILTER (WHERE ${quoted}) AS avg_bps,
+              percentile_disc(0.95) WITHIN GROUP (ORDER BY ${bps}) FILTER (WHERE ${quoted}) AS p95_bps,
+              count(*) FILTER (WHERE ${quoted}) AS fills,
+              count(*) FILTER (WHERE NOT (${quoted})) AS excluded
+       FROM analytics_fills
+       WHERE ${parts.join(" AND ")}
+       GROUP BY 1 ORDER BY 1`,
+    );
+    return rows.map((r) => ({
+      start: r.bucket.toISOString(),
+      avgBps: r.avg_bps !== null ? Math.round(Number(r.avg_bps)) : 0,
+      p95Bps: r.p95_bps !== null ? Number(r.p95_bps) : 0,
+      count: Number(r.fills),
+      excludedCount: Number(r.excluded),
+    }));
   }
 
   /** SQL-escape a string literal (single quotes). */

@@ -111,4 +111,43 @@ export interface DatasetsConfig {
   webhookSecret?: string;
   /** Hostnames webhook deliveries may reach; defaults to the URLs' own hosts. */
   webhookAllowlist?: string[];
+  /** Widest range, in UTC days, the on-demand admin export accepts. Defaults to 31. */
+  exportMaxDays?: number;
+}
+
+/** Request for a single on-demand export over a range of UTC days (issue #592). */
+export interface DatasetRangeExportRequest {
+  kind: DatasetKind;
+  /** First UTC day included, YYYY-MM-DD. */
+  from: string;
+  /** Last UTC day included, YYYY-MM-DD. */
+  to: string;
+  format: DatasetFormat;
+}
+
+/**
+ * Provenance for an on-demand range export. Mirrors the per-file parts of
+ * {@link DatasetManifest}, with `from`/`to` in place of a single date/revision.
+ */
+export interface DatasetRangeExportManifest {
+  schema: string;
+  schemaVersion: string;
+  kind: DatasetKind;
+  format: DatasetFormat;
+  /** First UTC day included, YYYY-MM-DD. */
+  from: string;
+  /** Last UTC day included, YYYY-MM-DD. */
+  to: string;
+  generatedAt: string;
+  watermark: string | null;
+  rowCount: number;
+  sizeBytes: number;
+  sha256: string;
+  fileName: string;
+}
+
+export interface DatasetRangeExport {
+  manifest: DatasetRangeExportManifest;
+  body: Buffer;
+  contentType: string;
 }

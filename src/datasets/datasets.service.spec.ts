@@ -7,6 +7,10 @@ import { IntentsService } from "../intents/intents.service";
 import { SolversService } from "../solvers/solvers.service";
 import { ParquetReader } from "parquetjs";
 import { DatasetWebhookNotifier, WebhookEgress, verifyDatasetWebhookSignature } from "./dataset-webhook.notifier";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { Anonymizer } from "./privacy";
+import { checksum } from "./manifest";
+import { DATASET_SCHEMAS, fieldNames } from "./schemas";
 
 function makeConfig(overrides: Partial<DatasetsConfig> = {}): DatasetsConfig {
   return {
@@ -285,6 +289,147 @@ describe("DatasetsService", () => {
       expect(rows).toHaveLength(1);
       expect(rows[0].intentId).toBe("a");
       expect(rows[0].fillAmount).toBe("500");
+    });
+  });
+
+  describe("exportRange", () => {
+    const sec = (iso: string) => Date.parse(iso) / 1000;
+
+    function csvRows(body: Buffer): string[][] {
+      return body
+        .toString("utf8")
+        .trim()
+        .split("\n")
+        .map((line) => line.split(","));
+    }
+
+    it("exports every day of an inclusive range as one CSV with a manifest", async () => {
+      const intents = [
+        makeIntent({ intentId: "before", createdAt: sec("2026-01-31T23:59:59Z") }),
+        makeIntent({ intentId: "first", createdAt: sec("2026-02-01T00:00:00Z") }),
+        makeIntent({ intentId: "middle", createdAt: sec("2026-02-02T12:00:00Z") }),
+        makeIntent({ intentId: "last", createdAt: sec("2026-02-03T23:59:59Z"), filledAt: sec("2026-02-04T00:10:00Z") }),
+        makeIntent({ intentId: "after", createdAt: sec("2026-02-04T00:00:00Z") }),
+      ];
+      const { service, storage } = makeService(intents, []);
+
+      const { manifest, body, contentType } = await service.exportRange({
+        kind: "intents",
+        from: "2026-02-01",
+        to: "2026-02-03",
+        format: "csv",
+      });
+
+      const [header, ...rows] = csvRows(body);
+      expect(header).toEqual(fieldNames(DATASET_SCHEMAS.intents));
+      expect(rows.map((r) => r[0])).toEqual(["first", "middle", "last"]);
+      expect(contentType).toBe("text/csv; charset=utf-8");
+      expect(manifest).toMatchObject({
+        schema: "intents-v1.0",
+        schemaVersion: "1.0",
+        kind: "intents",
+        format: "csv",
+        from: "2026-02-01",
+        to: "2026-02-03",
+        rowCount: 3,
+        sizeBytes: body.length,
+        sha256: checksum(body),
+        fileName: "intents_2026-02-01_2026-02-03.csv",
+        watermark: "2026-02-04T00:10:00.000Z",
+      });
+      // On-demand exports are returned, never published.
+      expect(await storage.list("")).toEqual([]);
+    });
+
+    it("hashes each row with the salt window active at its own timestamp", async () => {
+      const config = makeConfig({ saltRotationHours: 6 });
+      // 05:59 and 06:01 sit in different 6-hour windows; the next day is a third.
+      const times = [sec("2026-02-01T05:59:00Z"), sec("2026-02-01T06:01:00Z"), sec("2026-02-02T01:00:00Z")];
+      const intents = times.map((t, i) => makeIntent({ intentId: `i${i}`, user: "GSAME", createdAt: t }));
+      const { service } = makeService(intents, [], config);
+
+      const { body } = await service.exportRange({ kind: "intents", from: "2026-02-01", to: "2026-02-02", format: "csv" });
+      const users = csvRows(body).slice(1).map((r) => r[1]);
+
+      const anonymizer = new Anonymizer(config.salt, config.saltRotationHours, config.saltRetentionWindows);
+      expect(users).toEqual(times.map((t) => anonymizer.hash("GSAME", t * 1000)));
+      expect(new Set(users).size).toBe(3);
+      expect(users).not.toContain("GSAME");
+    });
+
+    it("matches the rows the daily export publishes for the same day", async () => {
+      const day = sec("2026-09-28T00:00:00Z");
+      const intents = [
+        makeIntent({ intentId: "a", createdAt: day + 100, state: "filled", filledAt: day + 200, fillAmount: "500", feeAmount: "5" }),
+        makeIntent({ intentId: "b", createdAt: day + 300 }),
+      ];
+      const { service, storage } = makeService(intents, [makeSolver()]);
+
+      await service.exportDaily(new Date("2026-09-28T12:00:00Z"));
+      for (const kind of ["intents", "fills", "fees", "solver_stats"] as const) {
+        const daily = await storage.get(`vortex-public-datasets/datasets/2026-09-28/rev-1/${kind}.csv`);
+        const ranged = await service.exportRange({ kind, from: "2026-09-28", to: "2026-09-28", format: "csv" });
+        expect(ranged.body.toString("utf8")).toBe(daily!.toString("utf8"));
+      }
+    });
+
+    it("produces a Parquet file readable with the schema's columns", async () => {
+      const intents = [
+        makeIntent({ intentId: "a", createdAt: sec("2026-02-01T10:00:00Z"), state: "filled", fillAmount: "7", filledAt: sec("2026-02-01T10:01:00Z") }),
+      ];
+      const { service } = makeService(intents, []);
+      const { body, contentType, manifest } = await service.exportRange({
+        kind: "fills",
+        from: "2026-02-01",
+        to: "2026-02-01",
+        format: "parquet",
+      });
+      expect(contentType).toBe("application/vnd.apache.parquet");
+      expect(manifest.rowCount).toBe(1);
+
+      const fs = await import("fs/promises");
+      const os = await import("os");
+      const nodePath = await import("path");
+      const tmp = nodePath.join(os.tmpdir(), `range-export-${Date.now()}.parquet`);
+      await fs.writeFile(tmp, body);
+      const reader = await ParquetReader.openFile(tmp);
+      const row = (await reader.getCursor().next()) as Record<string, unknown>;
+      await reader.close();
+      await fs.unlink(tmp);
+      expect(Object.keys(row)).toEqual(expect.arrayContaining(["intentId", "fillAmount"]));
+      expect(row.fillAmount).toBe("7");
+    });
+
+    it("returns a header-only CSV for an empty range but 404s for empty Parquet", async () => {
+      const { service } = makeService([], []);
+      const csv = await service.exportRange({ kind: "fills", from: "2026-02-01", to: "2026-02-01", format: "csv" });
+      expect(csv.manifest.rowCount).toBe(0);
+      expect(csvRows(csv.body)).toEqual([fieldNames(DATASET_SCHEMAS.fills)]);
+
+      await expect(
+        service.exportRange({ kind: "fills", from: "2026-02-01", to: "2026-02-01", format: "parquet" }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it("rejects ranges wider than exportMaxDays", async () => {
+      const { service } = makeService([], [], makeConfig({ exportMaxDays: 3 }));
+      await expect(
+        service.exportRange({ kind: "intents", from: "2026-02-01", to: "2026-02-03", format: "csv" }),
+      ).resolves.toBeDefined();
+      await expect(
+        service.exportRange({ kind: "intents", from: "2026-02-01", to: "2026-02-04", format: "csv" }),
+      ).rejects.toThrow(/4 days; the maximum is 3/);
+    });
+
+    it.each([
+      ["to before from", "2026-02-02", "2026-02-01"],
+      ["an impossible date", "2026-02-30", "2026-03-01"],
+      ["a non-date", "yesterday", "2026-03-01"],
+    ])("rejects %s with 400", async (_label, from, to) => {
+      const { service } = makeService([], []);
+      await expect(service.exportRange({ kind: "intents", from, to, format: "csv" })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
     });
   });
 });

@@ -6,12 +6,14 @@ function evt(overrides: Partial<AnalyticsFillEvent> = {}): AnalyticsFillEvent {
     eventId: "fill:1",
     timestamp: Date.UTC(2026, 0, 1, 12, 0, 0),
     chain: "stellar",
+    dstChain: "stellar",
     srcToken: "USDC",
     dstToken: "USDC",
     solver: "SOLVER_A",
     volume: 1000n,
     fees: 10n,
     durationMs: 300,
+    quotedDstAmount: null,
     ...overrides,
   };
 }
@@ -219,6 +221,108 @@ describe("InMemoryAnalyticsStore", () => {
     it("returns 0 for empty input", () => {
       expect(median([])).toBe(0);
       expect(medianBigInt([])).toBe(0n);
+    });
+  });
+
+  describe("queryChainPair", () => {
+    it("sums volume per bucket and corridor, sorted by time then corridor", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        evt({ eventId: "a", timestamp: Date.UTC(2026, 0, 1, 1, 0, 0), chain: "ethereum", volume: 100n }),
+        evt({ eventId: "b", timestamp: Date.UTC(2026, 0, 1, 1, 30, 0), chain: "ethereum", volume: 200n }),
+        evt({ eventId: "c", timestamp: Date.UTC(2026, 0, 1, 1, 45, 0), chain: "base", volume: 50n }),
+        evt({ eventId: "d", timestamp: Date.UTC(2026, 0, 1, 2, 0, 0), chain: "ethereum", volume: 500n }),
+      ]);
+
+      const points = await store.queryChainPair(q());
+      expect(points).toEqual([
+        { start: "2026-01-01T01:00:00.000Z", srcChain: "base", dstChain: "stellar", volume: "50" },
+        { start: "2026-01-01T01:00:00.000Z", srcChain: "ethereum", dstChain: "stellar", volume: "300" },
+        { start: "2026-01-01T02:00:00.000Z", srcChain: "ethereum", dstChain: "stellar", volume: "500" },
+      ]);
+    });
+
+    it("filters by srcChain and dstChain", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        evt({ eventId: "a", chain: "ethereum", dstChain: "stellar", volume: 100n }),
+        evt({ eventId: "b", chain: "base", dstChain: "stellar", volume: 200n }),
+        evt({ eventId: "c", chain: "ethereum", dstChain: "unknown", volume: 400n }),
+      ]);
+
+      const eth = await store.queryChainPair(q({ srcChain: "ethereum" }));
+      expect(eth.map((p) => [p.dstChain, p.volume])).toEqual([
+        ["stellar", "100"],
+        ["unknown", "400"],
+      ]);
+
+      const pair = await store.queryChainPair(q({ srcChain: "ethereum", dstChain: "stellar" }));
+      expect(pair).toHaveLength(1);
+      expect(pair[0].volume).toBe("100");
+    });
+
+    it("respects the [from, to) time range", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        evt({ eventId: "a", timestamp: Date.UTC(2025, 11, 31, 23, 0, 0), volume: 1n }),
+        evt({ eventId: "b", timestamp: Date.UTC(2026, 0, 1, 12, 0, 0), volume: 10n }),
+        evt({ eventId: "c", timestamp: Date.UTC(2026, 0, 2, 0, 0, 0), volume: 100n }),
+      ]);
+      const points = await store.queryChainPair(q());
+      expect(points).toHaveLength(1);
+      expect(points[0].volume).toBe("10");
+    });
+  });
+
+  describe("querySlippage", () => {
+    it("reports positive slippage in basis points", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        // 1% and 3% worse than quoted.
+        evt({ eventId: "a", quotedDstAmount: 10_000n, volume: 9_900n }),
+        evt({ eventId: "b", quotedDstAmount: 10_000n, volume: 9_700n }),
+      ]);
+      const [point] = await store.querySlippage(q());
+      expect(point).toEqual({
+        start: "2026-01-01T12:00:00.000Z",
+        avgBps: 200,
+        p95Bps: 300,
+        count: 2,
+        excludedCount: 0,
+      });
+    });
+
+    it("keeps favorable (negative) slippage instead of clamping to zero", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        evt({ eventId: "a", quotedDstAmount: 10_000n, volume: 10_050n }),
+        evt({ eventId: "b", quotedDstAmount: 10_000n, volume: 10_150n }),
+      ]);
+      const [point] = await store.querySlippage(q());
+      expect(point.avgBps).toBe(-100);
+      expect(point.p95Bps).toBe(-50);
+      expect(point.count).toBe(2);
+    });
+
+    it("excludes fills without a quote from both the average and the count", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([
+        evt({ eventId: "a", quotedDstAmount: 10_000n, volume: 9_900n }),
+        evt({ eventId: "b", quotedDstAmount: null, volume: 1n }),
+        evt({ eventId: "c", quotedDstAmount: 0n, volume: 1n }),
+      ]);
+      const [point] = await store.querySlippage(q());
+      expect(point.avgBps).toBe(100);
+      expect(point.p95Bps).toBe(100);
+      expect(point.count).toBe(1);
+      expect(point.excludedCount).toBe(2);
+    });
+
+    it("returns zeroed stats for a bucket where every fill lacks a quote", async () => {
+      const store = new InMemoryAnalyticsStore();
+      await store.ingest([evt({ eventId: "a", quotedDstAmount: null })]);
+      const [point] = await store.querySlippage(q());
+      expect(point).toMatchObject({ avgBps: 0, p95Bps: 0, count: 0, excludedCount: 1 });
     });
   });
 

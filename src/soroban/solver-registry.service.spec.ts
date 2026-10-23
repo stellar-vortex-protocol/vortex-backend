@@ -91,6 +91,11 @@ function makeConfigService(
     wsMaxConnections: 1000,
     wsBackplane: "memory",
     redisUrl: "redis://localhost:6379",
+    abuse: {
+      allowlistPubsub: "memory",
+      allowlistRefreshMs: 0,
+      captcha: { provider: "", secret: "", timeoutMs: 3000 },
+    },
     cache: { driver: "off", ttlSeconds: 15, ttlJitter: 0.1 },
     stats: { source: "live", viewRefreshIntervalMs: 30000 },
     idempotency: { store: "memory", ttlSeconds: 86400, leaseSeconds: 30, cleanupIntervalMs: 3600000 },
@@ -141,6 +146,7 @@ function makeConfigService(
       webhookUrls: [],
       webhookSecret: "",
       webhookAllowlist: [],
+      exportMaxDays: 31,
     },
     secrets: {
       provider: "env",
