@@ -4,7 +4,9 @@ import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
 import { SolversService } from "../solvers/solvers.service";
 import { MetricsService } from "../metrics/metrics.service";
-import { logger } from "../common/logger";
+import { createLogger } from "../common/logger";
+
+const logger = createLogger("IntentsGateway");
 import { SUPPORTED_CHAINS, SupportedChain } from "./intents.types";
 import { verifyStellarSignature, buildWsAuthMessage } from "../common/stellar-signature";
 import { buildMatchPredicate, IntentCapabilityIndex, SolverMatchPredicate } from "./solver-intent-matcher";
@@ -407,9 +409,9 @@ export class IntentsGateway
       (client as unknown as { protocol?: string }).protocol ?? "",
     );
     if (!protocolResult.accepted) {
-      logger.warn(
-        `ws rejected unknown protocol="${(client as unknown as { protocol?: string }).protocol}" — closing 1002`,
-      );
+      logger.warn("ws rejected unknown subprotocol; closing 1002", {
+        protocol: (client as unknown as { protocol?: string }).protocol,
+      });
       client.close(WS_CLOSE_UNSUPPORTED_PROTOCOL, WS_CLOSE_REASON_UNSUPPORTED);
       return;
     }
@@ -440,9 +442,7 @@ export class IntentsGateway
 
     client.on("error", () => {
       this.removeSubscriber(client);
-      logger.debug(
-        `ws client error/drop — active subscribers: ${this.subscribers.size}`,
-      );
+      logger.debug("ws client error/drop", { subscribers: this.subscribers.size });
     });
 
     const currentSeq = this.nextSeq - 1;
@@ -466,12 +466,12 @@ export class IntentsGateway
         /* snapshot failure is non-fatal — client can re-fetch via REST */
       });
 
-    logger.info(`ws client connected (subscribers=${this.subscribers.size})`);
+    logger.info("ws client connected", { subscribers: this.subscribers.size });
   }
 
   handleDisconnect(client: WebSocket) {
     this.removeSubscriber(client);
-    logger.info(`ws client disconnected (subscribers=${this.subscribers.size})`);
+    logger.info("ws client disconnected", { subscribers: this.subscribers.size });
   }
 
   /**
@@ -587,9 +587,7 @@ export class IntentsGateway
       10,
     );
     if (filter.subscriptionCount >= maxSubs) {
-      logger.warn(
-        `ws subscribe_rejected: connection has reached the max subscription limit (${maxSubs})`,
-      );
+      logger.warn("ws subscribe rejected: max subscriptions reached", { maxSubscriptions: maxSubs });
       if (client.readyState === WebSocket.OPEN) {
         client.send(
           JSON.stringify({
@@ -608,9 +606,7 @@ export class IntentsGateway
     );
     const rawChains = msg.chains as unknown[];
     if (rawChains.length > maxChains) {
-      logger.warn(
-        `ws subscribe_rejected: chains array length ${rawChains.length} exceeds max ${maxChains}`,
-      );
+      logger.warn("ws subscribe rejected: too many chains", { chainCount: rawChains.length, maxChains });
       if (client.readyState === WebSocket.OPEN) {
         client.send(
           JSON.stringify({
@@ -630,7 +626,7 @@ export class IntentsGateway
     filter.chains = new Set(validChains);
     filter.subscriptionCount += 1;
 
-    logger.debug(`ws client subscribed to chains: ${validChains.join(", ") || "(none)"}`);
+    logger.debug("ws client subscribed to chains", { chains: validChains });
 
     if (client.readyState === WebSocket.OPEN) {
       client.send(
@@ -667,7 +663,7 @@ export class IntentsGateway
       if (result.tooOld) {
         const oldest = await this.replayStore.oldestSeq();
         client.send(JSON.stringify({ type: "replay_too_old", fromSeq, oldestAvailableSeq: oldest }));
-        logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
+        logger.debug("ws replay too old", { fromSeq, oldestAvailable: oldest });
         return;
       }
       events = result.events;
@@ -682,7 +678,7 @@ export class IntentsGateway
             oldestAvailableSeq: oldest,
           }),
         );
-        logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
+        logger.debug("ws replay too old", { fromSeq, oldestAvailable: oldest });
         return;
       }
 
@@ -730,7 +726,7 @@ export class IntentsGateway
       );
     }
 
-    logger.debug(`ws replay complete: fromSeq=${fromSeq} count=${events.length}`);
+    logger.debug("ws replay complete", { fromSeq, count: events.length });
   }
 
   /**
@@ -843,7 +839,12 @@ export class IntentsGateway
       // Non-fatal — solver can fall back to GET /solvers/:address/eligible-intents.
     }
 
-    logger.info(`ws solver auth ok: address=${solver} method=${method} chains=${solverRecord.supportedChains.join(",")} tokens=${solverRecord.supportedTokens.join(",")}`);
+    logger.info("ws solver authenticated", {
+      solver,
+      method,
+      chains: solverRecord.supportedChains,
+      tokens: solverRecord.supportedTokens,
+    });
   }
 
   /**
@@ -864,7 +865,7 @@ export class IntentsGateway
       }
     }
 
-    logger.debug(`ws solver predicate updated for ${solverAddress}`);
+    logger.debug("ws solver predicate updated", { solver: solverAddress });
   }
 
   /**
@@ -937,11 +938,11 @@ export class IntentsGateway
       try {
         await this.replayStore.append(sequencedEvent);
       } catch (err) {
-        logger.warn(`replay store append failed: ${String(err)}`);
+        logger.warn("replay store append failed", { err });
       }
     }
 
-    logger.debug(`ws broadcast type=${event.type} seq=${seq} subscribers=${this.subscribers.size}`);
+    logger.debug("ws broadcast", { eventType: event.type, seq, subscribers: this.subscribers.size });
 
     if (this.backplane) {
       this.backplane.publish(sequencedEvent as Record<string, unknown>);
@@ -1023,9 +1024,7 @@ export class IntentsGateway
       if (this.alive.get(client) === false) {
         client.terminate();
         this.removeSubscriber(client);
-        logger.debug(
-          `ws heartbeat terminated dead client (subscribers=${this.subscribers.size})`,
-        );
+        logger.debug("ws heartbeat terminated dead client", { subscribers: this.subscribers.size });
         continue;
       }
 
@@ -1055,7 +1054,7 @@ export class IntentsGateway
     const currentSeq = this.nextSeq - 1;
     const clientCount = this.subscribers.size;
 
-    logger.warn(`ws draining started: ${clientCount} clients, timeout=${drainTimeoutMs}ms`);
+    logger.warn("ws draining started", { clientCount, drainTimeoutMs });
 
     const drainMessage = JSON.stringify({
       type: "server_draining",
@@ -1094,9 +1093,7 @@ export class IntentsGateway
         this.removeSubscriber(client);
       }
 
-      logger.info(
-        `ws drain progress: ${Math.min(i + batchSize, clientCount)}/${clientCount} closed`,
-      );
+      logger.info("ws drain progress", { closed: Math.min(i + batchSize, clientCount), clientCount });
     }
 
     logger.warn("ws draining complete: all clients closed");

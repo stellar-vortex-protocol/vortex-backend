@@ -57,15 +57,19 @@ function intercept(
 }
 
 /**
- * Each emission writes two `logger.info` calls: a correlated line carrying the
- * request id, and a sanitized line shaped `<METHOD> <URL> <STATUS> <N>ms`.
+ * Each emission writes one structured `http.request` record. `logger.log` is
+ * winston's `(level, message, meta)` entry point, which the structured
+ * logger funnels every record through.
  */
-function correlatedLine(spy: jest.SpyInstance, emission = 0): string {
-  return spy.mock.calls[emission * 2][0] as string;
+interface RecordedLine {
+  level: string;
+  message: string;
+  meta: Record<string, unknown>;
 }
 
-function accessLine(spy: jest.SpyInstance, emission = 0): string {
-  return spy.mock.calls[emission * 2 + 1][0] as string;
+function line(spy: jest.SpyInstance, emission = 0): RecordedLine {
+  const [level, message, meta] = spy.mock.calls[emission];
+  return { level, message, meta };
 }
 
 // ─── tests ──────────────────────────────────────────────────────────────────
@@ -76,7 +80,7 @@ describe("LoggingInterceptor", () => {
 
   beforeEach(() => {
     interceptor = new LoggingInterceptor();
-    logSpy = jest.spyOn(logger, "info").mockImplementation(() => logger);
+    logSpy = jest.spyOn(logger, "log").mockImplementation(() => logger);
   });
 
   afterEach(() => {
@@ -90,34 +94,33 @@ describe("LoggingInterceptor", () => {
     expect(result.error).toBeUndefined();
   });
 
-  it("calls logger.info after the handler completes", () => {
+  it("writes one info record after the handler completes", () => {
     intercept(interceptor, makeContext("POST", "/api/v1/intents", 201), makeHandler(of({})));
 
-    expect(logSpy).toHaveBeenCalledTimes(2);
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    expect(line(logSpy).level).toBe("info");
   });
 
-  it("log message contains method, url, status code, and duration suffix", () => {
+  it("uses a constant message and puts request details in structured fields", () => {
     intercept(interceptor, makeContext("DELETE", "/api/v1/intents/abc", 204), makeHandler(of(null)));
 
-    const msg = accessLine(logSpy);
-    expect(msg).toContain("DELETE");
-    expect(msg).toContain("/api/v1/intents/abc");
-    expect(msg).toContain("204");
-    expect(msg).toMatch(/\d+ms$/);
+    const { message, meta } = line(logSpy);
+    expect(message).toBe("http request completed");
+    expect(meta).toMatchObject({
+      component: "http",
+      event: "http.request",
+      method: "DELETE",
+      path: "/api/v1/intents/abc",
+      statusCode: 204,
+    });
   });
 
-  it("log message format is '<METHOD> <URL> <STATUS> <N>ms'", () => {
-    intercept(interceptor, makeContext("GET", "/health", 200), makeHandler(of({})));
-
-    expect(accessLine(logSpy)).toMatch(/^GET \/health 200 \d+ms$/);
-  });
-
-  it("duration in the log is a non-negative number of milliseconds", () => {
+  it("records a non-negative integer durationMs", () => {
     intercept(interceptor, makeContext(), makeHandler(of({})));
 
-    const match = accessLine(logSpy).match(/(\d+)ms$/);
-    expect(match).not.toBeNull();
-    expect(Number(match![1])).toBeGreaterThanOrEqual(0);
+    const { durationMs } = line(logSpy).meta;
+    expect(typeof durationMs).toBe("number");
+    expect(durationMs as number).toBeGreaterThanOrEqual(0);
   });
 
   it("does not log when the handler errors — error propagates to subscriber", () => {
@@ -135,8 +138,7 @@ describe("LoggingInterceptor", () => {
     const result = intercept(interceptor, makeContext(), makeHandler(of(1, 2, 3)));
 
     expect(result.emitted).toEqual([1, 2, 3]);
-    // tap fires for every emission, and each emission writes two lines.
-    expect(logSpy).toHaveBeenCalledTimes(6);
+    expect(logSpy).toHaveBeenCalledTimes(3);
   });
 
   it("reads statusCode from the response object at log time, not at intercept time", () => {
@@ -158,7 +160,7 @@ describe("LoggingInterceptor", () => {
 
     intercept(interceptor, ctx, handler);
 
-    expect(accessLine(logSpy)).toContain("202");
+    expect(line(logSpy).meta.statusCode).toBe(202);
   });
 
   // ── request correlation ───────────────────────────────────────────────────
@@ -173,9 +175,7 @@ describe("LoggingInterceptor", () => {
       expect(requestId).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       );
-      expect(correlatedLine(logSpy)).toMatch(
-        new RegExp(`^\\[${requestId}\\] GET /x 200 \\d+ms$`),
-      );
+      expect(line(logSpy).meta.requestId).toBe(requestId);
     });
 
     it("adopts an inbound x-request-id header", () => {
@@ -188,10 +188,10 @@ describe("LoggingInterceptor", () => {
       intercept(interceptor, makeContext("GET", "/x", 200, request.headers, request), makeHandler(of({})));
 
       expect(request.requestId).toBe("req-abc-123");
-      expect(correlatedLine(logSpy)).toContain("[req-abc-123]");
+      expect(line(logSpy).meta.requestId).toBe("req-abc-123");
     });
 
-    it("takes the first value when x-request-id is an array", () => {
+    it("uses the first value when x-request-id is sent more than once", () => {
       const request: FakeRequest = {
         method: "GET",
         originalUrl: "/x",
@@ -201,6 +201,32 @@ describe("LoggingInterceptor", () => {
       intercept(interceptor, makeContext("GET", "/x", 200, request.headers, request), makeHandler(of({})));
 
       expect(request.requestId).toBe("first");
+    });
+
+    it("keeps a requestId already assigned by the request-context middleware", () => {
+      const request: FakeRequest = {
+        method: "GET",
+        originalUrl: "/x",
+        headers: { "x-request-id": "from-header" },
+        requestId: "from-middleware",
+      };
+
+      intercept(interceptor, makeContext("GET", "/x", 200, request.headers, request), makeHandler(of({})));
+
+      expect(line(logSpy).meta.requestId).toBe("from-middleware");
+    });
+
+    it("replaces an x-request-id that is unsafe to log", () => {
+      const request: FakeRequest = {
+        method: "GET",
+        originalUrl: "/x",
+        headers: { "x-request-id": "evil\nFAKE line" },
+      };
+
+      intercept(interceptor, makeContext("GET", "/x", 200, request.headers, request), makeHandler(of({})));
+
+      expect(request.requestId).not.toContain("\n");
+      expect(request.requestId).toMatch(/^[0-9a-f-]{36}$/);
     });
   });
 
@@ -214,23 +240,20 @@ describe("LoggingInterceptor", () => {
         makeHandler(of({})),
       );
 
-      // The newline becomes a space, so the forged text is neutralised into
-      // ordinary content on this one line — it cannot become a second entry.
-      const line = accessLine(logSpy);
-      expect(line).not.toContain("\n");
-      expect(line).not.toContain("\r");
-      expect(line).toMatch(/^GET \/api\/v1\/intents FAKE 200 0ms 200 \d+ms$/);
-      expect(logSpy).toHaveBeenCalledTimes(2);
-      expect(correlatedLine(logSpy)).not.toContain("\n");
+      const path = line(logSpy).meta.path as string;
+      expect(path).not.toContain("\n");
+      expect(path).not.toContain("\r");
+      expect(path).toBe("/api/v1/intents FAKE 200 0ms");
+      expect(logSpy).toHaveBeenCalledTimes(1);
     });
 
     it("strips carriage returns and other control characters", () => {
       intercept(interceptor, makeContext("GET", "/a\rb /c", 200), makeHandler(of({})));
 
-      const line = accessLine(logSpy);
+      const path = line(logSpy).meta.path as string;
       // eslint-disable-next-line no-control-regex
-      expect(line).not.toMatch(/[\x00-\x1f\x7f]/);
-      expect(line).toMatch(/^GET \/a b \/c 200 \d+ms$/);
+      expect(path).not.toMatch(/[\x00-\x1f\x7f]/);
+      expect(path).toBe("/a b /c");
     });
   });
 });

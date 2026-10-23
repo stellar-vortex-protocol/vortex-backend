@@ -1,4 +1,4 @@
-import { Logger } from "@nestjs/common";
+import type { StructuredLogger } from "../common/logger";
 import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
@@ -7,6 +7,12 @@ import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { MetricsService } from "../metrics/metrics.service";
 import { KillSwitchService } from "../killswitch/killswitch.service";
 import { LeaderElectionService } from "../common/leader-election";
+
+/** The sweeper's private structured logger, for spying. */
+function loggerOf(sweeper: object): StructuredLogger {
+  return (sweeper as unknown as { logger: StructuredLogger }).logger;
+}
+
 
 /** Minimal no-op LeaderElectionService for tests that don't exercise election. */
 function noopLeaderElection(): LeaderElectionService {
@@ -75,23 +81,27 @@ describe("IntentsSweeperService — manual sweep trigger (#269)", () => {
   });
 
   it("logs the invocation loudly (source + result) for the incident timeline", async () => {
-    const warnSpy = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
     const sweeper = buildSweeper();
+    const warnSpy = jest.spyOn(loggerOf(sweeper), "warn").mockImplementation(() => undefined);
 
     await sweeper.triggerManualSweep("SIGUSR2");
 
     const messages = warnSpy.mock.calls.map((call) => String(call[0]));
-    expect(messages.some((m) => m.includes("MANUAL SWEEP TRIGGERED"))).toBe(true);
-    expect(messages.some((m) => m.includes("MANUAL SWEEP COMPLETE"))).toBe(true);
-    expect(messages.every((m) => m.includes("SIGUSR2"))).toBe(true);
+    expect(messages).toContain("MANUAL SWEEP TRIGGERED");
+    expect(messages).toContain("MANUAL SWEEP COMPLETE");
+    // The source rides along as a structured field on every record.
+    expect(warnSpy.mock.calls.every((call) => (call[1] as { source?: string })?.source === "SIGUSR2")).toBe(true);
   });
 
   it("propagates and logs a failure without swallowing it", async () => {
     const sweeper = buildSweeper();
     jest.spyOn(sweeper, "sweep").mockRejectedValue(new Error("boom"));
-    const errorSpy = jest.spyOn(Logger.prototype, "error").mockImplementation(() => undefined);
+    const errorSpy = jest.spyOn(loggerOf(sweeper), "error").mockImplementation(() => undefined);
 
     await expect(sweeper.triggerManualSweep("SIGUSR2")).rejects.toThrow("boom");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("MANUAL SWEEP FAILED"));
+    expect(errorSpy).toHaveBeenCalledWith(
+      "MANUAL SWEEP FAILED",
+      expect.objectContaining({ source: "SIGUSR2", err: expect.any(Error) }),
+    );
   });
 });

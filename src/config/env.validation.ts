@@ -197,6 +197,35 @@ export const envValidationSchema = Joi.object({
   LOG_SHIPPING_PATH: Joi.string().default("/"),
   LOG_SHIPPING_SSL: Joi.boolean().default(false),
   LOG_SERVICE_NAME: Joi.string().default("vortex-backend"),
+  // Issue #488 — console log format: "json" (one schema-conformant record per
+  // line, parsed by ops/otel-collector) or "pretty". Unset = json in
+  // production, pretty elsewhere (see resolveLogFormat in src/common/logger.ts).
+  LOG_FORMAT: Joi.string().valid("json", "pretty").optional(),
+
+  // Issue #439 — destination account / trustline preflight. Off by default so
+  // local dev and CI never call Horizon; the network .env examples enable it.
+  DST_PREFLIGHT_ENABLED: Joi.boolean().default(false),
+  // Let intent creation through when Horizon is unreachable (logged).
+  DST_PREFLIGHT_FAIL_OPEN: Joi.boolean().default(true),
+  DST_PREFLIGHT_CACHE_TTL_MS: Joi.number().integer().min(0).default(30000),
+
+  // Issue #432 — signed webhook delivery.
+  WEBHOOKS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
+  WEBHOOK_TIMEOUT_MS: Joi.number().integer().min(100).max(30000).default(5000),
+  WEBHOOK_MAX_RETRIES: Joi.number().integer().min(0).max(20).default(5),
+  WEBHOOK_BACKOFF_BASE_MS: Joi.number().integer().min(10).default(30000),
+  WEBHOOK_DISABLE_AFTER_FAILURES: Joi.number().integer().min(1).default(10),
+  WEBHOOK_CONCURRENCY: Joi.number().integer().min(1).max(256).default(16),
+  // Allow http:// and private-network webhook URLs. Never in production.
+  WEBHOOK_ALLOW_INSECURE_URLS: Joi.boolean().default(false).when("NODE_ENV", {
+    is: "production",
+    then: Joi.valid(false),
+  }),
+
+  // Issue #427 — partial fills.
+  PARTIAL_FILLS_ENABLED: Joi.boolean().default(true),
+  // The settlement contract has no partial-fill entrypoints yet; keep off.
+  PARTIAL_FILLS_ONCHAIN_ENABLED: Joi.boolean().default(false),
 
   // ── Pluggable signer backend (issue #400) ────────────────────────────────
   // SIGNER_BACKEND selects which signing implementation is used:

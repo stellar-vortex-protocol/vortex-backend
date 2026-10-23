@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { Networks, StrKey, TransactionBuilder } from "@stellar/stellar-sdk";
 import { parse } from "yaml";
+import { LOG_EVENTS } from "../../common/log-schema";
+import { createLogger } from "../../common/logger";
+
+const policyLog = createLogger("signer-policy");
 
 export type PolicyAction = "allow" | "deny" | "warn";
 
@@ -398,6 +402,13 @@ export function evaluatePolicy(
       alerts: [],
     };
 
+    // Issue #488: feeds the `VortexSignerPolicyViolation` log alert.
+    policyLog.warn("signer policy denied transaction", {
+      event: LOG_EVENTS.SIGNER_POLICY_VIOLATION,
+      reason,
+      wallet: decodedTx.source,
+      budgetKey,
+    });
     void alertSink.emit({
       kind: "signer-policy",
       status: decision.status,

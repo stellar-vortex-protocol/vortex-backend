@@ -11,6 +11,8 @@ import { json, Request, Response, NextFunction } from "express";
 import { AppModule } from "./app.module";
 import { AppConfig } from "./config/configuration";
 import { LoggingInterceptor } from "./common/logging.interceptor";
+import { NestStructuredLogger } from "./common/logger";
+import { requestContextMiddleware } from "./common/request-context.middleware";
 import { HttpExceptionFilter } from "./common/http-exception.filter";
 import { initSentry } from "./common/sentry";
 import { IntentsSweeperService } from "./intents/intents-sweeper.service";
@@ -71,7 +73,13 @@ function checkContractIdEnvVars(
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // Issue #488 — buffer bootstrap logs until the structured logger is
+  // installed, so even module-init lines come out in the documented schema.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true });
+  app.useLogger(new NestStructuredLogger());
+  // Opens the per-request log context (requestId / traceId) before any other
+  // middleware runs, so every downstream log line is correlated.
+  app.use(requestContextMiddleware);
   enableApiVersioning(app);
 
   // Issue #20 — trust the first proxy hop so Helmet/HSTS sees the real

@@ -1,6 +1,8 @@
-import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
+import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { LOG_EVENTS } from "../common/log-schema";
+import { createLogger } from "../common/logger";
 
 /** One privileged operator action, persisted to `admin_audit_log`. */
 export interface AdminAuditEntry {
@@ -24,7 +26,7 @@ export interface AdminAuditEntry {
  */
 @Injectable()
 export class AdminAuditService {
-  private readonly logger = new Logger(AdminAuditService.name);
+  private readonly logger = createLogger(AdminAuditService.name);
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -33,7 +35,14 @@ export class AdminAuditService {
    * atomically with the change it describes.
    */
   async record(entry: AdminAuditEntry, client: Prisma.TransactionClient = this.prisma): Promise<void> {
-    this.logger.warn(`[audit] ${entry.action} target=${entry.target} actor=${entry.actor}`);
+    // Issue #488: one `admin.action` record per privileged action — the
+    // `VortexAdminActionAnomaly` log alert watches the rate of these.
+    this.logger.warn("admin action", {
+      event: LOG_EVENTS.ADMIN_ACTION,
+      action: entry.action,
+      target: entry.target,
+      actor: entry.actor,
+    });
     try {
       await client.adminAuditLog.create({
         data: {
@@ -46,7 +55,7 @@ export class AdminAuditService {
         },
       });
     } catch (err) {
-      this.logger.error(`[audit] write failed for ${entry.action}: ${(err as Error).message}`);
+      this.logger.error("admin audit write failed", { action: entry.action, target: entry.target, err });
       throw new ServiceUnavailableException("Audit log unavailable; action not applied");
     }
   }

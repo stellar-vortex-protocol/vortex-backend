@@ -182,6 +182,11 @@ model Intent {
   /// Reason reported when fill verification rejected the fill.
   fillVerificationReason String? @map("fill_verification_reason")
 
+  /// Partial fills (issue #427): several solvers may fill tranches of srcAmount.
+  allowPartialFill Boolean   @default(false) @map("allow_partial_fill")
+  /// Smallest tranche a solver may reserve (source base units); null = 1.
+  minFillAmount    String?   @map("min_fill_amount")
+
   @@index([user])
   @@index([state])
   @@index([user, createdAt(sort: Desc)], name: "intents_user_created_idx")
@@ -957,4 +962,111 @@ model IdempotencyKey {
   @@id([key, scope, principal])
   @@index([expiresAt], name: "idempotency_keys_expires_idx")
   @@map("idempotency_keys")
+}
+
+/// Lifecycle of one partial-fill tranche (issue #427).
+enum IntentFillStatus {
+  reserved
+  filled
+  slashed
+  released
+}
+
+/// One solver's tranche of a partial-fill intent (issue #427).
+///
+/// Reservations are inserted under a row lock on the parent `intents` row
+/// (`SELECT ... FOR UPDATE`) so concurrent solvers can never together reserve
+/// more than `src_amount`. Σ reserved_amount over `reserved` + `filled` rows
+/// is therefore always ≤ the intent's src_amount.
+model IntentFill {
+  id             String           @id @map("id")
+  intentId       String           @map("intent_id")
+  solver         String           @map("solver")
+  /// Source-token base units this tranche covers (bigint as string).
+  reservedAmount String           @map("reserved_amount")
+  /// Pro-rata share of the intent's min_dst_amount, rounded up.
+  minDstAmount   String           @map("min_dst_amount")
+  status         IntentFillStatus @default(reserved) @map("status")
+  /// Unix epoch seconds.
+  reservedAt     Int              @map("reserved_at")
+  /// Fill-window deadline for this tranche, unix epoch seconds.
+  deadline       Int              @map("deadline")
+  dstAmount      String?          @map("dst_amount")
+  feeAmount      String?          @map("fee_amount")
+  txHash         String?          @map("tx_hash")
+  filledAt       Int?             @map("filled_at")
+  slashedAt      Int?             @map("slashed_at")
+  releasedAt     Int?             @map("released_at")
+
+  @@index([intentId], name: "intent_fills_intent_idx")
+  @@index([status, deadline], name: "intent_fills_status_deadline_idx")
+  @@map("intent_fills")
+}
+
+enum WebhookSubscriptionStatus {
+  active
+  disabled
+}
+
+enum WebhookDeliveryStatus {
+  pending
+  retrying
+  succeeded
+  failed
+}
+
+/// An integrator's webhook endpoint (issue #432).
+model WebhookSubscription {
+  id                  String                    @id @map("id")
+  /// Tenant — the owning API key's `owner` label.
+  owner               String                    @map("owner")
+  url                 String                    @map("url")
+  /// Subscribed event types, or ["*"].
+  events              Json                      @map("events")
+  description         String?                   @map("description")
+  /// AES-256-GCM-sealed signing secret (WEBHOOK_SECRET_ENCRYPTION_KEY).
+  secretCiphertext    String                    @map("secret_ciphertext")
+  secretHint          String                    @map("secret_hint")
+  status              WebhookSubscriptionStatus @default(active) @map("status")
+  disabledReason      String?                   @map("disabled_reason")
+  disabledAt          DateTime?                 @map("disabled_at") @db.Timestamptz
+  consecutiveFailures Int                       @default(0) @map("consecutive_failures")
+  /// Next per-subscription delivery sequence number.
+  nextSequence        Int                       @default(1) @map("next_sequence")
+  createdAt           DateTime                  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime                  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  deliveries WebhookDelivery[]
+
+  @@index([owner], name: "webhook_subscriptions_owner_idx")
+  @@index([status], name: "webhook_subscriptions_status_idx")
+  @@map("webhook_subscriptions")
+}
+
+/// One event addressed to one subscription, plus its attempt log (issue #432).
+/// Written before the delivery job is enqueued, so it doubles as the outbox row.
+model WebhookDelivery {
+  id             String                @id @map("id")
+  subscriptionId String                @map("subscription_id")
+  /// Event id — the same across retries and replays.
+  eventId        String                @map("event_id")
+  eventType      String                @map("event_type")
+  sequence       Int                   @map("sequence")
+  /// Exact signed JSON body.
+  payload        String                @map("payload")
+  status         WebhookDeliveryStatus @default(pending) @map("status")
+  attempts       Int                   @default(0) @map("attempts")
+  attemptLog     Json                  @default("[]") @map("attempt_log")
+  lastStatusCode Int?                  @map("last_status_code")
+  lastError      String?               @map("last_error")
+  nextAttemptAt  DateTime?             @map("next_attempt_at") @db.Timestamptz
+  replayOf       String?               @map("replay_of")
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz
+  completedAt    DateTime?             @map("completed_at") @db.Timestamptz
+
+  subscription WebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([subscriptionId, createdAt(sort: Desc)], name: "webhook_deliveries_subscription_idx")
+  @@index([status, nextAttemptAt], name: "webhook_deliveries_status_next_idx")
+  @@map("webhook_deliveries")
 }

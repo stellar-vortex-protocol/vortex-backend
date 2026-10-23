@@ -12,14 +12,19 @@ import { IntentsService } from '../intents.service';
 import { SolversService } from '../../solvers/solvers.service';
 import { IntentCapabilityIndex } from '../solver-intent-matcher';
 
-jest.mock('../../common/logger', () => ({
-  logger: {
+jest.mock('../../common/logger', () => {
+  // One shared spy object stands in for both the raw winston logger and every
+  // component logger created with createLogger().
+  const log: Record<string, jest.Mock> = {
     info: jest.fn(),
     debug: jest.fn(),
     warn: jest.fn(),
     error: jest.fn(),
-  },
-}));
+    verbose: jest.fn(),
+  };
+  log.child = jest.fn(() => log);
+  return { logger: log, createLogger: jest.fn(() => log) };
+});
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

@@ -3,7 +3,6 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
-  Logger,
   NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
@@ -25,6 +24,7 @@ import { SolverRegistryService } from "../soroban/solver-registry.service";
 import { TxConfirmationService } from "../soroban/tx-confirmation.service";
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
+import { createLogger } from "../common/logger";
 
 const PROCESS_INTERVAL_MS = 15_000;
 const PROCESS_BATCH_SIZE = 25;
@@ -80,7 +80,7 @@ export interface DetectMissedFillInput {
  */
 @Injectable()
 export class SlashingPipelineService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(SlashingPipelineService.name);
+  private readonly logger = createLogger(SlashingPipelineService.name);
   private readonly settings: AppConfig["slashing"];
   private interval?: NodeJS.Timeout;
   private running = false;
@@ -102,7 +102,7 @@ export class SlashingPipelineService implements OnModuleInit, OnModuleDestroy {
   onModuleInit() {
     this.interval = setInterval(() => {
       this.processDue().catch((err) =>
-        this.logger.error(`[slashing] processing failed: ${errorMessage(err)}`),
+        this.logger.error("slashing processing failed", { err }),
       );
     }, PROCESS_INTERVAL_MS);
     this.interval.unref?.();
@@ -127,7 +127,7 @@ export class SlashingPipelineService implements OnModuleInit, OnModuleDestroy {
       challengeEndsAt: new Date(detectedAt.getTime() + this.settings.challengeWindowSeconds * 1000),
     });
     if (!created) {
-      this.logger.warn(`[slashing] intent=${input.intentId} already has a slash (state=${slash.state}); ignoring`);
+      this.logger.warn("intent already has a slash; ignoring", { intentId: input.intentId, slashState: slash.state });
       return slash;
     }
     this.metrics.recordSlashTransition("detected");
@@ -229,10 +229,11 @@ export class SlashingPipelineService implements OnModuleInit, OnModuleDestroy {
       solver: slash.solverAddress,
       challengeEndsAt: opened.challengeEndsAt.toISOString(),
     });
-    this.logger.log(
-      `[slashing] intent=${slash.intentId} solver=${slash.solverAddress} challenge window open until ` +
-        opened.challengeEndsAt.toISOString(),
-    );
+    this.logger.info("slash challenge window opened", {
+      intentId: slash.intentId,
+      solver: slash.solverAddress,
+      challengeEndsAt: opened.challengeEndsAt.toISOString(),
+    });
     return opened;
   }
 
@@ -265,9 +266,10 @@ export class SlashingPipelineService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (!solver.isActive) {
-      this.logger.warn(
-        `[slashing] solver=${slash.solverAddress} deregistered during the challenge window; slashing intent=${slash.intentId} anyway`,
-      );
+      this.logger.warn("solver deregistered during the challenge window; slashing anyway", {
+        intentId: slash.intentId,
+        solver: slash.solverAddress,
+      });
     }
 
     // 3. Submit. The registry contract keys slashes by intent id, so a
@@ -311,10 +313,13 @@ export class SlashingPipelineService implements OnModuleInit, OnModuleDestroy {
       solverActive: solver.isActive,
       detail: result.detail,
     });
-    this.logger.log(
-      `[slashing] intent=${slash.intentId} solver=${slash.solverAddress} submitted ` +
-        `(${result.submitted ? `tx ${result.txHash}` : "simulated only"}): ${result.detail}`,
-    );
+    this.logger.info("slash submitted", {
+      intentId: slash.intentId,
+      solver: slash.solverAddress,
+      submitted: result.submitted,
+      txHash: result.txHash,
+      detail: result.detail,
+    });
   }
 
   private async confirm(slash: PendingSlash, now: Date): Promise<void> {
@@ -368,10 +373,14 @@ export class SlashingPipelineService implements OnModuleInit, OnModuleDestroy {
   private async retryOrGiveUp(slash: PendingSlash, error: string, now: Date): Promise<void> {
     const attempts = slash.attempts + 1;
     if (attempts >= this.settings.maxSubmitAttempts) {
-      this.logger.error(
-        `[slashing] ALERT giving up on slash for intent=${slash.intentId} solver=${slash.solverAddress} ` +
-          `after ${attempts} attempts: ${error}. Cancelling and compensating — see docs/runbooks/slash-cancellation.md`,
-      );
+      this.logger.error("ALERT giving up on slash; cancelling and compensating", {
+        event: "slash.submit_abandoned",
+        intentId: slash.intentId,
+        solver: slash.solverAddress,
+        attempts,
+        lastError: error,
+        runbook: "docs/runbooks/slash-cancellation.md",
+      });
       await this.cancel({ ...slash, attempts }, "submit_failed", "system", { lastError: error }, undefined);
       return;
     }
@@ -380,9 +389,12 @@ export class SlashingPipelineService implements OnModuleInit, OnModuleDestroy {
       nextAttemptAt: this.backoff(attempts, now),
       lastError: error,
     });
-    this.logger.warn(
-      `[slashing] intent=${slash.intentId} attempt ${attempts}/${this.settings.maxSubmitAttempts} failed: ${error}`,
-    );
+    this.logger.warn("slash submit attempt failed", {
+      intentId: slash.intentId,
+      attempts,
+      maxAttempts: this.settings.maxSubmitAttempts,
+      lastError: error,
+    });
   }
 
   /**
@@ -444,9 +456,12 @@ export class SlashingPipelineService implements OnModuleInit, OnModuleDestroy {
       reason,
     });
     this.metrics.recordSlashTransition("cancelled", reason);
-    this.logger.warn(
-      `[slashing] slash for intent=${slash.intentId} solver=${slash.solverAddress} cancelled by ${actor}: ${reason}`,
-    );
+    this.logger.warn("slash cancelled", {
+      intentId: slash.intentId,
+      solver: slash.solverAddress,
+      actor,
+      reason,
+    });
     return cancelled;
   }
 

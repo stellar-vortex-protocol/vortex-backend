@@ -12,6 +12,20 @@ import {
 } from "viem";
 import { AppConfig } from "../config/configuration";
 import { EgressPurpose, HttpEgressService } from "./http-egress";
+import { LOG_EVENTS } from "./log-schema";
+import { createLogger } from "./logger";
+
+const securityLog = createLogger("evm-signature");
+
+/** Issue #488: EVM signature rejections feed the same security alert as Stellar ones. */
+function logEvmSignatureFailure(signer: string, reason: string): void {
+  securityLog.warn("signature verification failed", {
+    event: LOG_EVENTS.SIGNATURE_FAILURE,
+    scheme: "evm-eip712",
+    signer,
+    reason,
+  });
+}
 
 const SECP256K1_HALF_ORDER = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
 const ERC1271_MAGIC_VALUE = "0x1626ba7e";
@@ -142,6 +156,7 @@ export class EvmSignatureVerifier {
     typedData: Parameters<typeof hashTypedData>[0],
   ): Promise<void> {
     if (!/^0x(?:[0-9a-fA-F]{2}){1,2048}$/.test(signature)) {
+      logEvmSignatureFailure(signer, "malformed");
       throw new UnauthorizedException("Invalid EVM signature encoding");
     }
     const hexSignature = signature as Hex;
@@ -184,6 +199,7 @@ export class EvmSignatureVerifier {
       throw new ServiceUnavailableException("EVM signature verification RPC returned an invalid response");
     }
     if (typeof result !== "string" || result.slice(0, 10).toLowerCase() !== ERC1271_MAGIC_VALUE) {
+      logEvmSignatureFailure(signer, "mismatch");
       throw new UnauthorizedException("EVM signature verification failed");
     }
   }
@@ -192,7 +208,10 @@ export class EvmSignatureVerifier {
     if (signature.length === 132 || signature.length === 130) {
       const rawS = BigInt(`0x${signature.slice(66, 130)}`);
       const s = signature.length === 130 ? rawS & ((1n << 255n) - 1n) : rawS;
-      if (s > SECP256K1_HALF_ORDER) throw new UnauthorizedException("High-s EVM signatures are not accepted");
+      if (s > SECP256K1_HALF_ORDER) {
+        logEvmSignatureFailure("unknown", "high_s");
+        throw new UnauthorizedException("High-s EVM signatures are not accepted");
+      }
     }
   }
 

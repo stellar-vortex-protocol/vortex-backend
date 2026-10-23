@@ -18,6 +18,7 @@ import { SolversModule } from "../solvers/solvers.module";
 import { MetricsService } from "../metrics/metrics.service";
 import { AppConfig } from "../config/configuration";
 import { IntentsModule } from "../intents/intents.module";
+import { DestinationPreflightService } from "./destination-preflight.service";
 
 // MetricsModule is @Global() and registered in AppModule, so the MetricsService
 // that ShadowService emits its counters through needs no import here.
@@ -33,6 +34,8 @@ import { IntentsModule } from "../intents/intents.module";
   controllers: [SorobanController, ShadowController, TtlKeeperController],
   providers: [
     SorobanService,
+    // Destination account / trustline preflight (issue #439).
+    DestinationPreflightService,
 
     // ── Pluggable signer backend (issue #400) ─────────────────────────────
     // Factory selects LocalKeypairSigner (SIGNER_BACKEND=local, default) or
@@ -65,6 +68,7 @@ import { IntentsModule } from "../intents/intents.module";
   ],
   exports: [
     SorobanService,
+    DestinationPreflightService,
     SolverRegistryService,
     SignerService,
     StellarTxService,

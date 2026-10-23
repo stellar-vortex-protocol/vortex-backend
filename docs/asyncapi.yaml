@@ -63,6 +63,10 @@ channels:
           - $ref: "#/components/messages/intent_cancelled"
           - $ref: "#/components/messages/intent_expired"
           - $ref: "#/components/messages/intent_slashed"
+          - $ref: "#/components/messages/intent_tranche_reserved"
+          - $ref: "#/components/messages/intent_partially_filled"
+          - $ref: "#/components/messages/intent_tranche_slashed"
+          - $ref: "#/components/messages/intent_destination_invalid"
           - $ref: "#/components/messages/replay_start"
           - $ref: "#/components/messages/replay_end"
           - $ref: "#/components/messages/replay_too_old"
@@ -163,6 +167,30 @@ components:
       title: Intent slashed (solver missed fill deadline)
       payload:
         $ref: "#/components/schemas/IntentSlashedFrame"
+
+    intent_tranche_reserved:
+      name: intent_tranche_reserved
+      title: A solver reserved a tranche of a partial-fill intent (issue #427)
+      payload:
+        $ref: "#/components/schemas/IntentTrancheReservedFrame"
+
+    intent_partially_filled:
+      name: intent_partially_filled
+      title: One tranche of a partial-fill intent was filled (issue #427)
+      payload:
+        $ref: "#/components/schemas/IntentPartiallyFilledFrame"
+
+    intent_tranche_slashed:
+      name: intent_tranche_slashed
+      title: A tranche reservation lapsed; its solver was slashed for that tranche only (issue #427)
+      payload:
+        $ref: "#/components/schemas/IntentTrancheSlashedFrame"
+
+    intent_destination_invalid:
+      name: intent_destination_invalid
+      title: The user's Stellar destination can no longer receive the delivery (issue #439)
+      payload:
+        $ref: "#/components/schemas/IntentDestinationInvalidFrame"
 
     replay_start:
       name: replay_start
@@ -351,8 +379,128 @@ components:
         fillAmount:
           type: string
           description: Fill amount in destination token base units.
+        partial:
+          type: boolean
+          description: >-
+            Present (true) when a partial-fill intent settled (issue #427): fillAmount is the sum over
+            all tranches and `solver` is the solver of the final tranche.
+        fillProgress:
+          $ref: "#/components/schemas/FillProgress"
         seq:
           $ref: "#/components/schemas/SeqField"
+
+    IntentTrancheReservedFrame:
+      type: object
+      required: [type, intentId, solver, fillId, reservedAmount, deadline, fillProgress, seq]
+      properties:
+        type:
+          type: string
+          const: intent_tranche_reserved
+        intentId:
+          $ref: "#/components/schemas/IntentId"
+        solver:
+          $ref: "#/components/schemas/SolverAddress"
+        fillId:
+          type: string
+        reservedAmount:
+          type: string
+          description: Source base units reserved.
+        deadline:
+          type: integer
+          description: Tranche fill deadline, unix epoch seconds.
+        fillProgress:
+          $ref: "#/components/schemas/FillProgress"
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    IntentPartiallyFilledFrame:
+      type: object
+      required: [type, intentId, solver, fillId, reservedAmount, dstAmount, fillProgress, seq]
+      properties:
+        type:
+          type: string
+          const: intent_partially_filled
+        intentId:
+          $ref: "#/components/schemas/IntentId"
+        solver:
+          $ref: "#/components/schemas/SolverAddress"
+        fillId:
+          type: string
+        reservedAmount:
+          type: string
+          description: Source base units this tranche covered.
+        dstAmount:
+          type: string
+          description: Destination base units delivered for this tranche.
+        fillProgress:
+          $ref: "#/components/schemas/FillProgress"
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    IntentTrancheSlashedFrame:
+      type: object
+      required: [type, intentId, solver, fillId, slashedAmount, seq]
+      properties:
+        type:
+          type: string
+          const: intent_tranche_slashed
+        intentId:
+          $ref: "#/components/schemas/IntentId"
+        solver:
+          $ref: "#/components/schemas/SolverAddress"
+        fillId:
+          type: string
+        slashedAmount:
+          type: string
+          description: Source base units of the lapsed tranche; returned to the pool.
+        fillProgress:
+          $ref: "#/components/schemas/FillProgress"
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    IntentDestinationInvalidFrame:
+      type: object
+      required: [type, intentId, user, code, seq]
+      properties:
+        type:
+          type: string
+          const: intent_destination_invalid
+        intentId:
+          $ref: "#/components/schemas/IntentId"
+        user:
+          type: string
+        code:
+          type: string
+          enum: [DST_ACCOUNT_NOT_FOUND, DST_TRUSTLINE_MISSING, DST_TRUSTLINE_LIMIT, DST_NOT_AUTHORIZED]
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    FillProgress:
+      type: object
+      description: >-
+        Partial-fill accounting (issue #427). Invariant: filledAmount + reservedAmount + remainingAmount =
+        srcAmount. `partially_filled` lives here, never in Intent.state.
+      required: [status, srcAmount, reservedAmount, filledAmount, remainingAmount, dstFilledAmount, fillCount, activeReservations]
+      properties:
+        status:
+          type: string
+          enum: [none, partially_filled, filled]
+        srcAmount:
+          type: string
+        reservedAmount:
+          type: string
+        filledAmount:
+          type: string
+        remainingAmount:
+          type: string
+        dstFilledAmount:
+          type: string
+        fillCount:
+          type: integer
+        activeReservations:
+          type: integer
+        remainderCancelled:
+          type: boolean
 
     IntentCancelledFrame:
       type: object
@@ -513,3 +661,11 @@ components:
           type: string
         txHash:
           type: string
+        allowPartialFill:
+          type: boolean
+          description: Issue #427 — the intent is filled in tranches by several solvers.
+        minFillAmount:
+          type: string
+          description: Smallest tranche a solver may reserve (source base units).
+        fillProgress:
+          $ref: "#/components/schemas/FillProgress"

@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsIn,
   IsInt,
   IsOptional,
@@ -105,4 +106,25 @@ export class CreateIntentDto {
   @IsOptional()
   @IsString()
   idempotencyKey?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "Issue #427 — let several solvers each reserve and fill a tranche of srcAmount instead of one " +
+      "solver taking it all. Progress is reported in `fillProgress`; `state` stays open until fully filled.",
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  allowPartialFill?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      "Smallest tranche (source base units) a solver may reserve when allowPartialFill is true. " +
+      "The final tranche may be smaller when the remainder itself is. Defaults to 1; must be ≤ srcAmount.",
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[1-9]\d*$/)
+  @MaxLength(78)
+  minFillAmount?: string;
 }

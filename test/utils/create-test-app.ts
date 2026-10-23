@@ -37,8 +37,11 @@ export class MockPrismaService {
 }
 
 /**
- * @param configure optional hook to override further providers before the
- *   module compiles (e.g. swap a Redis-backed store for an in-memory one).
+ * Boot the full AppModule for an e2e suite.
+ *
+ * `configure` may add further provider overrides — e.g. a fake Horizon-backed
+ * reader for the destination preflight (issue #439) or swapping a Redis-backed
+ * store for an in-memory one — on top of the default PrismaService stand-in.
  */
 export async function createTestApp(
   configure: (builder: TestingModuleBuilder) => TestingModuleBuilder = (builder) => builder,

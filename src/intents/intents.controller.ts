@@ -7,6 +7,7 @@ import {
   Get,
   GoneException,
   NotFoundException,
+  Optional,
   Param,
   Post,
   Query,
@@ -74,6 +75,12 @@ import { KillSwitchOperation } from "../killswitch/killswitch.types";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
+import {
+  DestinationPreflightError,
+  DestinationPreflightService,
+  destinationPreflightMessage,
+} from "../soroban/destination-preflight.service";
+import { PartialFillService } from "./partial-fills/partial-fill.service";
 
 @ApiTags("intents")
 @Controller({ path: "intents", version: "1" })
@@ -86,8 +93,48 @@ export class IntentsController {
     private readonly routingService: RoutingService,
     private readonly killSwitch: KillSwitchService,
     config: ConfigService<AppConfig, true>,
+    /**
+     * Destination account / trustline preflight (issue #439). `@Optional()`
+     * so the unit harnesses that construct this controller positionally keep
+     * working; when absent (or `DST_PREFLIGHT_ENABLED=false`) no check runs.
+     */
+    @Optional() private readonly destinationPreflight?: DestinationPreflightService,
+    /** Partial fills (issue #427). `@Optional()` for the same reason as above. */
+    @Optional() private readonly partialFills?: PartialFillService,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
+    this.partialFillsEnabled = config.get("partialFills", { infer: true })?.enabled ?? true;
+  }
+
+  /** `PARTIAL_FILLS_ENABLED` (issue #427). */
+  private readonly partialFillsEnabled: boolean;
+
+  /**
+   * Validate and normalise the partial-fill terms of a create request
+   * (issue #427). Returns the fields to persist; empty for ordinary intents.
+   */
+  private partialFillTerms(dto: Pick<CreateIntentDto, "allowPartialFill" | "minFillAmount" | "srcAmount">):
+    Pick<Intent, "allowPartialFill" | "minFillAmount"> {
+    if (!dto.allowPartialFill) {
+      if (dto.minFillAmount !== undefined) {
+        throw new BadRequestException("minFillAmount requires allowPartialFill: true");
+      }
+      return {};
+    }
+    if (!this.partialFillsEnabled || !this.partialFills) {
+      throw new BadRequestException("Partial fills are disabled on this deployment");
+    }
+    const minFill = dto.minFillAmount ?? "1";
+    if (BigInt(minFill) > BigInt(dto.srcAmount)) {
+      throw new BadRequestException("minFillAmount may not exceed srcAmount");
+    }
+    return { allowPartialFill: true, minFillAmount: minFill };
+  }
+
+  /** Attach `fillProgress` to partial-fill intents (issue #427). */
+  private async decorate<T extends Intent | Intent[]>(value: T): Promise<T> {
+    if (!this.partialFills) return value;
+    return (await this.partialFills.withProgress(value as Intent & Intent[])) as T;
   }
 
   /** Canary addresses (issue #496). */
@@ -117,6 +164,34 @@ export class IntentsController {
     );
   }
 
+  /**
+   * Issue #439 — accept-time destination re-check. On failure the user is
+   * notified (WS `intent_destination_invalid`, which also fans out to
+   * webhooks) and an audit entry records why the accept was refused; the
+   * intent stays open so the user can repair the trustline before the
+   * deadline.
+   */
+  private async assertDestinationStillDeliverable(intent: Intent): Promise<void> {
+    if (!this.destinationPreflight) return;
+    const result = await this.destinationPreflight.check(
+      intent.user,
+      intent.dstToken.contract,
+      intent.minDstAmount,
+      { fresh: true },
+    );
+    if (result.ok) return;
+    this.intentsService.appendAuditEntry(intent.intentId, intent.state, "system", "destination preflight failed", {
+      code: result.code,
+    });
+    await this.intentsGateway.broadcast({
+      type: "intent_destination_invalid",
+      intentId: intent.intentId,
+      user: intent.user,
+      code: result.code,
+    });
+    throw new DestinationPreflightError(result.code, result.detail);
+  }
+
   @Get()
   @ApiBadRequestResponse({ description: "Invalid limit or offset" })
   async list(@Query() dto: ListIntentsDto) {
@@ -133,7 +208,7 @@ export class IntentsController {
       throw new BadRequestException("Limit exceeds maximum allowed value of 100");
     }
 
-    const page = intents.slice(offset, offset + limit);
+    const page = await this.decorate(intents.slice(offset, offset + limit));
     return { intents: page, total: intents.length, limit, offset };
   }
 
@@ -147,7 +222,7 @@ export class IntentsController {
       throw new BadRequestException("Limit exceeds maximum allowed value of 100");
     }
 
-    const page = open.slice(offset, offset + limit);
+    const page = await this.decorate(open.slice(offset, offset + limit));
     return { intents: page, total: open.length, count: open.length, limit, offset };
   }
 
@@ -161,7 +236,7 @@ export class IntentsController {
       throw new BadRequestException("Limit exceeds maximum allowed value of 100");
     }
 
-    const page = intents.slice(offset, offset + limit);
+    const page = await this.decorate(intents.slice(offset, offset + limit));
     return { intents: page, total: intents.length, count: intents.length, limit, offset };
   }
 
@@ -170,7 +245,7 @@ export class IntentsController {
   async getOne(@Param("id") id: string) {
     const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
-    return intent;
+    return this.decorate(intent);
   }
 
   /**
@@ -254,6 +329,11 @@ export class IntentsController {
       "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)",
   })
   @ApiBadRequestResponse({ description: "Invalid request body" })
+  @ApiUnprocessableEntityResponse({
+    description:
+      "Destination preflight failed (issue #439). `code` is one of DST_ACCOUNT_NOT_FOUND, " +
+      "DST_TRUSTLINE_MISSING, DST_TRUSTLINE_LIMIT, DST_NOT_AUTHORIZED",
+  })
   @ApiConflictResponse({
     description: `Open-intent cap reached — a single user may not hold more than ${MAX_OPEN_INTENTS_PER_USER} open/accepted intents simultaneously`,
   })
@@ -278,6 +358,11 @@ export class IntentsController {
       dto.srcTokenAddress,
     );
     const dstToken = await this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract);
+    const partialTerms = this.partialFillTerms(dto);
+
+    // Issue #439: an intent the user's account cannot receive must never reach
+    // the open book — a solver would burn funds on a fill that cannot land.
+    await this.destinationPreflight?.assertDeliverable(dto.user, dto.dstTokenContract, dto.minDstAmount);
 
     const intent = await this.intentsService.create(
       {
@@ -300,11 +385,12 @@ export class IntentsController {
         },
         minDstAmount: dto.minDstAmount,
         deadline: dto.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[dto.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
+        ...partialTerms,
       },
       dto.idempotencyKey,
     );
     this.intentsGateway.broadcast({ type: "intent_created", intent });
-    return intent;
+    return this.decorate(intent);
   }
 
   /**
@@ -396,6 +482,36 @@ export class IntentsController {
         },
         minDstAmount: itemDto.minDstAmount,
         deadline: itemDto.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[itemDto.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
+        ...this.partialFillTerms(itemDto),
+      });
+    }
+
+    // Issue #439: preflight every destination before anything is written, so
+    // the batch stays all-or-nothing.
+    const preflightErrors: { index: number; field: string; code: string; message: string }[] = [];
+    if (this.destinationPreflight) {
+      for (let i = 0; i < items.length; i++) {
+        const check = await this.destinationPreflight.check(
+          items[i].user,
+          items[i].dstToken.contract,
+          items[i].minDstAmount,
+        );
+        if (!check.ok) {
+          preflightErrors.push({
+            index: i,
+            field: "user",
+            code: check.code,
+            message: destinationPreflightMessage(check.code),
+          });
+        }
+      }
+    }
+    if (preflightErrors.length > 0) {
+      throw new UnprocessableEntityException({
+        statusCode: 422,
+        message: "Batch intent creation failed validation",
+        created: [],
+        errors: preflightErrors,
       });
     }
 
@@ -424,6 +540,9 @@ export class IntentsController {
   @ApiConflictResponse({ description: "Intent is not in open state" })
   @ApiGoneResponse({ description: "Intent has expired" })
   @ApiForbiddenResponse({ description: "Solver not registered or inactive" })
+  @ApiUnprocessableEntityResponse({
+    description: "Destination can no longer receive the delivery (trustline removed, de-authorized, …)",
+  })
   async accept(@Param("id") id: string, @Body() dto: AcceptIntentDto) {
     // Fast-path snapshot only — guards below are advisory. The atomic
     // decision is the conditional `acceptIfOpen` write (state=open AND
@@ -436,6 +555,13 @@ export class IntentsController {
     // is loaded, otherwise a chain- or token-scoped pause would not stop
     // accepts. Deliberately placed after the 404 so an unknown id still 404s.
     this.assertIntentNotPaused(intent, "accept");
+
+    // Issue #427: a partial-fill intent is taken in tranches, never whole.
+    if (intent.allowPartialFill) {
+      throw new ConflictException(
+        "Intent allows partial fills — reserve a tranche via POST /intents/:id/reservations",
+      );
+    }
 
     const now = Math.floor(Date.now() / 1000);
     if (intent.deadline <= now) {
@@ -463,6 +589,10 @@ export class IntentsController {
     if (isCanaryIntent(intent, this.canary) !== this.canary.has(dto.solver)) {
       throw new ForbiddenException("Canary intents may only be accepted by canary solvers, and vice versa");
     }
+
+    // Issue #439: re-check the destination, bypassing the cache — the user may
+    // have removed the trustline since creation.
+    await this.assertDestinationStillDeliverable(intent);
 
     const updated = await this.intentsService.acceptIfOpen(id, dto.solver, now);
     if (!updated) {
@@ -500,6 +630,11 @@ export class IntentsController {
     // Same reason as in `accept`: the route guard cannot resolve the intent's
     // chain/token from `:id`, so re-assert against the loaded record.
     this.assertIntentNotPaused(intent, "fill");
+    if (intent.allowPartialFill) {
+      throw new ConflictException(
+        "Intent allows partial fills — fill a reserved tranche via POST /intents/:id/reservations/:fillId/fill",
+      );
+    }
 
     const now = Math.floor(Date.now() / 1000);
     if (intent.deadline <= now) {
@@ -573,6 +708,21 @@ export class IntentsController {
 
     // Verify the user controls the claimed address
     verifyStellarSignature(dto.user, buildCancelMessage(id), dto.signature);
+
+    // Issue #427: cancelling a partially filled intent cancels the remainder
+    // and settles it as filled; outstanding reservations block the cancel.
+    if (intent.allowPartialFill && this.partialFills) {
+      const outcome = await this.partialFills.cancelRemainder(intent, dto.user, Math.floor(Date.now() / 1000));
+      if (!outcome.intent) {
+        const current = await this.intentsService.get(id);
+        throw new ConflictException(`Cannot cancel intent in state: ${current?.state ?? "unknown"}`);
+      }
+      if (!outcome.settled) {
+        this.intentsService.appendAuditEntry(id, "cancelled", dto.user, "user cancelled");
+        this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
+      }
+      return this.decorate(outcome.intent);
+    }
 
     // Audit trail (issue #217 / #406): the service records who cancelled.
     const updated = await this.intentsService.cancelIfOpen(id, { actor: dto.user, reason: "user cancelled" });

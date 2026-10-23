@@ -1,0 +1,111 @@
+# Log-based security alerts (issue #488).
+#
+# Evaluated by the Loki ruler (ops/observability/loki.yml). The `fake/`
+# directory is Loki's tenant id when auth_enabled is false; in a multi-tenant
+# deployment copy this file under the real tenant id.
+#
+# Every rule keys on the stable `event` field of the structured log schema
+# (docs/observability/logging.md, src/common/log-schema.ts LOG_EVENTS), never
+# on message text, so rewording a log line cannot silently blind an alert.
+#
+# Thresholds are starting points for a single-region deployment; tune them per
+# environment from the `vortex-security-recording` series below rather than by
+# editing the alert expressions.
+groups:
+  - name: vortex-security-recording
+    interval: 1m
+    rules:
+      - record: vortex:log_signature_failures:rate5m
+        expr: |
+          sum(rate({service_name="vortex-backend"} | json | event="security.signature_failure" [5m]))
+      - record: vortex:log_admin_actions:count1h
+        expr: |
+          sum(count_over_time({service_name="vortex-backend"} | json | event="admin.action" [1h]))
+
+  - name: vortex-security
+    interval: 1m
+    rules:
+      # Signature failures are normal at a low rate (wallet bugs, clock-skewed
+      # retries). A spike means forged accept/fill/cancel attempts or a broken
+      # client release.
+      - alert: VortexSignatureFailureSpike
+        expr: |
+          sum(count_over_time({service_name="vortex-backend"} | json | event="security.signature_failure" [5m])) > 50
+        for: 5m
+        labels:
+          severity: page
+          category: security
+        annotations:
+          summary: "Signature verification failures spiking (>50 in 5m)"
+          description: |
+            Ed25519/EIP-712 signature checks on intent accept/fill/cancel/amend are
+            failing at an unusual rate. Break down by signer with
+            `{service_name="vortex-backend"} | json | event="security.signature_failure"`
+            and see docs/runbooks/security-log-alerts.md#signature-failure-spike.
+
+      # Many failures against one address is a targeted attempt, even when the
+      # global rate is unremarkable.
+      - alert: VortexSignatureFailuresSingleSigner
+        expr: |
+          sum by (signer) (count_over_time({service_name="vortex-backend"} | json | event="security.signature_failure" [10m])) > 20
+        for: 0m
+        labels:
+          severity: ticket
+          category: security
+        annotations:
+          summary: "Repeated signature failures for signer {{ $labels.signer }}"
+          description: "More than 20 rejected signatures claiming one address in 10m. See docs/runbooks/security-log-alerts.md#single-signer."
+
+      # The signer policy is the last line of defence before the service signs
+      # a transaction. Any denial means something upstream tried to get a
+      # transaction signed that the policy forbids.
+      - alert: VortexSignerPolicyViolation
+        expr: |
+          sum(count_over_time({service_name="vortex-backend"} | json | event="security.signer_policy_violation" [5m])) > 0
+        for: 0m
+        labels:
+          severity: page
+          category: security
+        annotations:
+          summary: "Signer policy denied a transaction"
+          description: |
+            The signer policy rejected at least one transaction in the last 5m. Inspect
+            `reason` and `wallet` on the matching records. See
+            docs/runbooks/security-log-alerts.md#signer-policy-violation.
+
+      - alert: VortexAdminAuthFailures
+        expr: |
+          sum(count_over_time({service_name="vortex-backend"} | json | event="security.admin_auth_failure" [5m])) > 10
+        for: 0m
+        labels:
+          severity: page
+          category: security
+        annotations:
+          summary: "Repeated admin authentication failures"
+          description: "More than 10 rejected admin-key attempts in 5m — possible key guessing. See docs/runbooks/security-log-alerts.md#admin-auth-failures."
+
+      # Admin actions are rare and human-paced. A burst is either an incident
+      # being worked (expected, ack it) or a leaked key being used.
+      - alert: VortexAdminActionAnomaly
+        expr: |
+          sum(count_over_time({service_name="vortex-backend"} | json | event="admin.action" [15m])) > 25
+        for: 0m
+        labels:
+          severity: page
+          category: security
+        annotations:
+          summary: "Unusual burst of admin actions (>25 in 15m)"
+          description: "Check `actor` and `action` on the matching admin.action records against the incident log. See docs/runbooks/security-log-alerts.md#admin-action-anomaly."
+
+      # Admin actions by more than one actor are normal; many distinct targets
+      # touched by a single actor quickly is not.
+      - alert: VortexAdminActionFanOut
+        expr: |
+          count by (actor) (sum by (actor, target) (count_over_time({service_name="vortex-backend"} | json | event="admin.action" [15m]))) > 10
+        for: 0m
+        labels:
+          severity: ticket
+          category: security
+        annotations:
+          summary: "Admin {{ $labels.actor }} changed more than 10 targets in 15m"
+          description: "See docs/runbooks/security-log-alerts.md#admin-action-anomaly."
