@@ -6,9 +6,14 @@ import {
   JobEvents,
   JobHandler,
   JobQueueDriver,
+  JobResult,
+  JobSchedule,
   QueueSettings,
   QueueStats,
 } from "./jobs.types";
+
+/** Mirrors BullMQ's COMPLETED_RETENTION_SECONDS so both drivers age out results alike. */
+const COMPLETED_RETENTION_SECONDS = 86_400;
 
 interface MemJob {
   id: string;
@@ -17,6 +22,23 @@ interface MemJob {
   attempt: number;
   idempotencyKey?: string;
   priority?: number;
+}
+
+interface MemDeadLetter extends DeadLetter {
+  /** Original definition, kept so a retry can re-run with the full attempts budget. */
+  def: JobDefinition;
+}
+
+interface MemResult {
+  status: "pending" | "active" | "completed" | "failed";
+  result?: unknown;
+  error?: string;
+  expiresAt: number;
+}
+
+interface MemSchedule {
+  timer: NodeJS.Timeout;
+  everyMs: number;
 }
 
 interface MemQueue {
@@ -29,12 +51,17 @@ interface MemQueue {
   active: Map<string, MemJob>;
   inFlight: Set<Promise<void>>;
   handlers: Map<string, { handler: JobHandler<unknown>; events: JobEvents }>;
-  dlq: DeadLetter[];
+  dlq: MemDeadLetter[];
   /** Start timestamps inside the current rate-limit window. */
   rateWindow: number[];
   rateTimer?: NodeJS.Timeout;
   pumpScheduled?: boolean;
 }
+
+const NOOP_EVENTS: JobEvents = {
+  onComplete: () => undefined,
+  onFailure: () => undefined,
+};
 
 /**
  * Single-process, non-durable driver for development and tests. Implements
@@ -45,12 +72,17 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
   private readonly logger = new Logger(MemoryJobQueueDriver.name);
   private readonly queueMap = new Map<string, MemQueue>();
   private readonly idempotency = new Map<string, string>();
-  private readonly schedules = new Map<string, NodeJS.Timeout>();
+  private readonly schedules = new Map<string, MemSchedule>();
+  private readonly results = new Map<string, MemResult>();
   private seq = 0;
   private closing = false;
 
   defineQueue(queue: string, settings: QueueSettings): void {
-    if (this.queueMap.has(queue)) return;
+    const existing = this.queueMap.get(queue);
+    if (existing) {
+      existing.settings = settings;
+      return;
+    }
     this.queueMap.set(queue, {
       settings,
       waiting: [],
@@ -65,7 +97,39 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
     });
   }
 
-  async enqueue<T>(def: JobDefinition<T>, data: T, opts: EnqueueOptions = {}): Promise<string> {
+  register<T, R = unknown>(queue: string, def: JobDefinition<T, R>, handler: JobHandler<T, R>): void {
+    this.defineQueue(queue, { concurrency: 1 });
+    this.process(def, handler, NOOP_EVENTS);
+  }
+
+  async start(queue: string, settings: QueueSettings): Promise<void> {
+    this.defineQueue(queue, settings);
+    this.pump(queue);
+  }
+
+  async enqueue<T>(
+    defOrQueue: JobDefinition<T> | string,
+    dataOrDef: T | JobDefinition<T> | string,
+    optsOrData?: EnqueueOptions | T,
+    maybeOpts?: EnqueueOptions,
+  ): Promise<string> {
+    let def: JobDefinition<T>;
+    let data: T;
+    let opts: EnqueueOptions;
+    if (typeof defOrQueue === "string") {
+      if (typeof dataOrDef === "object" && dataOrDef !== null && "queue" in dataOrDef && "name" in dataOrDef) {
+        def = dataOrDef as JobDefinition<T>;
+      } else {
+        def = { queue: defOrQueue, name: String(dataOrDef), attempts: 5, backoffMs: 1_000 };
+      }
+      data = optsOrData as T;
+      opts = maybeOpts ?? {};
+    } else {
+      def = defOrQueue;
+      data = dataOrDef as T;
+      opts = (optsOrData as EnqueueOptions | undefined) ?? {};
+    }
+
     const q = this.queue(def.queue);
     const dedupe = opts.idempotencyKey ? `${def.queue}:${opts.idempotencyKey}` : undefined;
     const existing = dedupe ? this.idempotency.get(dedupe) : undefined;
@@ -81,6 +145,7 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
       idempotencyKey: opts.idempotencyKey,
       priority: opts.priority,
     };
+    this.setResult(def.queue, id, { status: "pending" });
     if (opts.delayMs) this.delay(q, def.queue, job, opts.delayMs);
     else {
       q.waiting.push(job);
@@ -89,7 +154,29 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
     return id;
   }
 
-  async schedule<T>(def: JobDefinition<T>, everyMs: number, data: T): Promise<void> {
+  async schedule<T>(
+    defOrQueue: JobDefinition<T> | string,
+    everyMsOrDefOrOpts: number | JobDefinition<T> | { everyMs: number; data: T },
+    dataOrOpts?: T | { everyMs: number; data: T },
+  ): Promise<void> {
+    let def: JobDefinition<T>;
+    let everyMs: number;
+    let data: T;
+    if (typeof defOrQueue === "string") {
+      def = everyMsOrDefOrOpts as JobDefinition<T>;
+      const o = dataOrOpts as { everyMs: number; data: T };
+      everyMs = o.everyMs;
+      data = o.data;
+    } else if (typeof everyMsOrDefOrOpts === "object" && everyMsOrDefOrOpts !== null && "everyMs" in everyMsOrDefOrOpts) {
+      def = defOrQueue;
+      everyMs = everyMsOrDefOrOpts.everyMs;
+      data = everyMsOrDefOrOpts.data;
+    } else {
+      def = defOrQueue;
+      everyMs = everyMsOrDefOrOpts as number;
+      data = dataOrOpts as T;
+    }
+
     const key = `${def.queue}:${def.name}`;
     if (this.schedules.has(key)) return;
     const timer = setInterval(() => {
@@ -98,10 +185,29 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
       void this.enqueue(def, data);
     }, everyMs);
     timer.unref?.();
-    this.schedules.set(key, timer);
+    this.schedules.set(key, { timer, everyMs });
   }
 
-  process<T>(def: JobDefinition<T>, handler: JobHandler<T>, events: JobEvents): void {
+  async listSchedules(queue: string): Promise<JobSchedule[]> {
+    const prefix = `${queue}:`;
+    const out: JobSchedule[] = [];
+    for (const [key, sched] of this.schedules) {
+      if (!key.startsWith(prefix)) continue;
+      out.push({ name: key.slice(prefix.length), everyMs: sched.everyMs });
+    }
+    return out;
+  }
+
+  async unschedule(queue: string, name: string): Promise<boolean> {
+    const key = `${queue}:${name}`;
+    const sched = this.schedules.get(key);
+    if (!sched) return false;
+    clearInterval(sched.timer);
+    this.schedules.delete(key);
+    return true;
+  }
+
+  process<T, R = unknown>(def: JobDefinition<T, R>, handler: JobHandler<T, R>, events: JobEvents): void {
     this.queue(def.queue).handlers.set(def.name, {
       handler: handler as JobHandler<unknown>,
       events,
@@ -121,7 +227,10 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
   }
 
   async deadLetters(queue: string, limit = 100): Promise<DeadLetter[]> {
-    return this.queue(queue).dlq.slice(-limit).reverse();
+    return this.queue(queue)
+      .dlq.slice(-limit)
+      .reverse()
+      .map(({ def: _def, ...rest }) => rest);
   }
 
   async cancel(queue: string, jobId: string): Promise<boolean> {
@@ -143,9 +252,36 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
     return false;
   }
 
-  async close(timeoutMs: number): Promise<void> {
+  async retryDeadLetter(queue: string, jobId: string): Promise<boolean> {
+    if (!this.queueMap.has(queue)) return false;
+    const q = this.queue(queue);
+    const idx = q.dlq.findIndex((d) => d.jobId === jobId);
+    if (idx === -1) return false;
+    const [entry] = q.dlq.splice(idx, 1);
+    // Fresh attempt counter so the retry gets the full attempts budget again.
+    const job: MemJob = { id: entry.jobId, def: entry.def, data: entry.data, attempt: 1 };
+    this.setResult(queue, job.id, { status: "pending" });
+    q.waiting.push(job);
+    this.pump(queue);
+    return true;
+  }
+
+  async getResult(queue: string, jobId: string): Promise<JobResult> {
+    if (this.queueMap.has(queue)) {
+      this.queue(queue);
+    }
+    const entry = this.results.get(jobId);
+    if (!entry || entry.expiresAt <= Date.now()) {
+      if (entry) this.results.delete(jobId);
+      return { status: "pending" };
+    }
+    const { expiresAt: _expiresAt, ...rest } = entry;
+    return rest;
+  }
+
+  async close(timeoutMs = 1_000): Promise<void> {
     this.closing = true;
-    for (const timer of this.schedules.values()) clearInterval(timer);
+    for (const sched of this.schedules.values()) clearInterval(sched.timer);
     const inFlight = [...this.queueMap.values()].flatMap((q) => [...q.inFlight]);
     let timeout: NodeJS.Timeout | undefined;
     await Promise.race([
@@ -168,6 +304,21 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
 
   queues(): string[] {
     return [...this.queueMap.keys()];
+  }
+
+  private setResult(queue: string, jobId: string, update: Omit<MemResult, "expiresAt">): void {
+    this.evictExpiredResults();
+    this.results.set(jobId, {
+      ...update,
+      expiresAt: Date.now() + COMPLETED_RETENTION_SECONDS * 1000,
+    });
+  }
+
+  private evictExpiredResults(): void {
+    const now = Date.now();
+    for (const [id, entry] of this.results) {
+      if (entry.expiresAt <= now) this.results.delete(id);
+    }
   }
 
   private queue(name: string): MemQueue {
@@ -259,25 +410,31 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
   private async run(q: MemQueue, queue: string, job: MemJob): Promise<void> {
     const { handler, events } = q.handlers.get(job.def.name)!;
     const started = Date.now();
+    this.setResult(queue, job.id, { status: "active" });
     try {
-      await handler(job.data, { jobId: job.id, attempt: job.attempt });
+      const result = await handler(job.data, { jobId: job.id, attempt: job.attempt });
       if (!q.active.delete(job.id)) return; // returned to the queue by close()
+      this.setResult(queue, job.id, { status: "completed", result });
       events.onComplete(job.def, Date.now() - started);
     } catch (err) {
       if (!q.active.delete(job.id)) return;
       const willRetry = job.attempt < job.def.attempts;
       events.onFailure(job.def, Date.now() - started, willRetry);
       if (willRetry) {
+        this.setResult(queue, job.id, { status: "pending" });
         const backoff = job.def.backoffMs * 2 ** (job.attempt - 1);
         this.delay(q, queue, { ...job, attempt: job.attempt + 1 }, backoff);
       } else {
+        const error = err instanceof Error ? err.message : String(err);
+        this.setResult(queue, job.id, { status: "failed", error });
         q.dlq.push({
           jobId: job.id,
           name: job.def.name,
           data: job.data,
-          error: err instanceof Error ? err.message : String(err),
+          error,
           attempts: job.attempt,
           failedAt: new Date().toISOString(),
+          def: job.def,
         });
       }
     }

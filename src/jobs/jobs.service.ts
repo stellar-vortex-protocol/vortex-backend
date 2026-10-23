@@ -16,6 +16,8 @@ import {
   JobEvents,
   JobHandler,
   JobQueueDriver,
+  JobResult,
+  JobSchedule,
   QueueSettings,
   QueueStats,
 } from "./jobs.types";
@@ -111,12 +113,15 @@ export class JobsService implements OnApplicationShutdown {
   }
 
   /** Enqueues `def` every `everyMs`. Safe to call from every instance. */
-  schedule<T>(def: JobDefinition<T>, everyMs: number, data: T): Promise<void> {
-    return this.driver.schedule(def, everyMs, data);
+  schedule<T>(def: JobDefinition<T>, everyMsOrOpts: number | { everyMs: number; data: T }, maybeData?: T): Promise<void> {
+    if (typeof everyMsOrOpts === "object") {
+      return this.driver.schedule(def, everyMsOrOpts.everyMs, everyMsOrOpts.data);
+    }
+    return this.driver.schedule(def, everyMsOrOpts, maybeData as T);
   }
 
   /** Registers the handler for `def` — only in worker-capable roles. */
-  process<T>(def: JobDefinition<T>, handler: JobHandler<T>): void {
+  process<T, R = unknown>(def: JobDefinition<T, R>, handler: JobHandler<T, R>): void {
     if (!this.isWorker) {
       this.logger.debug(`[jobs] PROCESS_ROLE=api — not consuming ${def.queue}/${def.name}`);
       return;
@@ -126,12 +131,6 @@ export class JobsService implements OnApplicationShutdown {
 
   /**
    * Registers the daily credential expiry-warning sweep (issue #708).
-   *
-   * Reuses the shared job-queue infrastructure rather than a bespoke
-   * `setInterval`: the job is scheduled once per day and processed only in
-   * worker-capable roles. Credentials already warned about are excluded by
-   * the repository query and marked via `markExpiryWarned`, so the same
-   * credential is not re-alerted every day inside the window.
    */
   registerExpiryWarningJob(): void {
     const def: JobDefinition<ExpiryWarningJobData> = {
@@ -192,6 +191,29 @@ export class JobsService implements OnApplicationShutdown {
    */
   cancel(queue: string, jobId: string): Promise<boolean> {
     return this.driver.cancel(queue, jobId);
+  }
+
+  /**
+   * Re-enqueues a dead-lettered job for another attempt (issue #693).
+   * Returns false when no dead-letter record matches `jobId`.
+   */
+  retryDeadLetter(queue: string, jobId: string): Promise<boolean> {
+    return this.driver.retryDeadLetter(queue, jobId);
+  }
+
+  /** Looks up the status/result of a previously enqueued job (issue #694). */
+  getResult(queue: string, jobId: string): Promise<JobResult> {
+    return this.driver.getResult(queue, jobId);
+  }
+
+  /** Lists the repeating schedules registered on `queue` (issue #695). */
+  listSchedules(queue: string): Promise<JobSchedule[]> {
+    return this.driver.listSchedules(queue);
+  }
+
+  /** Cancels a repeating schedule; false when no such schedule exists (issue #695). */
+  unschedule(queue: string, name: string): Promise<boolean> {
+    return this.driver.unschedule(queue, name);
   }
 
   queues(): string[] {

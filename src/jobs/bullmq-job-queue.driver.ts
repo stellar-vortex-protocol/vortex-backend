@@ -7,6 +7,8 @@ import {
   JobEvents,
   JobHandler,
   JobQueueDriver,
+  JobResult,
+  JobSchedule,
   QueueSettings,
   QueueStats,
 } from "./jobs.types";
@@ -99,7 +101,29 @@ export class BullMqJobQueueDriver implements JobQueueDriver {
     }
   }
 
-  async schedule<T>(def: JobDefinition<T>, everyMs: number, data: T): Promise<void> {
+  async schedule<T>(
+    defOrQueue: JobDefinition<T> | string,
+    everyMsOrDefOrOpts: number | JobDefinition<T> | { everyMs: number; data: T },
+    dataOrOpts?: T | { everyMs: number; data: T },
+  ): Promise<void> {
+    let def: JobDefinition<T>;
+    let everyMs: number;
+    let data: T;
+    if (typeof defOrQueue === "string") {
+      def = everyMsOrDefOrOpts as JobDefinition<T>;
+      const opts = dataOrOpts as { everyMs: number; data: T };
+      everyMs = opts.everyMs;
+      data = opts.data;
+    } else if (typeof everyMsOrDefOrOpts === "number") {
+      def = defOrQueue;
+      everyMs = everyMsOrDefOrOpts;
+      data = dataOrOpts as T;
+    } else {
+      def = defOrQueue;
+      const opts = everyMsOrDefOrOpts as { everyMs: number; data: T };
+      everyMs = opts.everyMs;
+      data = opts.data;
+    }
     await this.entry(def.queue).queue.upsertJobScheduler(
       def.name,
       { every: everyMs },
@@ -133,6 +157,12 @@ export class BullMqJobQueueDriver implements JobQueueDriver {
               error: err instanceof Error ? err.message : String(err),
               attempts: job.attemptsMade + 1,
               failedAt: new Date().toISOString(),
+              def: {
+                queue: entry.def.queue,
+                name: entry.def.name,
+                attempts: entry.def.attempts,
+                backoffMs: entry.def.backoffMs,
+              },
             });
           }
           throw err;
@@ -174,7 +204,63 @@ export class BullMqJobQueueDriver implements JobQueueDriver {
     }));
   }
 
-  async close(timeoutMs: number): Promise<void> {
+  async retryDeadLetter(name: string, jobId: string): Promise<boolean> {
+    const { queue, dlq } = this.entry(name);
+    const jobs = await dlq.getJobs(["waiting", "delayed", "prioritized", "failed", "completed"]);
+    const dlJob = jobs.find((job) => String(job.data?.jobId) === jobId);
+    if (!dlJob) return false;
+
+    const stored = dlJob.data?.def as Partial<JobDefinition> | undefined;
+    const registered = this.handlers.get(name)?.get(dlJob.name)?.def;
+    const def: JobDefinition = {
+      queue: stored?.queue ?? registered?.queue ?? name,
+      name: stored?.name ?? registered?.name ?? dlJob.name,
+      attempts: stored?.attempts ?? registered?.attempts ?? 1,
+      backoffMs: stored?.backoffMs ?? registered?.backoffMs ?? 0,
+    };
+
+    // Re-enqueue with a fresh job id so the attempt counter resets to the full budget.
+    await queue.add(def.name, dlJob.data?.data, this.jobOptions(def));
+    await dlJob.remove();
+    return true;
+  }
+
+  async getResult(name: string, jobId: string): Promise<JobResult> {
+    const { queue } = this.entry(name);
+    const job = await queue.getJob(jobId);
+    if (!job) return { status: "pending" };
+
+    const state = await job.getState();
+    switch (state) {
+      case "completed":
+        return { status: "completed", result: job.returnvalue };
+      case "failed":
+        return { status: "failed", error: job.failedReason };
+      case "active":
+        return { status: "active" };
+      default:
+        return { status: "pending" };
+    }
+  }
+
+  async listSchedules(name: string): Promise<JobSchedule[]> {
+    const schedulers = await this.entry(name).queue.getJobSchedulers();
+    return schedulers.map((scheduler) => ({
+      name: scheduler.name ?? scheduler.key,
+      everyMs: typeof scheduler.every === "number" ? scheduler.every : Number(scheduler.every) || 0,
+    }));
+  }
+
+  async unschedule(name: string, scheduleName: string): Promise<boolean> {
+    const { queue } = this.entry(name);
+    const schedulers = await queue.getJobSchedulers();
+    const exists = schedulers.some((scheduler) => (scheduler.name ?? scheduler.key) === scheduleName);
+    if (!exists) return false;
+    await queue.removeJobScheduler(scheduleName);
+    return true;
+  }
+
+  async close(timeoutMs = 1_000): Promise<void> {
     await Promise.all(
       [...this.workers.entries()].map(async ([name, worker]) => {
         let timeout: NodeJS.Timeout | undefined;

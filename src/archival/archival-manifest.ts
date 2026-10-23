@@ -21,13 +21,16 @@ export interface ManifestFile {
   /** S3 key relative to the bucket root. */
   key: string;
   /** File type: "intents" | "audit". */
-  type: "intents" | "audit";
+  type?: "intents" | "audit";
+  kind?: "intents" | "audit";
   /** Number of rows in this file. */
-  rowCount: number;
+  rowCount?: number;
+  rows?: number;
   /** SHA-256 hex digest of the file's raw bytes. */
   sha256: string;
   /** File size in bytes. */
-  sizeBytes: number;
+  sizeBytes?: number;
+  bytes?: number;
 }
 
 /** Compute the SHA-256 hex digest of a buffer. */
@@ -54,9 +57,10 @@ export async function verifyManifest(
         `Manifest checksum mismatch for ${file.key}: expected ${file.sha256}, got ${actual}`,
       );
     }
-    if (data.length !== file.sizeBytes) {
+    const expectedSize = file.sizeBytes ?? file.bytes;
+    if (expectedSize !== undefined && data.length !== expectedSize) {
       throw new Error(
-        `Manifest size mismatch for ${file.key}: expected ${file.sizeBytes} bytes, got ${data.length}`,
+        `Manifest size mismatch for ${file.key}: expected ${expectedSize} bytes, got ${data.length}`,
       );
     }
   }

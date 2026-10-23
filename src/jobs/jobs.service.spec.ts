@@ -246,6 +246,157 @@ describe("JobsService cancellation", () => {
     (driver as unknown as { queue: unknown }).queue = { getJob };
 
     expect(await driver.cancel("test", "missing")).toBe(false);
+describe("JobsService dead-letter retry", () => {
+  let service: JobsService;
+  let driver: MemoryJobQueueDriver;
+
+  beforeEach(() => {
+    driver = new MemoryJobQueueDriver();
+    service = new JobsService(config(), undefined, driver);
+    service.defineQueue("test", { concurrency: 1 });
+  });
+
+  afterEach(() => service.onApplicationShutdown());
+
+  it("re-enqueues a dead-lettered job with a fresh attempt budget", async () => {
+    let fail = true;
+    const attempts: number[] = [];
+    service.process(JOB, async (_data, ctx) => {
+      attempts.push(ctx.attempt);
+      if (fail) throw new Error("boom");
+    });
+
+    const id = await service.enqueue(JOB, { n: 1 });
+    await waitFor(async () => (await service.deadLetters("test")).length === 1);
+    expect(attempts).toEqual([1, 2, 3]);
+
+    fail = false;
+    const retried = await service.retryDeadLetter("test", id);
+    expect(retried).toBe(true);
+
+    await waitFor(() => attempts.length === 4);
+    // attempt counter reset: the retry starts again at attempt 1
+    expect(attempts[3]).toBe(1);
+    await waitFor(async () => (await service.deadLetters("test")).length === 0);
+    expect(await service.retryDeadLetter("test", id)).toBe(false);
+  });
+
+  it("returns false for an unknown job id", async () => {
+    expect(await service.retryDeadLetter("test", "does-not-exist")).toBe(false);
+  });
+});
+
+describe("JobsService result lookup", () => {
+  let service: JobsService;
+
+  beforeEach(() => {
+    service = new JobsService(config(), undefined, new MemoryJobQueueDriver());
+    service.defineQueue("test", { concurrency: 1 });
+  });
+
+  afterEach(() => service.onApplicationShutdown());
+
+  it("reports pending, completed and failed outcomes", async () => {
+    const RESULT_JOB = defineJob<{ n: number }, { doubled: number }>("test", "double");
+    const FAIL_JOB = defineJob<{ n: number }>("test", "fail");
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    service.process(RESULT_JOB, async (data) => {
+      await gate;
+      return { doubled: data.n * 2 };
+    });
+    service.process(FAIL_JOB, async () => {
+      throw new Error("nope");
+    });
+
+    const okId = await service.enqueue(RESULT_JOB, { n: 21 });
+    expect((await service.getResult("test", okId)).status).toBe("pending");
+    release();
+    await waitFor(async () => (await service.getResult("test", okId)).status === "completed");
+    expect(await service.getResult("test", okId)).toMatchObject({ status: "completed", result: { doubled: 42 } });
+
+    const failId = await service.enqueue(FAIL_JOB, { n: 1 });
+    await waitFor(async () => (await service.getResult("test", failId)).status === "failed");
+    expect(await service.getResult("test", failId)).toMatchObject({ status: "failed", error: "nope" });
+
+    expect((await service.getResult("test", "unknown")).status).toBe("pending");
+  });
+});
+
+describe("JobsService schedule management", () => {
+  let service: JobsService;
+
+  beforeEach(() => {
+    service = new JobsService(config(), undefined, new MemoryJobQueueDriver());
+    service.defineQueue("test", { concurrency: 1 });
+  });
+
+  afterEach(() => service.onApplicationShutdown());
+
+  it("lists and cancels schedules", async () => {
+    const handler = jest.fn();
+    service.process(JOB, handler);
+    await service.schedule(JOB, { everyMs: 10_000, data: { n: 1 } });
+
+    expect(await service.listSchedules("test")).toEqual([{ name: "work", everyMs: 10_000 }]);
+    expect(await service.unschedule("test", "work")).toBe(true);
+    expect(await service.listSchedules("test")).toEqual([]);
+    expect(await service.unschedule("test", "work")).toBe(false);
+  });
+});
+
+describe("JobQueueDriver contract (memory driver)", () => {
+  let driver: JobQueueDriver;
+
+  beforeEach(() => {
+    driver = new MemoryJobQueueDriver();
+  });
+
+  afterEach(async () => {
+    await driver.close();
+  });
+
+  it("retries a dead letter and removes it from the DLQ", async () => {
+    const JOB = defineJob<{ n: number }>("q", "work", { attempts: 1 });
+    const handler = jest.fn().mockRejectedValue(new Error("boom"));
+    driver.register("q", JOB, handler);
+    await driver.start("q", { concurrency: 1 });
+
+    const id = await driver.enqueue("q", JOB, { n: 1 });
+    await waitFor(async () => (await driver.deadLetters("q")).length === 1);
+
+    handler.mockResolvedValue(undefined);
+    expect(await driver.retryDeadLetter("q", id)).toBe(true);
+    await waitFor(() => handler.mock.calls.length === 2);
+    await waitFor(async () => (await driver.deadLetters("q")).length === 0);
+    expect(await driver.retryDeadLetter("q", id)).toBe(false);
+  });
+
+  it("reports not-found for an unknown dead letter", async () => {
+    expect(await driver.retryDeadLetter("q", "missing")).toBe(false);
+  });
+
+  it("captures job results and reports status", async () => {
+    const JOB = defineJob<{ n: number }, number>("q", "work");
+    driver.register("q", JOB, async (data) => data.n + 1);
+    await driver.start("q", { concurrency: 1 });
+
+    const id = await driver.enqueue("q", JOB, { n: 1 });
+    await waitFor(async () => (await driver.getResult("q", id)).status === "completed");
+    expect(await driver.getResult("q", id)).toMatchObject({ status: "completed", result: 2 });
+    expect((await driver.getResult("q", "missing")).status).toBe("pending");
+  });
+
+  it("lists and cancels schedules", async () => {
+    const JOB = defineJob<{ n: number }>("q", "work");
+    driver.register("q", JOB, jest.fn());
+    await driver.schedule("q", JOB, { everyMs: 5_000, data: { n: 1 } });
+
+    expect(await driver.listSchedules("q")).toEqual([{ name: "work", everyMs: 5_000 }]);
+    expect(await driver.unschedule("q", "work")).toBe(true);
+    expect(await driver.listSchedules("q")).toEqual([]);
+    expect(await driver.unschedule("q", "work")).toBe(false);
   });
 });
 

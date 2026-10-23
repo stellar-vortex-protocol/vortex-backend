@@ -91,3 +91,46 @@ runs fine against the new schema without rolling it back. If the columns must
 go, apply `prisma/migrations/20260929000000_intent_version_idempotency/down.sql`
 as a change-managed operation (see `prisma/migrations/README.md`).
 `fee_amount` is left in place because `schema.prisma` has always declared it.
+
+## Admin job endpoints
+
+All routes below live on `JobsController` under `/admin/jobs` and use the same
+admin auth guards as the existing dead-letter listing route.
+
+| Method & path | Purpose |
+|---|---|
+| `GET /admin/jobs/queues/:queue/dead-letters` | List dead-lettered jobs (read-only) |
+| `POST /admin/jobs/queues/:queue/dead-letters/:jobId/retry` | Re-enqueue a single dead-lettered job on its source queue and remove it from the DLQ. The retry resets the attempt counter, so the job gets its full `JobDefinition.attempts` budget again. Returns 404 if `jobId` is not in the DLQ. |
+| `GET /admin/jobs/queues/:queue/jobs/:jobId` | Look up a job's status (`pending` / `active` / `completed` / `failed`) plus its `result` or `error`. Results are retained for the same window as BullMQ's completed-job retention; older or unknown ids return a clear "not found" status. |
+
+### Repeating schedules
+
+| Method & path | Purpose |
+|---|---|
+| `GET /admin/jobs/queues/:queue/schedules` | List registered repeating schedules as `{ name, everyMs }[]` |
+| `DELETE /admin/jobs/queues/:queue/schedules/:name` | Cancel a repeating schedule. Returns 404 if no schedule with that name exists. Jobs already enqueued from a previous tick are unaffected. |
+
+## Restoring an archived partition
+
+Restores no longer require shell access to a production host. Enqueue a restore
+as a tracked background job:
+
+```
+POST /admin/archival/restore
+{ "date": "2026-09-01", "schema": "restore_20260901", "dryRun": false }
+```
+
+The endpoint returns a `jobId`. Poll progress with the job-status endpoint:
+
+```
+GET /admin/jobs/queues/<restore-queue>/jobs/<jobId>
+```
+
+The job fetches the date's manifest from S3, downloads the partition, verifies
+its checksum, and imports it into the staging schema. A missing manifest fails
+the job with a clear error rather than hanging. The import uses
+`ON CONFLICT … DO NOTHING`, so concurrent restores of the same date are safe.
+
+`scripts/restore-archive.ts` remains available as a break-glass fallback for
+situations where the API or job queue is unavailable, but it is no longer the
+only path.

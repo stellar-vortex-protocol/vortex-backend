@@ -2,7 +2,7 @@
  * Typed job definition. `TData` is a phantom type binding producers and the
  * handler to the same payload shape; create one with {@link defineJob}.
  */
-export interface JobDefinition<TData = unknown> {
+export interface JobDefinition<TData = unknown, TResult = unknown> {
   /** Job name, unique within its queue. */
   name: string;
   /** Queue the job runs on; per-queue concurrency / rate limits apply. */
@@ -13,15 +13,25 @@ export interface JobDefinition<TData = unknown> {
   backoffMs: number;
   /** @internal phantom field — never set at runtime. */
   readonly __data?: TData;
+  /** @internal phantom field — never set at runtime. */
+  readonly __result?: TResult;
 }
 
 /** Declares a typed job. Payloads must be JSON-serialisable. */
-export function defineJob<TData>(
-  queue: string,
-  name: string,
+export function defineJob<TData = unknown, TResult = unknown>(
+  queueOrOpts: string | { queue: string; name: string; attempts?: number; backoffMs?: number },
+  name?: string,
   opts: { attempts?: number; backoffMs?: number } = {},
-): JobDefinition<TData> {
-  return { queue, name, attempts: opts.attempts ?? 5, backoffMs: opts.backoffMs ?? 1_000 };
+): JobDefinition<TData, TResult> {
+  if (typeof queueOrOpts === "object") {
+    return {
+      queue: queueOrOpts.queue,
+      name: queueOrOpts.name,
+      attempts: queueOrOpts.attempts ?? 5,
+      backoffMs: queueOrOpts.backoffMs ?? 1_000,
+    };
+  }
+  return { queue: queueOrOpts, name: name ?? "", attempts: opts.attempts ?? 5, backoffMs: opts.backoffMs ?? 1_000 };
 }
 
 /** Per-queue worker settings. */
@@ -55,7 +65,15 @@ export interface JobContext {
   attempt: number;
 }
 
-export type JobHandler<TData> = (data: TData, ctx: JobContext) => Promise<void>;
+/**
+ * Job handler. The resolved value is captured as the job's result and can be
+ * retrieved later via {@link JobQueueDriver.getResult}. Handlers that return
+ * nothing (`void`) remain fully supported.
+ */
+export type JobHandler<TData, TResult = unknown> = (
+  data: TData,
+  ctx: JobContext,
+) => Promise<TResult>;
 
 /** Snapshot of one queue for metrics and the admin API. */
 export interface QueueStats {
@@ -74,6 +92,28 @@ export interface DeadLetter {
   error: string;
   attempts: number;
   failedAt: string;
+  /** Queue the job originally ran on (source queue for a retry). */
+  queue?: string;
+  /**
+   * Enough of the original {@link JobDefinition} to reconstruct it when
+   * retrying the job (attempts / backoff are re-applied from here).
+   */
+  def?: Pick<JobDefinition, "name" | "queue" | "attempts" | "backoffMs">;
+}
+
+/** Outcome of a job-status lookup. */
+export interface JobResult {
+  status: "pending" | "active" | "completed" | "failed" | "not_found";
+  /** Resolved handler value, present when `status === "completed"`. */
+  result?: unknown;
+  /** Failure reason, present when `status === "failed"`. */
+  error?: string;
+}
+
+/** A repeating job schedule registered via {@link JobQueueDriver.schedule}. */
+export interface JobSchedule {
+  name: string;
+  everyMs: number;
 }
 
 /** Hooks the service installs on a driver to emit per-job metrics. */
@@ -86,25 +126,42 @@ export interface JobEvents {
 export interface JobQueueDriver {
   defineQueue(queue: string, settings: QueueSettings): void;
   enqueue<T>(def: JobDefinition<T>, data: T, opts?: EnqueueOptions): Promise<string>;
+  enqueue<T>(queue: string, defOrName: JobDefinition<T> | string, data: T, opts?: EnqueueOptions): Promise<string>;
   /** Repeating job; idempotent per job name. */
   schedule<T>(def: JobDefinition<T>, everyMs: number, data: T): Promise<void>;
+  schedule<T>(def: JobDefinition<T>, opts: { everyMs: number; data: T }): Promise<void>;
+  schedule<T>(queue: string, def: JobDefinition<T>, opts: { everyMs: number; data: T }): Promise<void>;
   /** Registers the consumer and starts pulling jobs for `def.queue`. */
-  process<T>(def: JobDefinition<T>, handler: JobHandler<T>, events: JobEvents): void;
+  process<T, R = unknown>(def: JobDefinition<T, R>, handler: JobHandler<T, R>, events: JobEvents): void;
+  register?<T, R = unknown>(queue: string, def: JobDefinition<T, R>, handler: JobHandler<T, R>): void;
+  start?(queue: string, settings: QueueSettings): Promise<void>;
   stats(queue: string): Promise<QueueStats>;
   deadLetters(queue: string, limit?: number): Promise<DeadLetter[]>;
   /**
    * Removes a pending, delayed or scheduled job from `queue`.
-   *
-   * Returns `true` if the job was found and removed, `false` otherwise.
-   * Never throws: an unknown `jobId` or `queue`, an already-completed job,
-   * or an already-`active` job (cancellation is not preemptive
-   * mid-execution) all yield `false`.
    */
   cancel(queue: string, jobId: string): Promise<boolean>;
+  /**
+   * Re-enqueues a dead-lettered job for another attempt, resetting its attempt
+   * counter so it gets the full {@link JobDefinition.attempts} budget again.
+   * Removes the record from the dead-letter queue on success.
+   */
+  retryDeadLetter(queue: string, jobId: string): Promise<boolean>;
+  /**
+   * Looks up the status (and result/error) of a job by id.
+   */
+  getResult(queue: string, jobId: string): Promise<JobResult>;
+  /** Lists the repeating schedules currently registered on `queue`. */
+  listSchedules(queue: string): Promise<JobSchedule[]>;
+  /**
+   * Cancels a repeating schedule by name. Jobs already enqueued from previous
+   * ticks are unaffected.
+   */
+  unschedule(queue: string, name: string): Promise<boolean>;
   /**
    * Stops pulling new jobs and waits up to `timeoutMs` for in-flight ones.
    * Jobs still running at the deadline are returned to the queue.
    */
-  close(timeoutMs: number): Promise<void>;
+  close(timeoutMs?: number): Promise<void>;
   queues(): string[];
 }
