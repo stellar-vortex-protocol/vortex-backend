@@ -53,6 +53,26 @@ export interface TokensByChainResponse {
  */
 const TOKENS_CACHE_TTL_SECONDS = 300;
 
+/**
+ * Per-token-pair oracle bound override (issue #634).
+ *
+ * Both fields are optional: a pair may widen only the slippage band, only the
+ * premium band, or both. Unset fields fall back to the global
+ * `OracleMinDstConfig` defaults at resolution time.
+ */
+export interface PairOracleOverride {
+  maxUserSlippageBps?: bigint;
+  maxPremiumBps?: bigint;
+}
+
+/**
+ * Normalise a `srcToken:dstToken` pair key so lookups are case-insensitive and
+ * whitespace-tolerant regardless of how the operator configured the override.
+ */
+export function normalizePairKey(srcToken: string, dstToken: string): string {
+  return `${srcToken.trim().toLowerCase()}:${dstToken.trim().toLowerCase()}`;
+}
+
 @Injectable()
 export class TokensService {
   constructor(
@@ -176,6 +196,52 @@ export class TokensService {
       );
     }
     return token;
+  }
+
+  /**
+   * Resolve the per-pair oracle bound override for a `srcToken:dstToken` pair
+   * (issue #634).
+   *
+   * Overrides are sourced from the token registry: the source token's
+   * `oracleMaxUserSlippageBps`/`oracleMaxPremiumBps` columns (when present on
+   * the record) are keyed by the normalised pair. Returns `undefined` when no
+   * override is configured for the pair, letting callers fall back to the
+   * global `OracleMinDstConfig` defaults.
+   *
+   * Partial overrides are preserved as-is: only the fields the operator set are
+   * populated, so the caller can fall back per-field rather than per-pair.
+   */
+  async resolvePairOracleOverride(
+    srcToken: string,
+    dstToken: string,
+  ): Promise<PairOracleOverride | undefined> {
+    const key = normalizePairKey(srcToken, dstToken);
+    const overrides = await this.loadPairOracleOverrides();
+    return overrides.get(key);
+  }
+
+  /**
+   * Build the full `pairOverrides` lookup keyed by normalised `srcToken:dstToken`.
+   *
+   * Reads the registry once and projects any per-pair oracle bound columns into
+   * a `Map`. Pairs without an override are omitted entirely so a lookup miss is
+   * an unambiguous "use the global default" signal.
+   */
+  async loadPairOracleOverrides(): Promise<Map<string, PairOracleOverride>> {
+    const records = await this.repo.findAll();
+    const overrides = new Map<string, PairOracleOverride>();
+    for (const record of records) {
+      const slippage = record.oracleMaxUserSlippageBps;
+      const premium = record.oracleMaxPremiumBps;
+      if (slippage == null && premium == null) continue;
+      const dstToken = record.oracleOverrideDstToken;
+      if (!dstToken) continue;
+      const override: PairOracleOverride = {};
+      if (slippage != null) override.maxUserSlippageBps = BigInt(slippage);
+      if (premium != null) override.maxPremiumBps = BigInt(premium);
+      overrides.set(normalizePairKey(record.address, dstToken), override);
+    }
+    return overrides;
   }
 
   /**

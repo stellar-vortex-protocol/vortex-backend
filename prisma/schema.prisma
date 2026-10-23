@@ -931,6 +931,23 @@ model Announcement {
   @@map("announcements")
 }
 
+model PriceAlert {
+  id           String    @id @default(uuid()) @map("id")
+  tokenAddress String    @map("token_address")
+  chain        String    @map("chain")
+  direction    String    @map("direction")
+  thresholdUsd String    @map("threshold_usd")
+  connectionId String?   @map("connection_id")
+  isActive     Boolean   @default(true) @map("is_active")
+  firedAt      DateTime? @map("fired_at") @db.Timestamptz
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([isActive])
+  @@index([tokenAddress, chain])
+  @@map("price_alerts")
+}
+
 // ─── Price history (price-feed worker, issue #566) ────────────────────────────
 // Append-only series backing the extreme-move circuit breaker; `tokens.price_usd`
 // holds the latest value, this table keeps the trail.

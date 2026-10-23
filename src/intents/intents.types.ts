@@ -89,6 +89,27 @@ export interface StellarToken {
   priceUSD?: number;
 }
 
+/**
+ * Durable record of the oracle snapshot an intent's `minDstAmount` was
+ * validated against at creation time (issue #636). Pins the exact fair-value
+ * inputs so a later re-validation, dispute investigation, or audit can
+ * reconcile against the price the user actually agreed to rather than a
+ * newer live snapshot.
+ *
+ * `fairValue` is `null` when the oracle was unavailable and validation
+ * failed open — deliberately distinct from a computed fair value of `0`.
+ */
+export interface PriceLockSnapshot {
+  /** Fair value of `srcAmount` in dst-token base units, or `null` on fail-open. */
+  fairValue: string | null;
+  /** Slippage in basis points from the successful validation, or `null` on fail-open. */
+  slippageBps: number | null;
+  /** Premium in basis points from the successful validation, or `null` on fail-open. */
+  premiumBps: number | null;
+  /** `PriceSnapshot.asOfMs` of the snapshot the validation ran against. */
+  asOfMs: number;
+}
+
 export interface Intent {
   intentId: string;
   user: string;
@@ -133,6 +154,14 @@ export interface Intent {
    * fabricated values.
    */
   usdValueAtCreate?: number;
+  /**
+   * Oracle price-lock snapshot captured from the successful
+   * `MinDstValidationOk` result at creation time (issue #636). Persisted
+   * alongside the intent so the exact fair-value inputs remain durable and
+   * visible via `GET /api/v1/intents/:id`. Absent on intents created before
+   * issue #636 was deployed.
+   */
+  priceLock?: PriceLockSnapshot;
   /**
    * Optimistic-concurrency version (issue #405). Starts at 0 on creation and
    * is incremented by exactly one on every successful mutation. Exposed to

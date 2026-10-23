@@ -29,6 +29,62 @@ export type OracleMinDstConfig = {
   maxStalenessMs: number;
 };
 
+/**
+ * Per-token-pair override of the global slippage / premium bounds (issue #634).
+ *
+ * Both fields are optional: a partial override falls back to the global
+ * {@link OracleMinDstConfig} value for any field left unset.
+ */
+export type OracleMinDstPairOverride = {
+  maxUserSlippageBps?: bigint;
+  maxPremiumBps?: bigint;
+};
+
+/**
+ * Lookup of per-pair overrides keyed by a normalized `srcToken:dstToken` pair.
+ *
+ * Keys must be produced by {@link normalizePairKey} so lookups are stable
+ * regardless of caller casing.
+ */
+export type OracleMinDstPairOverrides = Map<string, OracleMinDstPairOverride>;
+
+/**
+ * Normalize a token pair into the canonical `srcToken:dstToken` override key.
+ *
+ * Tokens are lower-cased and trimmed so `USDC:WETH` and `usdc:weth` resolve
+ * to the same override entry.
+ */
+export function normalizePairKey(srcToken: string, dstToken: string): string {
+  return `${srcToken.trim().toLowerCase()}:${dstToken.trim().toLowerCase()}`;
+}
+
+/**
+ * Resolve the effective {@link OracleMinDstConfig} for a token pair.
+ *
+ * Consults `pairOverrides` (keyed by {@link normalizePairKey}) before falling
+ * back to the global `config`. Partial overrides inherit the global value for
+ * any field they do not set, so a pair that only widens `maxUserSlippageBps`
+ * keeps the global `maxPremiumBps` (never zero/undefined).
+ *
+ * Pure: callers resolve the effective config before invoking
+ * {@link validateMinDstAmount}, keeping that validator's signature unchanged.
+ */
+export function resolveOracleMinDstConfig(
+  config: OracleMinDstConfig,
+  pairOverrides: OracleMinDstPairOverrides | undefined,
+  srcToken: string,
+  dstToken: string,
+): OracleMinDstConfig {
+  if (!pairOverrides || pairOverrides.size === 0) return config;
+  const override = pairOverrides.get(normalizePairKey(srcToken, dstToken));
+  if (!override) return config;
+  return {
+    ...config,
+    maxUserSlippageBps: override.maxUserSlippageBps ?? config.maxUserSlippageBps,
+    maxPremiumBps: override.maxPremiumBps ?? config.maxPremiumBps,
+  };
+}
+
 export type PriceSnapshot = {
   /** Source token USD price in {@link USD_PRICE_SCALE} units, or null if unknown. */
   srcPriceUsd: bigint | null;
@@ -130,7 +186,9 @@ function snapshotUnavailable(snapshot: PriceSnapshot, nowMs: number, maxStalenes
  * Validate `minDstAmount` against an oracle fair value.
  *
  * @param input Amounts, decimals, acknowledgement flag, and price snapshot.
- * @param config Slippage / premium / fail-open thresholds.
+ * @param config Slippage / premium / fail-open thresholds. Callers that need
+ *   per-pair bounds should resolve them via {@link resolveOracleMinDstConfig}
+ *   before invoking this function.
  */
 export function validateMinDstAmount(
   input: MinDstValidationInput,
