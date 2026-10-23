@@ -27,9 +27,29 @@ export interface CachedResult extends IndicatorResult {
   durationMs: number;
 }
 
+/** One recorded readiness/indicator transition (issue #689). */
+export interface HealthTransition {
+  /** Indicator name, or `readiness` for aggregate readiness flips. */
+  indicator: string;
+  fromStatus: string;
+  toStatus: string;
+  /** ISO-8601 timestamp of the transition. */
+  at: string;
+  error?: string;
+}
+
+/** Optional durable sink for transitions; must never throw synchronously. */
+export interface HealthTimelineStore {
+  append(row: HealthTransition): void;
+}
+
 /** A check that hangs is reported down after this long. */
 const CHECK_TIMEOUT_MS = 3_000;
 const LAG_SAMPLE_MS = 100;
+/** Default number of transitions retained in memory (issue #689). */
+const DEFAULT_TIMELINE_CAPACITY = 500;
+/** Pseudo-indicator name used for aggregate readiness flips. */
+const READINESS_INDICATOR = "readiness";
 
 /**
  * Health-indicator registry (issue #492).
@@ -40,6 +60,17 @@ const LAG_SAMPLE_MS = 100;
  * dependencies are doing. Readiness uses hysteresis: it turns false only
  * after HEALTH_READY_FAILURE_THRESHOLD consecutive failing evaluations and
  * true again after HEALTH_READY_SUCCESS_THRESHOLD consecutive passing ones.
+ *
+ * Transition timeline (issue #689): every individual indicator status flip
+ * and every aggregate readiness flip is appended to a bounded, append-only
+ * in-memory ring buffer (last {@link DEFAULT_TIMELINE_CAPACITY} transitions by
+ * default, configurable via `health.timelineCapacity`). Only a synchronous
+ * array push happens on the hot `evaluate()` path — no I/O. The timeline is
+ * intended for incident retros ("when did X go down, and for how long") and is
+ * exposed via `GET /health/timeline`. When `HEALTH_TIMELINE_PERSISTENCE=prisma`
+ * an optional {@link HealthTimelineStore} mirrors rows asynchronously for
+ * cross-replica/durable history; the in-memory buffer always remains the
+ * source of truth for the local endpoint.
  */
 @Injectable()
 export class HealthIndicatorRegistry implements OnApplicationBootstrap, OnModuleDestroy {
@@ -48,6 +79,10 @@ export class HealthIndicatorRegistry implements OnApplicationBootstrap, OnModule
   private readonly results = new Map<string, CachedResult>();
   private readonly startupPassed = new Set<string>();
   private readonly cfg: AppConfig["health"];
+  /** Bounded ring buffer of transitions; oldest entries are evicted first. */
+  private readonly timelineBuffer: HealthTransition[] = [];
+  private readonly timelineCapacity: number;
+  private timelineStore?: HealthTimelineStore;
   /** Event-loop lag sampler: drift of a fixed-interval timer. */
   private readonly lagTimer: NodeJS.Timeout;
   private loopLagMs = 0;
@@ -61,8 +96,13 @@ export class HealthIndicatorRegistry implements OnApplicationBootstrap, OnModule
   constructor(
     @Optional() config?: ConfigService<AppConfig, true>,
     @Optional() private readonly metrics?: MetricsService,
+    @Optional() timelineStore?: HealthTimelineStore,
   ) {
     this.cfg = config?.get("health", { infer: true }) ?? configuration().health;
+    const configuredCapacity = (this.cfg as { timelineCapacity?: number }).timelineCapacity;
+    this.timelineCapacity =
+      typeof configuredCapacity === "number" && configuredCapacity > 0 ? configuredCapacity : DEFAULT_TIMELINE_CAPACITY;
+    this.timelineStore = timelineStore;
     let expected = Date.now() + LAG_SAMPLE_MS;
     this.lagTimer = setInterval(() => {
       const now = Date.now();
@@ -107,12 +147,23 @@ export class HealthIndicatorRegistry implements OnApplicationBootstrap, OnModule
           result = { status: "down", error: err instanceof Error ? err.message : String(err) };
         }
         const durationMs = performance.now() - started;
+        const previous = this.results.get(indicator.name);
         this.results.set(indicator.name, {
           ...result,
           critical: this.isCritical(indicator),
           checkedAt: new Date().toISOString(),
           durationMs: Math.round(durationMs),
         });
+        // Record exactly one row per real status flip; skip the first observation.
+        if (previous && previous.status !== result.status) {
+          this.recordTransition({
+            indicator: indicator.name,
+            fromStatus: previous.status,
+            toStatus: result.status,
+            at: new Date().toISOString(),
+            ...(result.error ? { error: result.error } : {}),
+          });
+        }
         if (result.status === "up" && indicator.startup) this.startupPassed.add(indicator.name);
         this.metrics?.healthIndicatorUp.set({ indicator: indicator.name }, result.status === "up" ? 1 : 0);
         this.metrics?.healthCheckDuration.observe({ indicator: indicator.name }, durationMs / 1000);
@@ -132,8 +183,44 @@ export class HealthIndicatorRegistry implements OnApplicationBootstrap, OnModule
     else if (this.ready && this.failStreak >= this.cfg.readyFailureThreshold) this.ready = false;
     else if (!this.ready && this.passStreak >= this.cfg.readySuccessThreshold) this.ready = true;
     this.evaluated = true;
-    if (wasReady !== this.ready) this.logger.warn(`readiness changed: ${wasReady} -> ${this.ready}`);
+    if (wasReady !== this.ready) {
+      this.logger.warn(`readiness changed: ${wasReady} -> ${this.ready}`);
+      this.recordTransition({
+        indicator: READINESS_INDICATOR,
+        fromStatus: wasReady ? "ready" : "not_ready",
+        toStatus: this.ready ? "ready" : "not_ready",
+        at: new Date().toISOString(),
+      });
+    }
     this.metrics?.healthReady.set(this.ready ? 1 : 0);
+  }
+
+  /**
+   * Returns recorded transitions, oldest first, optionally filtered by
+   * indicator name and/or a lower bound on `at` (ISO-8601 or Date).
+   */
+  timeline(filter: { indicator?: string; since?: string | Date } = {}): HealthTransition[] {
+    const sinceMs = filter.since === undefined ? undefined : new Date(filter.since).getTime();
+    return this.timelineBuffer.filter((row) => {
+      if (filter.indicator && row.indicator !== filter.indicator) return false;
+      if (sinceMs !== undefined && !Number.isNaN(sinceMs) && new Date(row.at).getTime() < sinceMs) return false;
+      return true;
+    });
+  }
+
+  /** Appends to the bounded buffer and mirrors to the optional store. */
+  private recordTransition(row: HealthTransition): void {
+    this.timelineBuffer.push(row);
+    if (this.timelineBuffer.length > this.timelineCapacity) {
+      this.timelineBuffer.splice(0, this.timelineBuffer.length - this.timelineCapacity);
+    }
+    if (this.timelineStore) {
+      try {
+        this.timelineStore.append(row);
+      } catch (err) {
+        this.logger.warn(`timeline store append failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   /** Liveness: the event loop is responsive. Dependencies never affect it. */

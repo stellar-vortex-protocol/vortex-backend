@@ -455,6 +455,46 @@ Indicators (`indicators` in the `/health/ready` body, with `critical`, `error`, 
 Metrics: `vortex_health_ready`, `vortex_health_indicator_up{indicator}`,
 `vortex_health_check_duration_seconds{indicator}`.
 
+### Readiness timeline (`GET /health/timeline`)
+
+Issue #689. `HealthIndicatorRegistry` keeps an append-only timeline of every
+readiness transition (the aggregate ready/not-ready flip) and every individual
+indicator status flip (`up` → `down`, `down` → `up`, …). Each row is
+`{ indicator, fromStatus, toStatus, at, error? }`; `indicator` is
+`readiness` for aggregate transitions. A status that merely stays the same
+across checks is **not** recorded again, so the timeline is one row per
+transition, not one per check tick.
+
+This is the supported way to answer "when did `soroban_rpc_quorum` go down last
+night, and for how long" during an incident retro — no log grep across replicas
+required.
+
+```bash
+# Everything in the last 12 hours
+curl -s "http://localhost:4000/health/timeline?since=$(date -u -d '12 hours ago' +%Y-%m-%dT%H:%M:%SZ)" | jq
+
+# Just one indicator
+curl -s "http://localhost:4000/health/timeline?indicator=soroban_rpc_quorum&since=2026-08-29T22:00:00Z" | jq
+```
+
+- `indicator` (optional) — filter to a single indicator name (e.g.
+  `soroban_rpc_quorum`, `database`, `ws_backplane`, `killswitch_snapshot`) or
+  `readiness` for aggregate flips only.
+- `since` (optional, ISO-8601) — only transitions at or after this instant.
+  Omit to get the whole retained window.
+
+Retention: the default store is an in-memory ring buffer of the last
+`HEALTH_TIMELINE_CAPACITY` transitions (default **500**) **per replica** — it
+is bounded so it costs negligible memory, and it is lost on restart. For
+cross-replica or durable history set `HEALTH_TIMELINE_PERSISTENCE=prisma`
+(same `*_PERSISTENCE` convention as `KILLSWITCH_PERSISTENCE`); the endpoint
+then reads the persisted table instead of the local buffer. Recording a
+transition is a plain in-memory array push on the health-check path — no I/O
+is added to `evaluate()`.
+
+The endpoint is internal/ops-facing (not part of the public API surface); do
+not expose it through the public ingress.
+
 Kubernetes probes (split deployments set `SERVICE_ROLES` per workload, e.g.
 `api,ws` for HTTP pods and `worker` for workers):
 
@@ -532,6 +572,8 @@ handlers never wait for Redis.
 | `ADMIN_API_KEYS` | empty (admin APIs disabled) | `id:role:secret` entries for admin / superadmin endpoints |
 | `PROCESS_ROLE` / `JOBS_DRIVER` | `all` / `memory` | Where job workers run; `bullmq` for multi-instance |
 | `CANARY_ADDRESSES` | empty | Canary accounts excluded from public stats |
+| `HEALTH_TIMELINE_CAPACITY` | `500` | Max readiness/indicator transitions kept in the in-memory timeline ring buffer (per replica) |
+| `HEALTH_TIMELINE_PERSISTENCE` | `memory` | `prisma` to persist the readiness timeline for cross-replica / durable history |
 
 ---
 

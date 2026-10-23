@@ -2,8 +2,9 @@ import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
 import { MetricsService } from "../metrics/metrics.service";
 import { JobsService } from "./jobs.service";
-import { defineJob } from "./jobs.types";
+import { defineJob, JobQueueDriver } from "./jobs.types";
 import { MemoryJobQueueDriver } from "./memory-job-queue.driver";
+import { BullMqJobQueueDriver } from "./bullmq-job-queue.driver";
 
 function config(overrides: Partial<Pick<AppConfig, "processRole">> = {}, shutdownTimeoutMs = 1_000) {
   const values: Partial<AppConfig> = {
@@ -127,6 +128,124 @@ describe("JobsService (memory driver)", () => {
     expect(handler).not.toHaveBeenCalled();
     expect((await api.stats())[0].waiting).toBe(1);
     await api.onApplicationShutdown();
+  });
+});
+
+describe("JobsService priority ordering", () => {
+  it("picks up a high-priority job enqueued after several low-priority ones first (memory driver)", async () => {
+    const service = new JobsService(config(), undefined, new MemoryJobQueueDriver());
+    service.defineQueue("test", { concurrency: 1 });
+    const order: number[] = [];
+    service.process(JOB, async (data) => {
+      order.push(data.n);
+    });
+
+    // Fill the queue while nothing can be consumed yet by enqueuing before processing starts.
+    await service.enqueue(JOB, { n: 1 }, { priority: 10 });
+    await service.enqueue(JOB, { n: 2 }, { priority: 10 });
+    await service.enqueue(JOB, { n: 3 }, { priority: 10 });
+    await service.enqueue(JOB, { n: 4 }, { priority: 1 });
+
+    await waitFor(() => order.length === 4);
+    expect(order[0]).toBe(4);
+    expect(order.slice(1)).toEqual([1, 2, 3]);
+    await service.onApplicationShutdown();
+  });
+
+  it("passes priority through to BullMQ's native job option", async () => {
+    const add = jest.fn().mockResolvedValue({ id: "job-1" });
+    const queue = { add, getJob: jest.fn().mockResolvedValue(undefined) };
+    const driver = new BullMqJobQueueDriver({ get: () => "redis://localhost:6379" } as unknown as ConfigService<AppConfig, true>);
+    // Inject a fake BullMQ queue to observe the options passed to add().
+    (driver as unknown as { queue: unknown }).queue = queue;
+
+    await driver.enqueue("test", "work", { n: 1 }, { priority: 3 });
+
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(add.mock.calls[0][2]).toMatchObject({ priority: 3 });
+  });
+});
+
+describe("JobsService cancellation", () => {
+  function makeService(driver: JobQueueDriver) {
+    const service = new JobsService(config(), undefined, driver);
+    service.defineQueue("test", { concurrency: 1 });
+    return service;
+  }
+
+  it("cancels a waiting job on the memory driver", async () => {
+    const driver = new MemoryJobQueueDriver();
+    const service = makeService(driver);
+    const handler = jest.fn();
+    service.process(JOB, handler);
+
+    const id = await service.enqueue(JOB, { n: 1 });
+    expect(await service.cancel("test", id)).toBe(true);
+    await sleep(20);
+
+    expect(handler).not.toHaveBeenCalled();
+    expect((await service.stats())[0].waiting).toBe(0);
+    await service.onApplicationShutdown();
+  });
+
+  it("cancels a delayed job on the memory driver", async () => {
+    const driver = new MemoryJobQueueDriver();
+    const service = makeService(driver);
+    const handler = jest.fn();
+    service.process(JOB, handler);
+
+    const id = await service.enqueue(JOB, { n: 1 }, { delayMs: 50 });
+    expect(await service.cancel("test", id)).toBe(true);
+    await sleep(80);
+
+    expect(handler).not.toHaveBeenCalled();
+    await service.onApplicationShutdown();
+  });
+
+  it("returns false when cancelling an unknown job id", async () => {
+    const driver = new MemoryJobQueueDriver();
+    const service = makeService(driver);
+
+    expect(await service.cancel("test", "does-not-exist")).toBe(false);
+    await service.onApplicationShutdown();
+  });
+
+  it("does not cancel an active job (no-op returning false)", async () => {
+    const driver = new MemoryJobQueueDriver();
+    const service = makeService(driver);
+    let release: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      service.process(JOB, async () => {
+        resolve();
+        await new Promise<void>((r) => (release = r));
+      });
+    });
+
+    const id = await service.enqueue(JOB, { n: 1 });
+    await started;
+    expect(await service.cancel("test", id)).toBe(false);
+    release();
+    await waitFor(async () => (await service.stats())[0].active === 0);
+    await service.onApplicationShutdown();
+  });
+
+  it("cancels a waiting job on the BullMQ driver", async () => {
+    const remove = jest.fn().mockResolvedValue(undefined);
+    const getJob = jest.fn().mockResolvedValue({ id: "job-1", remove });
+    const driver = new BullMqJobQueueDriver({ get: () => "redis://localhost:6379" } as unknown as ConfigService<AppConfig, true>);
+    (driver as unknown as { queue: unknown }).queue = { getJob };
+
+    expect(await driver.cancel("test", "job-1")).toBe(true);
+    expect(getJob).toHaveBeenCalledWith("job-1");
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns false on the BullMQ driver when the job is unknown", async () => {
+    const getJob = jest.fn().mockResolvedValue(undefined);
+    const driver = new BullMqJobQueueDriver({ get: () => "redis://localhost:6379" } as unknown as ConfigService<AppConfig, true>);
+    (driver as unknown as { queue: unknown }).queue = { getJob };
+
+    expect(await driver.cancel("test", "missing")).toBe(false);
   });
 });
 

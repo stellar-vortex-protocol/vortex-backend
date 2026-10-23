@@ -444,11 +444,16 @@ export const envValidationSchema = Joi.object({
   ABUSE_CAPTCHA_TIMEOUT_MS: Joi.number().integer().min(100).max(30000).default(3000),
 
   // ── Admin RBAC ────────────────────────────────────────────────────────────
-  // Comma-separated "id:role:secret" entries; role is "admin" or "superadmin".
+  // Comma-separated "id:role:secret" or "id:role:secret:expiresAtIso" entries;
+  // role is "admin" or "superadmin". The optional 4th field is an ISO-8601
+  // expiry timestamp (issue #690): once past, the key authenticates exactly as
+  // if it did not exist. A 3-field entry (no expiry) behaves as before.
   // Empty disables every admin endpoint (401).
   ADMIN_API_KEYS: Joi.string()
     .allow("")
-    .pattern(/^([A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,})(,[A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,})*$/)
+    .pattern(
+      /^([A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,}(:[^,:]+)?)(,[A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,}(:[^,:]+)?)*$/,
+    )
     .default(""),
 
   // ── Public anonymised datasets ────────────────────────────────────────────
@@ -638,6 +643,11 @@ export const envValidationSchema = Joi.object({
   // Comma-separated Soroban RPC URLs for the RPC-quorum readiness check.
   // Defaults to SOROBAN_RPC_URL.
   SOROBAN_RPC_HEALTH_URLS: Joi.string().allow("").default(""),
+  // Backend for the readiness/indicator transition timeline (issue #689):
+  // "memory" (default) keeps a bounded in-process ring buffer — no I/O on the
+  // health-check path; "prisma" additionally persists transitions for
+  // cross-replica/durable history.
+  HEALTH_TIMELINE_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
 
   // ── Soroban RPC pool & archival (#509 #510) ───────────────────────────────
   // Comma-separated Soroban RPC endpoints; falls back to SOROBAN_RPC_URL.

@@ -30,8 +30,16 @@ export class BullMqJobQueueDriver implements JobQueueDriver {
   private readonly queueMap = new Map<string, { queue: Queue; dlq: Queue; settings: QueueSettings }>();
   private readonly workers = new Map<string, Worker>();
   private readonly handlers = new Map<string, Map<string, { handler: JobHandler<unknown>; events: JobEvents; def: JobDefinition }>>();
+  private readonly redisUrl: string;
+  /** Test-only direct queue override used by unit specs. */
+  public queue?: { add?: Queue["add"]; getJob?: Queue["getJob"] };
 
-  constructor(private readonly redisUrl: string) {}
+  constructor(redisUrlOrConfig: string | { get: (key: string) => string }) {
+    this.redisUrl =
+      typeof redisUrlOrConfig === "string"
+        ? redisUrlOrConfig
+        : redisUrlOrConfig?.get?.("redisUrl") ?? "redis://localhost:6379";
+  }
 
   defineQueue(name: string, settings: QueueSettings): void {
     if (this.queueMap.has(name)) return;
@@ -43,13 +51,52 @@ export class BullMqJobQueueDriver implements JobQueueDriver {
     });
   }
 
-  async enqueue<T>(def: JobDefinition<T>, data: T, opts: EnqueueOptions = {}): Promise<string> {
-    const job = await this.entry(def.queue).queue.add(def.name, data, {
+  async enqueue<T>(
+    defOrQueue: JobDefinition<T> | string,
+    dataOrName: T | string,
+    optsOrData?: EnqueueOptions | T,
+    maybeOpts?: EnqueueOptions,
+  ): Promise<string> {
+    if (typeof defOrQueue === "string") {
+      const name = String(dataOrName);
+      const data = optsOrData as T;
+      const opts = maybeOpts ?? {};
+      const targetQueue = this.queue?.add ? (this.queue as Queue) : this.entry(defOrQueue).queue;
+      const job = await targetQueue.add(name, data, {
+        jobId: opts.idempotencyKey,
+        delay: opts.delayMs,
+        priority: opts.priority,
+      });
+      return job.id as string;
+    }
+    const def = defOrQueue;
+    const data = dataOrName as T;
+    const opts = (optsOrData as EnqueueOptions | undefined) ?? {};
+    const targetQueue = this.queue?.add ? (this.queue as Queue) : this.entry(def.queue).queue;
+    const job = await targetQueue.add(def.name, data, {
       ...this.jobOptions(def),
       jobId: opts.idempotencyKey,
       delay: opts.delayMs,
+      priority: opts.priority,
     });
     return job.id as string;
+  }
+
+  async cancel(queue: string, jobId: string): Promise<boolean> {
+    const source = this.queue?.getJob ? (this.queue as Queue) : this.entry(queue).queue;
+    const job = await source.getJob(jobId);
+    if (!job) return false;
+    // Only pending/delayed/prioritized jobs are cancellable; an active job is
+    // left to finish (cancellation is not preemptive mid-execution).
+    const state = typeof job.getState === "function" ? await job.getState() : "waiting";
+    if (state === "active" || state === "completed" || state === "failed") return false;
+    try {
+      await job.remove();
+      return true;
+    } catch (err) {
+      this.logger.warn(`[jobs] ${queue}: failed to cancel job ${jobId}: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
   }
 
   async schedule<T>(def: JobDefinition<T>, everyMs: number, data: T): Promise<void> {

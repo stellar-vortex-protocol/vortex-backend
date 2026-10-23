@@ -41,6 +41,12 @@ export interface EnqueueOptions {
    */
   idempotencyKey?: string;
   delayMs?: number;
+  /**
+   * Ordering within the queue: lower number = higher priority (BullMQ
+   * convention). Unset/`undefined` means normal priority. Jobs with equal
+   * priority are processed in insertion order.
+   */
+  priority?: number;
 }
 
 export interface JobContext {
@@ -86,6 +92,15 @@ export interface JobQueueDriver {
   process<T>(def: JobDefinition<T>, handler: JobHandler<T>, events: JobEvents): void;
   stats(queue: string): Promise<QueueStats>;
   deadLetters(queue: string, limit?: number): Promise<DeadLetter[]>;
+  /**
+   * Removes a pending, delayed or scheduled job from `queue`.
+   *
+   * Returns `true` if the job was found and removed, `false` otherwise.
+   * Never throws: an unknown `jobId` or `queue`, an already-completed job,
+   * or an already-`active` job (cancellation is not preemptive
+   * mid-execution) all yield `false`.
+   */
+  cancel(queue: string, jobId: string): Promise<boolean>;
   /**
    * Stops pulling new jobs and waits up to `timeoutMs` for in-flight ones.
    * Jobs still running at the deadline are returned to the queue.

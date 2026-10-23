@@ -91,6 +91,14 @@ export class JobsService implements OnApplicationShutdown {
     return this.driver.deadLetters(queue, limit);
   }
 
+  /**
+   * Cancels a pending/delayed/scheduled job. Returns whether a job was found
+   * and removed; an already-active or completed job yields `false`.
+   */
+  cancel(queue: string, jobId: string): Promise<boolean> {
+    return this.driver.cancel(queue, jobId);
+  }
+
   queues(): string[] {
     return this.driver.queues();
   }

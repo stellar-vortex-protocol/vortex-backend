@@ -1,4 +1,4 @@
-import { Controller, Get, NotFoundException, Param, UseGuards } from "@nestjs/common";
+import { Controller, Delete, Get, NotFoundException, Param, UseGuards } from "@nestjs/common";
 import { ApiHeader, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { AdminGuard, RequireAdminRole } from "../admin/admin.guard";
 import { JobsService } from "./jobs.service";
@@ -23,5 +23,12 @@ export class JobsController {
   async deadLetters(@Param("queue") queue: string) {
     if (!this.jobs.queues().includes(queue)) throw new NotFoundException("Unknown queue");
     return { queue, deadLetters: await this.jobs.deadLetters(queue) };
+  }
+
+  @Delete("queues/:queue/jobs/:jobId")
+  @ApiOperation({ summary: "Cancel a pending, delayed, or scheduled job in a queue" })
+  async cancel(@Param("queue") queue: string, @Param("jobId") jobId: string) {
+    if (!this.jobs.queues().includes(queue)) throw new NotFoundException("Unknown queue");
+    return { cancelled: await this.jobs.cancel(queue, jobId) };
   }
 }

@@ -44,6 +44,7 @@ GET  /api/v1/datasets             — published dataset dates, revisions, and sc
 GET  /api/v1/datasets/latest      — most recent dataset publication (404 if none)
 GET  /api/v1/datasets/schemas     — versioned dataset schemas
 GET  /health                      — service health
+GET  /health/timeline             — readiness/indicator transition history (internal/ops)
 WS   /ws                          — real-time intent feed
 GET  /docs                        — Swagger / OpenAPI docs
 GET  /docs/v1                     — OpenAPI UI for API v1
@@ -53,6 +54,24 @@ GET  /api/v1/chain/ledger         — latest Soroban ledger
 GET  /api/v1/chain/network        — Soroban network info
 GET  /api/v1/chain/account/:key   — Stellar account lookup
 ```
+
+### Health timeline
+
+`GET /health/timeline?indicator=&since=` returns the append-only history of
+readiness and per-indicator status transitions recorded by
+`HealthIndicatorRegistry` — one row per actual flip (`indicator`, `fromStatus`,
+`toStatus`, `at`, optional `error`), not one per health-check tick. Use it to
+answer "when did `soroban_rpc_quorum` go down, and for how long" during an
+incident retro without grepping logs across replicas.
+
+- `indicator` — optional filter, e.g. `soroban_rpc_quorum` (omit for all).
+- `since` — optional ISO-8601 timestamp; only transitions at or after it.
+
+Storage is selected with `HEALTH_TIMELINE_PERSISTENCE`: `memory` (default)
+keeps the last 500 transitions in a bounded in-process ring buffer, so history
+is per-replica and lost on restart; `prisma` persists transitions to Postgres
+for durable, cross-replica history. Recording a transition is a plain
+in-memory array push — no I/O is added to the health-check path.
 
 ### API version lifecycle
 
@@ -106,6 +125,36 @@ Three `.env.example` variants are provided for different deployment targets:
 | `.env.example` | Generic template with all available variables |
 | `.env.testnet.example` | Testnet development — safe defaults, blank contract IDs |
 | `.env.mainnet.example` | Production mainnet — strict CORS, required signing key and contract IDs |
+
+### Admin API keys
+
+`ADMIN_API_KEYS` is a comma-separated list of admin credentials in the format:
+
+```
+label:role:secret[:expiresAtIso]
+```
+
+- `label` — human-readable name for the key (e.g. `ops`, `auditor`).
+- `role` — the admin role granted to the key.
+- `secret` — the bearer secret presented by the caller.
+- `expiresAtIso` — **optional** ISO-8601 timestamp after which the key stops
+  authenticating. A 3-field entry with no expiry behaves exactly as before
+  (valid indefinitely).
+
+Expired keys are treated exactly like unknown secrets: `authenticateAdminKey()`
+returns `null` and `AdminGuard` responds with the same `401 Unauthorized` as a
+missing or invalid key, so expiry cannot be used to probe for valid-but-expired
+secrets. No background sweep is needed — expiry is checked once per request.
+
+Entries whose `expiresAtIso` is malformed or already in the past at startup are
+dropped entirely by `parseAdminApiKeys()`, as if they had never been
+configured, so a bad config can never admit an expired key through another
+code path.
+
+```bash
+# permanent key + a temporary auditor key that self-expires
+ADMIN_API_KEYS="ops:admin:s3cret,auditor:readonly:audit-s3cret:2025-12-31T23:59:59Z"
+```
 
 ### Signing key
 
@@ -185,6 +234,7 @@ from those that are safe to leave at their testnet/dev defaults.
 | `LOG_LEVEL` | Recommended | `debug` | Set to `info` in production — `debug` is too noisy |
 | `LEADER_ELECTION_ENABLED` | Recommended (multi-replica) | `false` | Set to `true` when running N > 1 replicas to ensure singleton workers run on exactly one pod. Requires `DATABASE_URL` to point at a live Postgres instance. **Do not use PgBouncer in transaction-pooling mode** — see [Leader Election runbook](./docs/runbooks/leader-election.md). |
 | `LEADER_ELECTION_HEARTBEAT_MS` | Optional | `5000` | Heartbeat interval in ms. Lower = faster failover, higher DB load. Default gives ≤ 15 s failover. |
+| `HEALTH_TIMELINE_PERSISTENCE` | Optional | `memory` | Where `HealthIndicatorRegistry` transition history is stored. `memory` keeps a bounded in-process ring buffer (last 500 transitions, per replica); `prisma` persists transitions to Postgres for cross-replica/durable history. See [`GET /health/timeline`](#health-timeline). |
 | `PORT` | Optional | `4000` | Change if the container port mapping differs |
 | `MAX_USER_SLIPPAGE_BPS` | Optional | `100` | Max user slippage vs oracle fair `minDstAmount` (1% default). Higher slippage requires a signed `acknowledgeHighSlippage`. |
 | `MAX_PREMIUM_BPS` | Optional | `50` | Max `minDstAmount` premium above oracle fair value; always rejected above this. |

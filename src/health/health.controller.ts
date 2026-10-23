@@ -1,6 +1,6 @@
-import { Controller, Get, Optional, Res } from "@nestjs/common";
+import { Controller, Get, Optional, Query, Res } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { ApiTags } from "@nestjs/swagger";
+import { ApiOperation, ApiQuery, ApiTags } from "@nestjs/swagger";
 import type { Response } from "express";
 import { AppConfig } from "../config/configuration";
 import { DatabaseHealthService } from "./database-health.service";
@@ -65,6 +65,33 @@ export class HealthController {
     const startup = this.registry.startup();
     if (!startup.started) res.status(503);
     return { status: startup.started ? "ok" : "starting", ...this.base(), ...startup };
+  }
+
+  /**
+   * Transition timeline (issue #689): append-only history of readiness and
+   * per-indicator status flips, newest first. Internal/ops-only — reads the
+   * in-memory ring buffer (or the optional Prisma adapter) and performs no I/O
+   * on the health-check path itself.
+   */
+  @Get("timeline")
+  @ApiOperation({
+    summary: "Indicator transition timeline (internal/ops only)",
+    description:
+      "Returns the bounded history of readiness and per-indicator status transitions. " +
+      "Intended for on-call incident retrospectives, not for public consumption.",
+  })
+  @ApiQuery({ name: "indicator", required: false, description: "Filter to a single indicator name" })
+  @ApiQuery({ name: "since", required: false, description: "ISO-8601 timestamp; only transitions at or after this instant" })
+  timeline(@Query("indicator") indicator?: string, @Query("since") since?: string) {
+    const sinceDate = since ? new Date(since) : undefined;
+    const sinceValid = sinceDate && !Number.isNaN(sinceDate.getTime()) ? sinceDate : undefined;
+    return {
+      ...this.base(),
+      timeline: this.registry.timeline({
+        indicator: indicator || undefined,
+        since: sinceValid,
+      }),
+    };
   }
 
   /** Legacy aggregate endpoint, kept for backward compatibility. */

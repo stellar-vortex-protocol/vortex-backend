@@ -52,6 +52,33 @@ A `memory` driver with the same semantics (retries, DLQ, idempotency,
 concurrency, rate limit, shutdown) is the default for dev/test so the suite
 does not need Redis. It is single-process and non-durable.
 
+### Per-job priority
+
+`EnqueueOptions.priority` is an optional number where a lower value means a
+higher priority, matching BullMQ's convention. Leaving it unset means
+"normal" and preserves the previous FIFO behaviour, so the addition is purely
+additive for existing producers. The BullMQ driver passes the value straight
+through to BullMQ's native `priority` job option. The memory driver keeps its
+`waiting` array ordered by priority (stable sort, ties broken by insertion
+order) when `pump()` picks the next job, so a flood of same-priority jobs
+cannot reorder equal-priority work or starve a differently-prioritized job.
+Priority only affects ordering within a single queue's existing concurrency
+limit; per-queue priority lanes with separate concurrency budgets are out of
+scope.
+
+### Job cancellation
+
+`JobQueueDriver.cancel(queue, jobId)` returns whether a pending job was found
+and removed; it never throws for an already-completed or already-running job
+(it returns `false` instead). The BullMQ driver uses `Job.remove()` and clears
+any matching delayed timer; the memory driver removes the job from `waiting`
+or its pending-delay state. Cancellation is not preemptive: an `active` job is
+left to finish. Admins can cancel via
+`DELETE /admin/jobs/queues/:queue/jobs/:jobId`, guarded like the other admin
+routes (`AdminGuard`, `RequireAdminRole("admin")`) and returning
+`{ cancelled: boolean }`; an unknown queue yields `NotFoundException` and an
+unknown job id yields `{ cancelled: false }`.
+
 ## Consequences
 
 - `JOBS_DRIVER=bullmq` + `REDIS_URL` are required for multi-instance deploys.
@@ -63,6 +90,8 @@ does not need Redis. It is single-process and non-durable.
   `vortex_jobs_failures_total`, `vortex_jobs_dead_lettered_total`.
 - Admin: Bull Board at `/admin/queues` (BullMQ driver) and
   `GET /admin/jobs/queues`, both behind `ADMIN_API_KEYS` (admin role).
+  Pending/delayed/scheduled jobs can be cancelled through
+  `DELETE /admin/jobs/queues/:queue/jobs/:jobId`; in-flight jobs cannot.
 - Reference migration: the intents store-size / retention loop is now the
   `maintenance/intents.store-size` repeatable job. Other loops migrate
   separately.

@@ -16,12 +16,15 @@ interface MemJob {
   data: unknown;
   attempt: number;
   idempotencyKey?: string;
+  priority?: number;
 }
 
 interface MemQueue {
   settings: QueueSettings;
   waiting: MemJob[];
   delayed: Set<NodeJS.Timeout>;
+  /** Delayed jobs keyed by their timer, so cancel() can find and clear them. */
+  delayedJobs: Map<NodeJS.Timeout, MemJob>;
   delayedCount: number;
   active: Map<string, MemJob>;
   inFlight: Set<Promise<void>>;
@@ -30,6 +33,7 @@ interface MemQueue {
   /** Start timestamps inside the current rate-limit window. */
   rateWindow: number[];
   rateTimer?: NodeJS.Timeout;
+  pumpScheduled?: boolean;
 }
 
 /**
@@ -51,6 +55,7 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
       settings,
       waiting: [],
       delayed: new Set(),
+      delayedJobs: new Map(),
       delayedCount: 0,
       active: new Map(),
       inFlight: new Set(),
@@ -68,7 +73,14 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
 
     const id = opts.idempotencyKey ?? `${def.name}:${++this.seq}`;
     if (dedupe) this.idempotency.set(dedupe, id);
-    const job: MemJob = { id, def, data, attempt: 1, idempotencyKey: opts.idempotencyKey };
+    const job: MemJob = {
+      id,
+      def,
+      data,
+      attempt: 1,
+      idempotencyKey: opts.idempotencyKey,
+      priority: opts.priority,
+    };
     if (opts.delayMs) this.delay(q, def.queue, job, opts.delayMs);
     else {
       q.waiting.push(job);
@@ -112,6 +124,25 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
     return this.queue(queue).dlq.slice(-limit).reverse();
   }
 
+  async cancel(queue: string, jobId: string): Promise<boolean> {
+    const q = this.queue(queue);
+    const idx = q.waiting.findIndex((j) => j.id === jobId);
+    if (idx !== -1) {
+      q.waiting.splice(idx, 1);
+      return true;
+    }
+    for (const [timer, job] of q.delayedJobs) {
+      if (job.id !== jobId) continue;
+      clearTimeout(timer);
+      q.delayed.delete(timer);
+      q.delayedJobs.delete(timer);
+      q.delayedCount--;
+      return true;
+    }
+    // Active jobs are left to finish — cancellation is not preemptive.
+    return false;
+  }
+
   async close(timeoutMs: number): Promise<void> {
     this.closing = true;
     for (const timer of this.schedules.values()) clearInterval(timer);
@@ -124,6 +155,7 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
     clearTimeout(timeout);
     for (const [name, q] of this.queueMap) {
       for (const t of q.delayed) clearTimeout(t);
+      q.delayedJobs.clear();
       if (q.rateTimer) clearTimeout(q.rateTimer);
       if (q.active.size > 0) {
         // Return unfinished jobs to the head of the queue.
@@ -148,18 +180,30 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
     q.delayedCount++;
     const timer = setTimeout(() => {
       q.delayed.delete(timer);
+      q.delayedJobs.delete(timer);
       q.delayedCount--;
       q.waiting.push(job);
       this.pump(queue);
     }, ms);
     timer.unref?.();
     q.delayed.add(timer);
+    q.delayedJobs.set(timer, job);
   }
 
   private pump(queue: string): void {
     const q = this.queue(queue);
+    if (q.pumpScheduled) return;
+    q.pumpScheduled = true;
+    queueMicrotask(() => {
+      q.pumpScheduled = false;
+      this.drain(queue);
+    });
+  }
+
+  private drain(queue: string): void {
+    const q = this.queue(queue);
     while (!this.closing && q.active.size < q.settings.concurrency) {
-      const idx = q.waiting.findIndex((j) => q.handlers.has(j.def.name));
+      const idx = this.nextIndex(q);
       if (idx === -1) return;
       if (!this.takeRateSlot(q, queue)) return;
       const [job] = q.waiting.splice(idx, 1);
@@ -170,6 +214,27 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
       });
       q.inFlight.add(run);
     }
+  }
+
+  /**
+   * Stable selection of the next runnable job: lowest priority value wins
+   * (undefined = normal), ties broken by insertion order. Scanning for the
+   * minimum rather than sorting keeps equal-priority jobs in their original
+   * order and prevents any priority class from starving.
+   */
+  private nextIndex(q: MemQueue): number {
+    let best = -1;
+    let bestPriority = Infinity;
+    for (let i = 0; i < q.waiting.length; i++) {
+      const job = q.waiting[i];
+      if (!q.handlers.has(job.def.name)) continue;
+      const priority = job.priority ?? Infinity;
+      if (best === -1 || priority < bestPriority) {
+        best = i;
+        bestPriority = priority;
+      }
+    }
+    return best;
   }
 
   private takeRateSlot(q: MemQueue, queue: string): boolean {
