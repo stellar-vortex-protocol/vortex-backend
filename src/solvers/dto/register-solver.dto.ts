@@ -1,5 +1,5 @@
-import { IsIn, IsInt, IsNotEmpty, IsString, MinLength, Min, IsArray, ArrayMaxSize, MaxLength } from "class-validator";
-import { ApiProperty } from "@nestjs/swagger";
+import { IsIn, IsInt, IsNotEmpty, IsString, MinLength, Min, IsArray, ArrayMaxSize, MaxLength, IsOptional } from "class-validator";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { SupportedChain } from "../../intents/intents.types";
 import { IsValidAddress } from "../../common/validators/is-valid-address.validator";
 
@@ -52,4 +52,13 @@ export class RegisterSolverDto {
   @IsNotEmpty()
   @MaxLength(88)
   proofSignature!: string;
+
+  @ApiPropertyOptional({
+    description:
+      "Optional referral code: the Stellar address of an existing, active solver who referred this solver",
+    maxLength: 56,
+  })
+  @IsOptional()
+  @IsValidAddress({ chain: "stellar", message: "referralCode must be a valid Stellar address (56-char G…)" })
+  referralCode?: string;
 }

@@ -1,5 +1,22 @@
 import { SupportedChain } from "../intents/intents.types";
 
+/** Maximum number of delegated operational signers allowed per solver (issue #639). */
+export const MAX_DELEGATED_SIGNERS = 5;
+
+/**
+ * Self-reported liquidity depth for a single (chain, token) pair (issue #640).
+ *
+ * `availableAmount` is a decimal string in the token's base units. It is
+ * advisory only: the API uses it to hide intents larger than the solver has
+ * advertised it can cover. It is never decremented on fill and never enforced
+ * on-chain.
+ */
+export interface SolverInventoryEntry {
+  token: string;
+  chain: SupportedChain;
+  availableAmount: string;
+}
+
 export interface SolverRecord {
   address: string;
   name: string;
@@ -14,6 +31,32 @@ export interface SolverRecord {
   lastActiveAt: number;
   supportedChains: SupportedChain[];
   supportedTokens: string[];
+  /**
+   * Optional per-token liquidity/inventory depth declarations (issue #640).
+   *
+   * Opt-in: when no entry exists for a (chain, token) pair, intents for that
+   * pair are unaffected. When an entry exists, intents whose source amount
+   * exceeds `availableAmount` are filtered out of getEligibleIntents.
+   */
+  inventory?: SolverInventoryEntry[];
+  /**
+   * Secondary operational signing keys (issue #639).
+   *
+   * Each entry is a Stellar address that may sign day-to-day operations
+   * (accept / fill / update) on behalf of the primary `address`. The bond,
+   * reputation, and address of record always remain with the primary
+   * `address`; delegates can never deregister or withdraw the bond.
+   *
+   * Capped at MAX_DELEGATED_SIGNERS. Absent/empty means no delegation.
+   */
+  delegatedSigners?: string[];
+  /**
+   * Address of the solver that referred this solver at registration time
+   * (issue #641). Set once when the record is created and never mutated
+   * afterward, so past referral attribution survives the referrer later
+   * deregistering. Absent when the solver was not referred.
+   */
+  referredBy?: string;
   /**
    * Data source for this record (issue #399).
    * "api"   — created / updated via REST POST /solvers.
