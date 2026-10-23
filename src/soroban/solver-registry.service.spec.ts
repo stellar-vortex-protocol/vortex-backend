@@ -169,6 +169,11 @@ function makeConfigService(
       eventLoopMaxLagMs: 1000,
       rpcHealthUrls: ["https://soroban-testnet.stellar.org"],
     },
+    abuse: {
+      allowlistPubsub: "memory" as const,
+      allowlistRefreshMs: 30000,
+      captcha: { provider: "" as const, secret: "", timeoutMs: 3000 },
+    },
   };
   return {
     get: (key: string) => {

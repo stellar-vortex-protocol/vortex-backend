@@ -18,16 +18,21 @@ export interface FlagBus {
 
 const CHANNEL = "vortex:flags:changed";
 
-/** In-process bus — a single instance, or several services in one test process. */
+/**
+ * In-process bus — a single instance, or several services in one test process.
+ * `channel` lets other caches (e.g. the abuse allowlist) reuse the transport.
+ */
 export class InMemoryFlagBus implements FlagBus {
   private readonly emitter = new EventEmitter();
 
+  constructor(private readonly channel: string = CHANNEL) {}
+
   async publish(msg: FlagChangeMessage): Promise<void> {
-    this.emitter.emit(CHANNEL, msg);
+    this.emitter.emit(this.channel, msg);
   }
 
   async subscribe(handler: (msg: FlagChangeMessage) => void): Promise<void> {
-    this.emitter.on(CHANNEL, handler);
+    this.emitter.on(this.channel, handler);
   }
 
   async close(): Promise<void> {
@@ -40,18 +45,23 @@ export class RedisFlagBus implements FlagBus {
   private readonly pub: Redis;
   private readonly sub: Redis;
 
-  constructor(redisUrl: string) {
+  constructor(
+    redisUrl: string,
+    private readonly channel: string = CHANNEL,
+  ) {
     this.pub = new Redis(redisUrl, { lazyConnect: true });
     this.sub = new Redis(redisUrl, { lazyConnect: true });
   }
 
   async publish(msg: FlagChangeMessage): Promise<void> {
-    await this.pub.publish(CHANNEL, JSON.stringify(msg));
+    await this.pub.publish(this.channel, JSON.stringify(msg));
   }
 
   async subscribe(handler: (msg: FlagChangeMessage) => void): Promise<void> {
-    this.sub.on("message", (_channel: string, raw: string) => handler(JSON.parse(raw)));
-    await this.sub.subscribe(CHANNEL);
+    this.sub.on("message", (channel: string, raw: string) => {
+      if (channel === this.channel) handler(JSON.parse(raw));
+    });
+    await this.sub.subscribe(this.channel);
   }
 
   async close(): Promise<void> {

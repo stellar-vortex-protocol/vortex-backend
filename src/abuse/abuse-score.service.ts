@@ -14,6 +14,9 @@
  *   scoring result but not the counter writes (which use a background write).
  * - Allowlist wins: an API-key-allowlisted actor is scored (for transparency)
  *   but the action is always "pass".
+ * - Sustained-block alerting (issue #604): every `block` decision bumps a
+ *   per-actor Redis counter; the block that takes an actor to the configured
+ *   threshold inside the window raises one operator alert via Sentry.
  *
  * Runtime rule tuning (issue #603)
  * ────────────────────────────────
@@ -44,6 +47,7 @@ import {
   AbuseAuditEvent,
 } from "./abuse.types";
 import { AppConfig } from "../config/configuration";
+import { captureAlert } from "../common/sentry";
 import { logger as winstonLogger } from "../common/logger";
 import {
   ABUSE_RULES_STORE,
@@ -79,6 +83,20 @@ export interface AbuseRuleChange {
   after: AbuseRulesConfig[AbuseSignal];
 }
 
+/** Default number of blocks within the window that raises an alert. */
+const DEFAULT_BLOCK_ALERT_THRESHOLD = 5;
+
+/** Default length of the sustained-block window (seconds). */
+const DEFAULT_BLOCK_ALERT_WINDOW_SECONDS = 600;
+
+/** Settings for the sustained-block alert (issue #604). */
+export interface BlockAlertConfig {
+  /** Blocks within the window that trigger an alert. `0` disables alerting. */
+  threshold: number;
+  /** Window length in seconds. It opens at the actor's first block. */
+  windowSeconds: number;
+}
+
 @Injectable()
 export class AbuseScoreService implements OnModuleInit {
   private readonly logger = new Logger(AbuseScoreService.name);
@@ -93,6 +111,7 @@ export class AbuseScoreService implements OnModuleInit {
   /** Bumped on every local change so an older in-flight refresh cannot undo it. */
   private rulesGeneration = 0;
   private rulesLoadFailing = false;
+  private readonly blockAlert: BlockAlertConfig;
 
   constructor(
     private readonly config: ConfigService<AppConfig, true>,
@@ -113,6 +132,7 @@ export class AbuseScoreService implements OnModuleInit {
     this.baseRules = this.loadRulesFromConfig();
     this.rules = structuredClone(this.baseRules);
     this.rulesStore = rulesStore ?? new InMemoryAbuseRulesStore();
+    this.blockAlert = this.loadBlockAlertConfig();
   }
 
   async onModuleInit(): Promise<void> {
@@ -539,6 +559,75 @@ export class AbuseScoreService implements OnModuleInit {
     } catch (err) {
       this.logger.debug(`[abuse-scorer] audit persist failed (non-critical): ${(err as Error).message}`);
     }
+
+    if (result.action === "block") await this.trackSustainedBlocks(ctx, result);
+  }
+
+  // ── Sustained-block alerting (issue #604) ──────────────────────────────────
+
+  /**
+   * Count this block against the user and IP actors and alert on the block
+   * that takes an actor to the threshold.
+   *
+   * Each actor has an INCR counter whose TTL is the window, set when the
+   * counter is created, so the window opens at the actor's first block. The
+   * alert fires only when the count equals the threshold, which gives one
+   * alert per actor per window no matter how many blocks follow. The counter
+   * is only a trigger: the alert points at the audit log, which stays the
+   * single record of what happened.
+   */
+  private async trackSustainedBlocks(ctx: AbuseContext, result: AbuseScore): Promise<void> {
+    const { threshold, windowSeconds } = this.blockAlert;
+    if (threshold <= 0 || windowSeconds <= 0) return;
+
+    const actors = [`user:${ctx.userAddress}`, `ip:${ctx.clientIp}`];
+    try {
+      const pipeline = this.redis.pipeline();
+      for (const actor of actors) {
+        const key = `${KEY_PREFIX}:blocks:${actor}`;
+        pipeline.incr(key);
+        pipeline.ttl(key);
+      }
+      const replies = (await pipeline.exec()) ?? [];
+
+      for (const [i, actor] of actors.entries()) {
+        const count = Number(replies[i * 2]?.[1]);
+        const ttl = Number(replies[i * 2 + 1]?.[1]);
+        // -1 means the key has no TTL yet: it was just created (or a previous
+        // EXPIRE was lost), so start the window now.
+        if (ttl === -1) await this.redis.expire(`${KEY_PREFIX}:blocks:${actor}`, windowSeconds);
+        if (count === threshold) this.raiseBlockAlert(actor, count, ctx, result);
+      }
+    } catch (err) {
+      this.logger.debug(`[abuse-scorer] block alert tracking failed (non-critical): ${(err as Error).message}`);
+    }
+  }
+
+  private raiseBlockAlert(actor: string, count: number, ctx: AbuseContext, result: AbuseScore): void {
+    const auditPath = `/api/v1/abuse/audit/${encodeURIComponent(ctx.userAddress)}`;
+    const detail = {
+      actor,
+      userAddress: ctx.userAddress,
+      clientIp: ctx.clientIp,
+      operation: ctx.operation,
+      blockCount: count,
+      windowSeconds: this.blockAlert.windowSeconds,
+      score: result.total,
+      signals: result.signals.map((s) => ({ signal: s.signal, weight: s.weight, detail: s.detail })),
+      auditHistory: auditPath,
+    };
+    const message = `[abuse-detector] sustained block pattern: ${actor} blocked ${count} times in ${this.blockAlert.windowSeconds}s`;
+
+    try {
+      winstonLogger.error(message, detail);
+      captureAlert(message, {
+        tags: { alert: "abuse_sustained_block", actor, actor_type: actor.split(":")[0] },
+        extra: detail,
+        fingerprint: ["abuse_sustained_block", actor],
+      });
+    } catch (err) {
+      this.logger.debug(`[abuse-scorer] block alert delivery failed (non-critical): ${(err as Error).message}`);
+    }
   }
 
   // ── Utilities ───────────────────────────────────────────────────────────────
@@ -610,6 +699,22 @@ export class AbuseScoreService implements OnModuleInit {
     );
 
     return rules;
+  }
+
+  /**
+   * Sustained-block alert settings:
+   *   ABUSE_BLOCK_ALERT_THRESHOLD       blocks per window that alert (default 5, 0 disables)
+   *   ABUSE_BLOCK_ALERT_WINDOW_SECONDS  window length (default 600)
+   */
+  private loadBlockAlertConfig(): BlockAlertConfig {
+    const read = (envKey: string, fallback: number): number => {
+      const v = Number(process.env[envKey]);
+      return process.env[envKey] !== undefined && Number.isInteger(v) && v >= 0 ? v : fallback;
+    };
+    return {
+      threshold: read("ABUSE_BLOCK_ALERT_THRESHOLD", DEFAULT_BLOCK_ALERT_THRESHOLD),
+      windowSeconds: read("ABUSE_BLOCK_ALERT_WINDOW_SECONDS", DEFAULT_BLOCK_ALERT_WINDOW_SECONDS),
+    };
   }
 
   async onModuleDestroy(): Promise<void> {

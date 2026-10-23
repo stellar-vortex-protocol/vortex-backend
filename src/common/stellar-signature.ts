@@ -176,3 +176,12 @@ export function buildDisputeReviewMessage(disputeId: string): string {
 export function buildDisputeDecisionMessage(disputeId: string, resolution: string, reason: string): string {
   return `dispute-decision:${disputeId}:${resolution}:${reason}`;
 }
+
+/**
+ * Canonical message an address holder signs to read their own abuse score or
+ * audit history (issue #607, `GET /api/v1/abuse/me/*`). The nonce is consumed
+ * once and `expiresAt` bounds how long the signature is usable.
+ */
+export function buildAbuseSelfServiceMessage(address: string, nonce: string, expiresAt: number): string {
+  return `abuse-self-service:${address.toLowerCase()}:${nonce}:${expiresAt}`;
+}

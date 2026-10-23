@@ -186,3 +186,29 @@ export interface AbuseAuditEvent {
   signals: SignalFiring[];
   allowlisted: boolean;
 }
+
+/**
+ * Reduced audit event returned to an address holder by
+ * `GET /api/v1/abuse/me/audit` (issue #607).
+ *
+ * Deliberately a separate type from {@link AbuseAuditEvent}: fields are copied
+ * one by one in {@link toSelfAuditEvent}, so a field added to the admin view
+ * never reaches the public one by accident. Excluded on purpose: clientIp,
+ * userAddress, the numeric score, allowlisted, and signal `detail` strings
+ * (which can contain IPs and counts about other traffic).
+ */
+export interface AbuseSelfAuditEvent {
+  timestamp: string;
+  operation: AbuseAuditEvent["operation"];
+  action: AbuseAction;
+  signals: Array<{ signal: AbuseSignal; weight: number }>;
+}
+
+export function toSelfAuditEvent(event: AbuseAuditEvent): AbuseSelfAuditEvent {
+  return {
+    timestamp: event.timestamp,
+    operation: event.operation,
+    action: event.action,
+    signals: event.signals.map((s) => ({ signal: s.signal, weight: s.weight })),
+  };
+}

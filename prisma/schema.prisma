@@ -841,3 +841,28 @@ model PriceHistory {
   @@index([tokenId, recordedAt], name: "price_history_token_idx")
   @@map("price_history")
 }
+
+// ─── Abuse allowlist (issue #605) ─────────────────────────────────────────────
+// Runtime-managed allowlist for the abuse detector. ABUSE_ALLOWLIST still seeds
+// entries at boot; rows here are added and removed through the admin API.
+
+enum AbuseAllowlistEntryType {
+  address
+  ip
+  api_key
+}
+
+model AbuseAllowlistEntry {
+  id        String                  @id @default(uuid()) @map("id")
+  type      AbuseAllowlistEntryType @map("type")
+  /// Lowercased Stellar address, exact IP address, or the SHA-256 hex digest
+  /// of an API key. Raw API keys are never stored.
+  value     String                  @map("value")
+  label     String?                 @map("label")
+  createdAt DateTime                @default(now()) @map("created_at") @db.Timestamptz
+  /// Admin principal id that added the entry.
+  createdBy String                  @map("created_by")
+
+  @@unique([type, value])
+  @@map("abuse_allowlist_entries")
+}
