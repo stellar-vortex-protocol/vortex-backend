@@ -5,6 +5,7 @@ import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { ExpressAdapter } from "@bull-board/express";
 import type { Router } from "express";
 import { AppConfig } from "../config/configuration";
+import { logger as winstonLogger } from "../common/logger";
 import { MetricsService } from "../metrics/metrics.service";
 import { BullMqJobQueueDriver } from "./bullmq-job-queue.driver";
 import { MemoryJobQueueDriver } from "./memory-job-queue.driver";
@@ -22,6 +23,41 @@ import {
 /** Optional injection token to supply a custom {@link JobQueueDriver} (tests). */
 export const JOB_QUEUE_DRIVER = Symbol("JOB_QUEUE_DRIVER");
 
+/** Queue name for the daily credential expiry-warning sweep (issue #708). */
+export const EXPIRY_WARNING_QUEUE = "credentials";
+
+/** Job name for the daily credential expiry-warning sweep (issue #708). */
+export const EXPIRY_WARNING_JOB = "expiry-warning";
+
+/** Default warning window when none is configured: 7 days. */
+export const DEFAULT_EXPIRY_WARNING_WINDOW_DAYS = 7;
+
+/** One credential surfaced by the expiry-warning sweep. */
+export interface ExpiringCredential {
+  kind: "api_key" | "solver_credential";
+  id: string;
+  /** Non-secret identifier shown to operators (key prefix / credential label). */
+  prefix: string;
+  /** Owner of an API key, or the solver the credential belongs to. */
+  owner: string;
+  expiresAt: Date;
+}
+
+/** Repository surface the expiry-warning job depends on (issue #708). */
+export interface ExpiringCredentialsSource {
+  findExpiringBetween(from: Date, to: Date): Promise<ExpiringCredential[]>;
+  markExpiryWarned(ids: string[]): Promise<void>;
+}
+
+/** Optional injection token for the expiry-warning data source (tests). */
+export const EXPIRY_WARNING_SOURCE = Symbol("EXPIRY_WARNING_SOURCE");
+
+/** Payload of the daily expiry-warning job. */
+export interface ExpiryWarningJobData {
+  /** Warning window in days; resolved from config when omitted. */
+  windowDays?: number;
+}
+
 /**
  * Background job facade (issue #494).
  *
@@ -35,11 +71,13 @@ export class JobsService implements OnApplicationShutdown {
   private readonly driver: JobQueueDriver;
   private readonly isWorker: boolean;
   private readonly shutdownTimeoutMs: number;
+  private readonly expiryWarningWindowDays: number;
 
   constructor(
     config: ConfigService<AppConfig, true>,
     @Optional() private readonly metrics?: MetricsService,
     @Optional() @Inject(JOB_QUEUE_DRIVER) driver?: JobQueueDriver,
+    @Optional() @Inject(EXPIRY_WARNING_SOURCE) private readonly expirySource?: ExpiringCredentialsSource,
   ) {
     const jobs = config.get("jobs", { infer: true });
     this.driver =
@@ -49,6 +87,9 @@ export class JobsService implements OnApplicationShutdown {
         : new MemoryJobQueueDriver());
     this.isWorker = config.get("processRole", { infer: true }) !== "api";
     this.shutdownTimeoutMs = jobs.shutdownTimeoutMs;
+    this.expiryWarningWindowDays =
+      (config as unknown as ConfigService<Record<string, number>>).get("expiryWarningWindowDays") ??
+      DEFAULT_EXPIRY_WARNING_WINDOW_DAYS;
     this.metrics?.setQueueDepthProvider(async () =>
       (await this.stats()).flatMap((s) => [
         { queue: s.queue, state: "waiting", count: s.waiting },
@@ -81,6 +122,60 @@ export class JobsService implements OnApplicationShutdown {
       return;
     }
     this.driver.process(def, handler, this.events);
+  }
+
+  /**
+   * Registers the daily credential expiry-warning sweep (issue #708).
+   *
+   * Reuses the shared job-queue infrastructure rather than a bespoke
+   * `setInterval`: the job is scheduled once per day and processed only in
+   * worker-capable roles. Credentials already warned about are excluded by
+   * the repository query and marked via `markExpiryWarned`, so the same
+   * credential is not re-alerted every day inside the window.
+   */
+  registerExpiryWarningJob(): void {
+    const def: JobDefinition<ExpiryWarningJobData> = {
+      queue: EXPIRY_WARNING_QUEUE,
+      name: EXPIRY_WARNING_JOB,
+      attempts: 3,
+      backoffMs: 1_000,
+    };
+    this.defineQueue(EXPIRY_WARNING_QUEUE, { concurrency: 1 });
+    void this.schedule(def, 24 * 60 * 60 * 1000, {});
+    this.process(def, async (data) => {
+      await this.runExpiryWarningSweep(data);
+    });
+  }
+
+  /**
+   * Runs one expiry-warning sweep. Returns the credentials surfaced so the
+   * admin endpoint and tests can reuse the same query path.
+   */
+  async runExpiryWarningSweep(data: ExpiryWarningJobData = {}): Promise<ExpiringCredential[]> {
+    if (!this.expirySource) {
+      this.logger.debug("[jobs] expiry-warning: no credential source wired — skipping");
+      return [];
+    }
+    const windowDays = data.windowDays ?? this.expiryWarningWindowDays;
+    const now = new Date();
+    const until = new Date(now.getTime() + windowDays * 24 * 60 * 60 * 1000);
+
+    const expiring = await this.expirySource.findExpiringBetween(now, until);
+    for (const credential of expiring) {
+      winstonLogger.warn("Credential expiring soon", {
+        event: "credential.expiring_soon",
+        kind: credential.kind,
+        id: credential.id,
+        prefix: credential.prefix,
+        owner: credential.owner,
+        expiresAt: credential.expiresAt.toISOString(),
+        windowDays,
+      });
+    }
+    if (expiring.length > 0) {
+      await this.expirySource.markExpiryWarned(expiring.map((c) => c.id));
+    }
+    return expiring;
   }
 
   async stats(): Promise<QueueStats[]> {

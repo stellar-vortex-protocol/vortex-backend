@@ -6,16 +6,16 @@
  *   - An exact IPv4 address, e.g. `203.0.113.7`.
  *   - An IPv4 CIDR block, e.g. `203.0.113.0/24`.
  *   - An exact IPv6 address, e.g. `2001:db8::1`.
+ *   - An IPv6 CIDR block, e.g. `2001:db8::/64`.
  *   - The literal `*` to allow any source.
  *
- * Anything else — a typo, a hostname, an IPv6 CIDR — is treated as a
+ * Anything else — a typo, a hostname, a malformed CIDR — is treated as a
  * NON-match, never as a wildcard. An operator who mistypes an allowlist entry
  * locks their own credential out rather than silently opening it to the world,
  * and {@link describeAllowlistEntry} surfaces the reason in the API response.
  *
- * IPv6 CIDR blocks are deliberately not parsed: a partial IPv6 implementation
- * is more dangerous than none, since it would have to decide what to do with
- * the input it cannot understand. Use an exact IPv6 address instead.
+ * IPv6 CIDR blocks are masked over the full 128-bit address space, giving them
+ * the same subnet granularity IPv4 CIDR blocks already have.
  */
 
 /** Result of parsing a single allowlist entry. */
@@ -23,6 +23,7 @@ export type AllowlistEntry =
   | { kind: "any" }
   | { kind: "ipv4"; address: number; prefix: number }
   | { kind: "ipv6"; address: bigint }
+  | { kind: "ipv6-cidr"; address: bigint; prefix: number }
   | { kind: "invalid"; reason: string };
 
 /**
@@ -130,11 +131,10 @@ export function parseAllowlistEntry(entry: string): AllowlistEntry {
       if (prefix > 32) return { kind: "invalid", reason: "IPv4 prefix must be 0-32" };
       return { kind: "ipv4", address: v4, prefix };
     }
-    if (parseIpv6(addr) !== null) {
-      return {
-        kind: "invalid",
-        reason: "IPv6 CIDR blocks are not supported; use an exact IPv6 address",
-      };
+    const v6 = parseIpv6(addr);
+    if (v6 !== null) {
+      if (prefix > 128) return { kind: "invalid", reason: "IPv6 prefix must be 0-128" };
+      return { kind: "ipv6-cidr", address: v6, prefix };
     }
     return { kind: "invalid", reason: "not an IP address" };
   }
@@ -158,6 +158,20 @@ function entryMatches(entry: AllowlistEntry, ip: AllowlistEntry): boolean {
     if (entry.prefix === 0) return true;
     const mask = (0xffffffff << (32 - entry.prefix)) >>> 0;
     return (ip.address & mask) >>> 0 === (entry.address & mask) >>> 0;
+  }
+
+  if (entry.kind === "ipv6-cidr") {
+    // IPv4 peers live in the `::ffff:` mapped space, so mask them there too.
+    const candidate =
+      ip.kind === "ipv4"
+        ? (0xffffn << 32n) | BigInt(ip.address >>> 0)
+        : ip.kind === "ipv6"
+          ? ip.address
+          : null;
+    if (candidate === null) return false;
+    if (entry.prefix === 0) return true;
+    const mask = (1n << 128n) - (1n << (128n - BigInt(entry.prefix)));
+    return (candidate & mask) === (entry.address & mask);
   }
 
   // entry.kind === "ipv6" — an exact match, including IPv4-mapped addresses
@@ -224,6 +238,8 @@ export function describeAllowlistEntry(entry: string): string {
       return `IPv4 ${parsed.prefix === 32 ? "address" : `CIDR /${parsed.prefix}`}`;
     case "ipv6":
       return "IPv6 address";
+    case "ipv6-cidr":
+      return `IPv6 CIDR /${parsed.prefix}`;
     case "invalid":
       return `invalid: ${parsed.reason}`;
   }

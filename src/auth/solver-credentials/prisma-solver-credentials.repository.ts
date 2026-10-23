@@ -80,6 +80,30 @@ export class PrismaSolverCredentialsRepository {
     return result.count;
   }
 
+  /**
+   * Find active credentials whose `expiresAt` falls within `[nowSec, untilSec]`
+   * (inclusive on both ends). Revoked credentials and already-expired ones are
+   * excluded. Used by the scheduled expiry-warning job (issue #708).
+   */
+  async findExpiringBetween(nowSec: number, untilSec: number): Promise<SolverCredentialRecord[]> {
+    const rows = await this.prisma.solverCredential.findMany({
+      where: {
+        revokedAt: null,
+        expiresAt: { gte: nowSec, lte: untilSec },
+      },
+      orderBy: { expiresAt: "asc" },
+    });
+    return rows.map((r) => this.toRecord(r));
+  }
+
+  /** Record that an expiry warning was emitted for this credential (issue #708). */
+  async markExpiryWarned(id: string, nowSec: number): Promise<void> {
+    await this.prisma.solverCredential.update({
+      where: { id },
+      data: { lastWarnedAt: nowSec },
+    });
+  }
+
   /** Record last usage (best-effort). */
   async touchLastUsed(id: string, nowSec: number): Promise<void> {
     try {
@@ -104,6 +128,7 @@ export class PrismaSolverCredentialsRepository {
     revokedAt: number | null;
     rotatedAt: number | null;
     lastUsedAt: number | null;
+    lastWarnedAt?: number | null;
   }): SolverCredentialRecord {
     return {
       id: row.id,
@@ -117,6 +142,7 @@ export class PrismaSolverCredentialsRepository {
       revokedAt: row.revokedAt,
       rotatedAt: row.rotatedAt,
       lastUsedAt: row.lastUsedAt,
+      lastWarnedAt: row.lastWarnedAt ?? null,
     };
   }
 }
@@ -134,4 +160,6 @@ export interface SolverCredentialRecord {
   revokedAt: number | null;
   rotatedAt: number | null;
   lastUsedAt: number | null;
+  /** Epoch seconds of the last expiry warning emitted for this credential. */
+  lastWarnedAt: number | null;
 }

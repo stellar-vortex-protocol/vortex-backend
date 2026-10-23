@@ -53,6 +53,10 @@ GET  /api/v1/chain/health         — Soroban RPC health (read-only)
 GET  /api/v1/chain/ledger         — latest Soroban ledger
 GET  /api/v1/chain/network        — Soroban network info
 GET  /api/v1/chain/account/:key   — Stellar account lookup
+POST /api/v1/api-keys/signup      — public self-service signup (email); always issues an `integrator`-tier key
+GET  /api/v1/api-keys/signup/confirm — complete signup via emailed token; returns the plaintext key exactly once
+GET  /api/v1/admin/api-keys/:id/usage — per-key request volume (bucketed, allowed vs 429'd; `?from=&to=`)
+GET  /api/v1/admin/credentials/expiring-soon — API keys / solver credentials expiring within the warning window
 ```
 
 ### Health timeline

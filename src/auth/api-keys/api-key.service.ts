@@ -86,4 +86,82 @@ export class ApiKeyService {
   async listKeys(owner: string): Promise<ApiKeyRecord[]> {
     return this.repo.listByOwner(owner);
   }
+
+  /**
+   * Create a self-service API key for an integrator (issue #707).
+   *
+   * The tier is hard-coded to `integrator` — callers cannot influence it, so
+   * the public signup flow can never mint a `solver` or `partner` key.
+   */
+  async createSelfServiceKey(
+    email: string,
+  ): Promise<{ record: ApiKeyRecord; plaintext: string; apiKey: string; tier: ApiKeyTier }> {
+    const created = await this.createKey({ tier: "integrator", owner: email });
+    return {
+      ...created,
+      apiKey: created.plaintext,
+      tier: created.record.tier,
+    };
+  }
+
+  /**
+   * Record one request against a key's current hourly usage bucket
+   * (issue #705). Fire-and-forget: usage tracking must never add latency to
+   * (or fail) the hot throttle path.
+   */
+  recordUsage(keyId: string, allowed: boolean, nowSec = Math.floor(Date.now() / 1000)): Promise<void> {
+    const bucketStart = Math.floor(nowSec / 3600) * 3600;
+    return this.repo.incrementUsage(keyId, bucketStart, allowed).catch((err: unknown) => {
+      this.logger.debug(`Failed to record API key usage id=${keyId}: ${String(err)}`);
+    });
+  }
+
+  /**
+   * Fetch bucketed usage for a key between `from` (inclusive) and `to`
+   * (exclusive), with allowed-vs-throttled totals.
+   */
+  async getUsage(
+    id: string,
+    from: number | Date,
+    to: number | Date,
+  ): Promise<{
+    buckets: Array<{ start: Date; bucketStart: number; allowed: number; throttled: number }>;
+    totals: { allowed: number; throttled: number };
+  }> {
+    const fromSec = from instanceof Date ? Math.floor(from.getTime() / 1000) : from;
+    const toSec = to instanceof Date ? Math.floor(to.getTime() / 1000) : to;
+    const rawBuckets = await this.repo.getUsage(id, fromSec, toSec);
+    const buckets = rawBuckets.map((b) => ({
+      start: new Date(b.bucketStart * 1000),
+      bucketStart: b.bucketStart,
+      allowed: b.allowedCount,
+      throttled: b.throttledCount,
+    }));
+    const totals = buckets.reduce(
+      (acc, b) => ({ allowed: acc.allowed + b.allowed, throttled: acc.throttled + b.throttled }),
+      { allowed: 0, throttled: 0 },
+    );
+    return { buckets, totals };
+  }
+
+  /** Delete usage buckets older than `retentionSec` (bounded table growth). */
+  async pruneUsage(retentionSec: number, nowSec = Math.floor(Date.now() / 1000)): Promise<number> {
+    return this.repo.pruneUsageBefore(nowSec - retentionSec);
+  }
+
+  /** Keys whose `expiresAt` falls within the next `windowSec` seconds (issue #708). */
+  async findExpiringSoon(windowSec: number, nowSec = Math.floor(Date.now() / 1000)): Promise<ApiKeyRecord[]> {
+    return this.repo.findExpiringBetween(nowSec, nowSec + windowSec);
+  }
+
+  async findExpiringBetween(from: number | Date, to: number | Date): Promise<ApiKeyRecord[]> {
+    const fromSec = from instanceof Date ? Math.floor(from.getTime() / 1000) : from;
+    const toSec = to instanceof Date ? Math.floor(to.getTime() / 1000) : to;
+    return this.repo.findExpiringBetween(fromSec, toSec);
+  }
+
+  /** Mark a key as having been warned about its upcoming expiry. */
+  async markExpiryWarned(id: string, nowSec = Math.floor(Date.now() / 1000)): Promise<void> {
+    await this.repo.markExpiryWarned(id, nowSec);
+  }
 }

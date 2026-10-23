@@ -81,6 +81,84 @@ export class PrismaApiKeysRepository {
     }
   }
 
+  /**
+   * Increment the per-key, per-bucket request counter (issue #705).
+   *
+   * Uses an atomic upsert on the `[apiKeyId, bucketStart]` unique key so
+   * concurrent requests in the same bucket never lose increments.  Wrapped in
+   * try/catch so usage tracking never throws into the hot throttle path.
+   */
+  async incrementUsage(apiKeyId: string, bucketStart: number, allowed: boolean): Promise<void> {
+    try {
+      await this.prisma.apiKeyUsageBucket.upsert({
+        where: { api_key_usage_bucket_key: { apiKeyId, bucketStart } },
+        create: {
+          apiKeyId,
+          bucketStart,
+          allowedCount: allowed ? 1 : 0,
+          throttledCount: allowed ? 0 : 1,
+        },
+        update: allowed
+          ? { allowedCount: { increment: 1 } }
+          : { throttledCount: { increment: 1 } },
+      });
+    } catch {
+      // Usage tracking is best-effort.
+    }
+  }
+
+  /** Fetch usage buckets for a key within `[fromSec, toSec]`, oldest first. */
+  async getUsage(apiKeyId: string, fromSec: number, toSec: number): Promise<ApiKeyUsageBucket[]> {
+    const rows = await this.prisma.apiKeyUsageBucket.findMany({
+      where: { apiKeyId, bucketStart: { gte: fromSec, lte: toSec } },
+      orderBy: { bucketStart: "asc" },
+    });
+    return rows.map((r) => ({
+      bucketStart: r.bucketStart,
+      allowedCount: r.allowedCount,
+      throttledCount: r.throttledCount,
+    }));
+  }
+
+  /** Delete usage buckets older than `cutoffSec` (retention pruning). */
+  async pruneUsageBefore(cutoffSec: number): Promise<number> {
+    const result = await this.prisma.apiKeyUsageBucket.deleteMany({
+      where: { bucketStart: { lt: cutoffSec } },
+    });
+    return result.count;
+  }
+
+  async pruneUsage(cutoffSec: number): Promise<number> {
+    return this.pruneUsageBefore(cutoffSec);
+  }
+
+  /**
+   * Find active (non-revoked, non-expired) keys whose `expiresAt` falls within
+   * `[nowSec, untilSec]` (issue #708).
+   */
+  async findExpiringBetween(nowSec: number, untilSec: number): Promise<ApiKeyRecord[]> {
+    const rows = await this.prisma.apiKey.findMany({
+      where: {
+        revokedAt: null,
+        expiresAt: { not: null, gte: nowSec, lte: untilSec },
+      },
+      orderBy: { expiresAt: "asc" },
+    });
+    return rows.map((r) => this.toRecord(r));
+  }
+
+  /** Record that an expiry warning was emitted for a key (best-effort). */
+  async markExpiryWarned(id: string, nowSec: number): Promise<void> {
+    try {
+      await this.prisma.apiKey.update({
+        where: { id },
+        data: { lastWarnedAt: nowSec },
+      });
+    } catch {
+      // Warning bookkeeping is best-effort.
+    }
+  }
+
   private toRecord(row: {
     id: string;
     keyPrefix: string;
@@ -92,6 +170,7 @@ export class PrismaApiKeysRepository {
     revokedAt: number | null;
     expiresAt: number | null;
     lastUsedAt: number | null;
+    lastWarnedAt: number | null;
   }): ApiKeyRecord {
     return {
       id: row.id,
@@ -104,6 +183,7 @@ export class PrismaApiKeysRepository {
       revokedAt: row.revokedAt,
       expiresAt: row.expiresAt,
       lastUsedAt: row.lastUsedAt,
+      lastWarnedAt: row.lastWarnedAt,
     };
   }
 }
@@ -120,4 +200,12 @@ export interface ApiKeyRecord {
   revokedAt: number | null;
   expiresAt: number | null;
   lastUsedAt: number | null;
+  lastWarnedAt: number | null;
+}
+
+/** A single per-key usage time bucket (issue #705). */
+export interface ApiKeyUsageBucket {
+  bucketStart: number;
+  allowedCount: number;
+  throttledCount: number;
 }

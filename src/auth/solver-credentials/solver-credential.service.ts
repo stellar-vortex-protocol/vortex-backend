@@ -260,6 +260,22 @@ export class SolverCredentialService implements OnModuleDestroy {
     return this.repo.listBySolver(solverAddress);
   }
 
+  /** Find credentials expiring between `from` and `to` (issue #708). */
+  async findExpiringBetween(
+    from: number | Date,
+    to: number | Date,
+  ): Promise<Array<SolverCredentialRecord & { solverId: string }>> {
+    const fromSec = from instanceof Date ? Math.floor(from.getTime() / 1000) : from;
+    const toSec = to instanceof Date ? Math.floor(to.getTime() / 1000) : to;
+    const rows = await this.repo.findExpiringBetween(fromSec, toSec);
+    return rows.map((r) => ({ ...r, solverId: r.solverAddress }));
+  }
+
+  /** Mark a credential as having been warned about its upcoming expiry. */
+  async markExpiryWarned(id: string, nowSec = Math.floor(Date.now() / 1000)): Promise<void> {
+    await this.repo.markExpiryWarned(id, nowSec);
+  }
+
   /** Whether a credential id is known-revoked on this replica. */
   isRevoked(credentialId: string): boolean {
     return this.revokedSet.has(credentialId);

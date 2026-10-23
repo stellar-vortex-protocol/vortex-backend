@@ -710,9 +710,37 @@ model ApiKey {
   /// Unix epoch seconds; null for keys that do not expire.
   expiresAt Int?       @map("expires_at")
   lastUsedAt Int?      @map("last_used_at")
+  /// Unix epoch seconds of the last expiry-warning notification (issue #708);
+  /// null until the warning job has alerted for this key.
+  lastWarnedAt Int?    @map("last_warned_at")
+
+  usageBuckets ApiKeyUsageBucket[]
 
   @@index([tier])
   @@map("api_keys")
+}
+
+// ─── API key usage buckets (issue #705) ──────────────────────────────────────
+// Lightweight per-key, per-hour request counters incremented fire-and-forget
+// from TieredThrottleGuard. Rows are pruned by the archival retention job, so
+// this table stays bounded by (active keys × retention window in hours).
+
+model ApiKeyUsageBucket {
+  id             String   @id @default(uuid()) @map("id")
+  /// Owning key; cascade-deleted with the key.
+  apiKeyId       String   @map("api_key_id")
+  apiKey         ApiKey   @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  /// Unix epoch seconds truncated to the start of the hour bucket.
+  bucketStart    Int      @map("bucket_start")
+  /// Requests that passed the rate limiter.
+  allowedCount   Int      @default(0) @map("allowed_count")
+  /// Requests rejected with 429 by the rate limiter.
+  throttledCount Int      @default(0) @map("throttled_count")
+
+  @@unique([apiKeyId, bucketStart], name: "api_key_usage_bucket_key")
+  /// Backs retention pruning by age.
+  @@index([bucketStart], name: "api_key_usage_bucket_start_idx")
+  @@map("api_key_usage_buckets")
 }
 
 model SolverCredential {
@@ -736,6 +764,9 @@ model SolverCredential {
   /// Unix epoch seconds of the last rotation (previous credential revoked).
   rotatedAt     Int?     @map("rotated_at")
   lastUsedAt    Int?     @map("last_used_at")
+  /// Unix epoch seconds of the last expiry-warning notification (issue #708);
+  /// null until the warning job has alerted for this credential.
+  lastWarnedAt  Int?     @map("last_warned_at")
 
   @@index([solverAddress])
   @@map("solver_credentials")

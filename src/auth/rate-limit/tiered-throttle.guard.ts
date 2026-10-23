@@ -69,6 +69,13 @@ export class TieredThrottleGuard implements CanActivate {
     res.setHeader("RateLimit-Remaining", String(result.remaining));
     res.setHeader("RateLimit-Reset", String(Math.ceil(result.resetAt / 1000)));
 
+    if (keyRecord) {
+      // Fire-and-forget usage accounting: never awaited, so it adds no latency
+      // to the hot throttle path. Rejections are swallowed to keep the guard
+      // resilient to counter-store failures.
+      void this.apiKeys.recordUsage(keyRecord.id, result.allowed).catch(() => undefined);
+    }
+
     if (!result.allowed) {
       const retryAfterSec = Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1000));
       res.setHeader("Retry-After", String(retryAfterSec));
