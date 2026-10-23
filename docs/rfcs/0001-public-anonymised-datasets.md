@@ -70,6 +70,51 @@ overwriting history. `manifest.json` records the revision so consumers can tell
 a repaired publication from the original. The exporter keys artifacts under
 `datasets/YYYY-MM-DD/rev-N/`.
 
+### Latest publication (issue #598)
+
+`GET /api/v1/datasets/latest` returns the newest publication (latest date, then
+highest revision) in the same shape as one entry of `GET /api/v1/datasets`, or
+404 when nothing has been published. It reuses `listDatasets()`'s ordering; if
+the manifest scan becomes slow, writing a small "latest" pointer object next to
+each manifest is the natural optimisation.
+
+### Webhook notifications (issue #597)
+
+Discovery is otherwise pull-based. Operators can opt in to a push hint:
+
+- `DATASETS_WEBHOOK_URLS` — comma-separated http(s) URLs. Empty disables it.
+- `DATASETS_WEBHOOK_SECRET` — dedicated HMAC key (≥ 32 chars), required when URLs
+  are set. It is independent of every other key (never `SOROBAN_SIGNING_KEY`).
+
+After `exportDaily()` has written `manifest.json`, each URL receives a `POST` whose
+body is the exact bytes of that `manifest.json`, with headers:
+
+| Header | Value |
+| --- | --- |
+| `Content-Type` | `application/json` |
+| `X-Vortex-Event` | `dataset.published` |
+| `X-Vortex-Delivery` | UUID shared by all subscribers and retries of one publication |
+| `X-Vortex-Signature` | `sha256=<hex HMAC-SHA256(secret, raw body)>` |
+
+Receivers should recompute the HMAC over the raw body and compare in constant
+time (`verifyDatasetWebhookSignature()` in `src/datasets/dataset-webhook.notifier.ts`
+is the reference).
+
+Delivery is best-effort. Network errors, 5xx, 408 and 429 are retried up to 3
+attempts with exponential backoff (500 ms, then 1 s; capped at 5 s); other 4xx
+responses are not retried. Failures are logged and never fail or roll back the
+publication — the bucket remains the source of truth, so subscribers that miss
+a notification can still poll `GET /api/v1/datasets/latest`. Past publications
+are not replayed to new subscribers.
+
+All deliveries go through `HttpEgressService` with private, loopback, link-local
+and cloud-metadata addresses blocked and redirects disabled. Hosts are limited to
+`WEBHOOK_ALLOWLIST` when it is set, otherwise to the hosts of the configured
+webhook URLs.
+
+There is no subscription-management API; subscribers are configured by the
+operator through environment variables.
+
 ## Alternatives considered
 
 - **Hosted query engine (DuckDB/SQL endpoint).** Rejected — explicitly out of

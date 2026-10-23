@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { IntentsService } from "../intents/intents.service";
 import { Intent } from "../intents/intents.types";
 import { SolversService } from "../solvers/solvers.service";
@@ -17,6 +17,7 @@ import { toParquet } from "./parquet-exporter";
 import { Anonymizer } from "./privacy";
 import { DATASET_SCHEMAS, schemaId } from "./schemas";
 import { DATASETS_CONFIG, DATASETS_STORAGE } from "./datasets.tokens";
+import { DatasetWebhookNotifier } from "./dataset-webhook.notifier";
 
 /** Summary of one published dataset kind, for the listing endpoint. */
 export interface DatasetListingEntry {
@@ -48,6 +49,7 @@ export class DatasetsService {
     @Inject(DATASETS_STORAGE) private readonly storage: ObjectStorage,
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
+    @Optional() private readonly webhookNotifier?: DatasetWebhookNotifier,
   ) {
     this.anonymizer = new Anonymizer(
       config.salt,
@@ -92,6 +94,18 @@ export class DatasetsService {
     return publications.sort((a, b) =>
       a.date === b.date ? b.revision - a.revision : b.date.localeCompare(a.date),
     );
+  }
+
+  /**
+   * The most recent publication (newest date, then highest revision), or
+   * `null` when nothing has been published yet.
+   *
+   * This reuses `listDatasets()`'s ordering for correctness. If the full
+   * manifest scan ever gets too slow, the natural optimisation is to write a
+   * small "latest" pointer object alongside each manifest and read only that.
+   */
+  async getLatest(): Promise<DatasetPublication | null> {
+    return (await this.listDatasets())[0] ?? null;
   }
 
   /**
@@ -154,14 +168,21 @@ export class DatasetsService {
       files,
     });
 
+    const manifestBody = JSON.stringify(manifest, null, 2);
     await this.storage.put(
       this.keyFor(dateKey, revision, "manifest.json"),
-      Buffer.from(JSON.stringify(manifest, null, 2), "utf8"),
+      Buffer.from(manifestBody, "utf8"),
     );
 
     this.logger.log(
       `Published ${dateKey} rev ${revision} (${rowCounts.intents} intents, ${rowCounts.fills} fills)`,
     );
+
+    // Best-effort notification. The manifest is already persisted and the
+    // notifier never throws, so a failing subscriber cannot fail the export.
+    if (this.webhookNotifier) {
+      await this.webhookNotifier.notify(manifest, manifestBody);
+    }
     return manifest;
   }
 

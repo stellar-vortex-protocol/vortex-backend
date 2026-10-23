@@ -110,3 +110,42 @@ solver's own `avgMs`/`volume`/`count` next to the protocol median:
   bigint base units, floored.
 - Every bucket with any protocol fills is returned. When the solver had no
   fills in a bucket, `solver` is `null` and the protocol median is still given.
+
+## Addendum: grouped ad-hoc queries (issue #595)
+
+Each fixed metric (`volume`, `fees`, `latency`, `solver-share`) is a hand-written
+`IAnalyticsStore` method. To answer simple cross-tabulations ("fees by chain and
+token") without adding a method per combination, `POST /api/v1/analytics/query`
+accepts a declarative body:
+
+```json
+{ "metric": "fees", "interval": "1h", "from": 1767225600, "to": 1767312000,
+  "groupBy": ["chain", "token"], "chain": "stellar" }
+```
+
+and returns one row per bucket × group-by combination, e.g.
+`{ "start": "…", "chain": "stellar", "token": "USDC", "fees": "900" }`. Both
+backends implement a single `queryGrouped()` method.
+
+- **Bounded, not general.** `metric` is `volume | fees` (additive sums only) and
+  `groupBy` is any subset of `chain | token | solver`. `token` means the fill's
+  *source* token so each fill is counted once. Arbitrary SQL or free-form
+  dimensions are out of scope.
+- **SQL safety.** The DTO rejects any `groupBy` value outside the enumerated set
+  (and duplicates) with 400. The Timescale store then maps each dimension through
+  a fixed `Record<GroupByDimension, string>` column allowlist
+  (`chain → "chain"`, `token → "src_token"`, `solver → "solver"`) and the metric
+  through a second allowlist; caller strings never reach the SQL text.
+  `normalizeGroupBy()` throws on unknown values as a second line of defence, and
+  filter values keep using the existing `lit()` escaping.
+- **Backward compatible.** An empty or omitted `groupBy` returns exactly what
+  `GET /analytics/volume` / `GET /analytics/fees` return. The fixed endpoints are
+  unchanged.
+
+## Addendum: CSV export (issue #596)
+
+`GET /api/v1/analytics/:metric?format=csv` (or `Accept: text/csv`) returns the same
+rows as the JSON response as `text/csv`, serialised by the dataset exporter's
+`toCsv()`. The column list per metric lives in `src/analytics/analytics-csv.ts`;
+these are ephemeral response shapes, not versioned dataset contracts. Base-unit
+amounts are already strings and are written verbatim. JSON stays the default.

@@ -1,7 +1,27 @@
-import { BadRequestException, Controller, Get, Param, Query } from "@nestjs/common";
-import { ApiOkResponse, ApiOperation, ApiParam, ApiTags } from "@nestjs/swagger";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  Param,
+  Post,
+  Query,
+  Res,
+} from "@nestjs/common";
+import { ApiOkResponse, ApiOperation, ApiParam, ApiProduces, ApiTags } from "@nestjs/swagger";
+import type { Response } from "express";
+import { analyticsToCsv } from "./analytics-csv";
 import { AnalyticsService } from "./analytics.service";
-import { ANALYTICS_METRICS, AnalyticsMetric, AnalyticsQuery } from "./analytics.types";
+import {
+  ANALYTICS_METRICS,
+  AnalyticsMetric,
+  AnalyticsQuery,
+  GroupedPoint,
+  normalizeGroupBy,
+} from "./analytics.types";
+import { AnalyticsGroupedQueryDto } from "./dto/analytics-grouped-query.dto";
 import { AnalyticsQueryDto } from "./dto/analytics-query.dto";
 
 @ApiTags("analytics")
@@ -23,11 +43,43 @@ export class AnalyticsController {
     return this.analyticsService.getSolverBenchmark(this.toQuery(query), address);
   }
 
+  @Post("query")
+  @HttpCode(200)
+  @ApiOperation({
+    summary: "Ad-hoc volume/fees aggregate grouped by any subset of chain, token, and solver",
+    description:
+      "Returns one row per time bucket × group-by combination. `groupBy` only accepts the " +
+      "enumerated dimensions; an empty `groupBy` returns the same rows as GET /analytics/{metric}. " +
+      "`token` groups by the fill's source token.",
+  })
+  query(@Body() body: AnalyticsGroupedQueryDto): Promise<GroupedPoint[]> {
+    return this.analyticsService.getGrouped({
+      metric: body.metric,
+      interval: body.interval,
+      // DTO accepts Unix epoch seconds; the store works in epoch milliseconds.
+      from: body.from * 1000,
+      to: body.to * 1000,
+      chain: body.chain,
+      token: body.token,
+      groupBy: normalizeGroupBy(body.groupBy ?? []),
+    });
+  }
+
   @Get(":metric")
   @ApiOperation({
     summary: "Query an analytics aggregate (volume, fees, latency, solver-share, or token-pair)",
+    description:
+      "JSON by default. Pass `?format=csv` (or send `Accept: text/csv`) to download the same rows " +
+      "as CSV, with a header row matching the JSON field names.",
   })
-  get(@Param("metric") metric: string, @Query() query: AnalyticsQueryDto) {
+  @ApiParam({ name: "metric", enum: ANALYTICS_METRICS })
+  @ApiProduces("application/json", "text/csv")
+  async get(
+    @Param("metric") metric: string,
+    @Query() query: AnalyticsQueryDto,
+    @Headers("accept") accept: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     const normalized = metric.toLowerCase() as AnalyticsMetric;
     if (!ANALYTICS_METRICS.includes(normalized)) {
       throw new BadRequestException(
@@ -37,7 +89,19 @@ export class AnalyticsController {
 
     const q = this.toQuery(query);
 
-    switch (normalized) {
+    const points = await this.fetch(normalized, q);
+
+    // An explicit ?format wins; otherwise honour an Accept header asking for CSV.
+    const wantsCsv = query.format ? query.format === "csv" : /\btext\/csv\b/i.test(accept ?? "");
+    if (!wantsCsv) return points;
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${normalized}.csv"`);
+    return analyticsToCsv(normalized, points);
+  }
+
+  private fetch(metric: AnalyticsMetric, q: AnalyticsQuery): Promise<object[]> {
+    switch (metric) {
       case "volume":
         return this.analyticsService.getVolume(q);
       case "fees":

@@ -1,11 +1,16 @@
 import { PrismaService } from "../prisma/prisma.service";
 import {
   AnalyticsFillEvent,
+  AnalyticsGroupedQuery,
   AnalyticsInterval,
   AnalyticsQuery,
   FeesPoint,
+  GroupByDimension,
+  GroupedMetric,
+  GroupedPoint,
   LatencyPoint,
   PerSolverPoint,
+  normalizeGroupBy,
   SolverSharePoint,
   TokenPairPoint,
   VolumePoint,
@@ -24,6 +29,37 @@ export interface IAnalyticsStore {
   queryTokenPair(query: AnalyticsQuery): Promise<TokenPairPoint[]>;
   /** Mean latency, volume and fill count per solver per bucket. */
   queryPerSolver(query: AnalyticsQuery): Promise<PerSolverPoint[]>;
+  /**
+   * Aggregate `volume` or `fees` per bucket and per combination of the
+   * requested group-by dimensions. An empty `groupBy` returns the same rows as
+   * `queryVolume`/`queryFees`.
+   */
+  queryGrouped(query: AnalyticsGroupedQuery): Promise<GroupedPoint[]>;
+}
+
+/** Value of a group-by dimension for a raw fill event. */
+function dimensionValue(event: AnalyticsFillEvent, dim: GroupByDimension): string {
+  switch (dim) {
+    case "chain":
+      return event.chain;
+    case "token":
+      return event.srcToken;
+    case "solver":
+      return event.solver;
+  }
+}
+
+/** Sort grouped rows by bucket, then by each requested dimension in order. */
+function compareGrouped(dims: GroupByDimension[]) {
+  return (a: GroupedPoint, b: GroupedPoint): number => {
+    const byStart = a.start.localeCompare(b.start);
+    if (byStart !== 0) return byStart;
+    for (const dim of dims) {
+      const cmp = (a[dim] ?? "").localeCompare(b[dim] ?? "");
+      if (cmp !== 0) return cmp;
+    }
+    return 0;
+  };
 }
 
 /** Nearest-rank percentile (the p-th smallest value when sorted). */
@@ -216,7 +252,47 @@ export class InMemoryAnalyticsStore implements IAnalyticsStore {
     }
     return points.sort((a, b) => a.start.localeCompare(b.start) || a.solver.localeCompare(b.solver));
   }
+
+  async queryGrouped(query: AnalyticsGroupedQuery): Promise<GroupedPoint[]> {
+    const dims = normalizeGroupBy(query.groupBy);
+    const points: GroupedPoint[] = [];
+    for (const [start, events] of this.bucketEvents(query)) {
+      const groups = new Map<string, { values: string[]; total: bigint }>();
+      for (const event of events) {
+        const values = dims.map((d) => dimensionValue(event, d));
+        const key = JSON.stringify(values);
+        const group = groups.get(key) ?? { values, total: 0n };
+        group.total += query.metric === "volume" ? event.volume : event.fees;
+        groups.set(key, group);
+      }
+      const iso = new Date(start).toISOString();
+      for (const { values, total } of groups.values()) {
+        const point: GroupedPoint = { start: iso };
+        dims.forEach((d, i) => (point[d] = values[i]));
+        point[query.metric] = total.toString();
+        points.push(point);
+      }
+    }
+    return points.sort(compareGrouped(dims));
+  }
 }
+
+/**
+ * SQL column for each group-by dimension. The grouped query only ever emits
+ * these fixed identifiers — caller input selects a key, it is never spliced
+ * into the SQL text.
+ */
+const GROUP_BY_COLUMNS: Record<GroupByDimension, string> = {
+  chain: `"chain"`,
+  token: `"src_token"`,
+  solver: `"solver"`,
+};
+
+/** SQL column summed for each grouped metric (same allowlist discipline). */
+const GROUPED_METRIC_COLUMNS: Record<GroupedMetric, string> = {
+  volume: `"volume"`,
+  fees: `"fees"`,
+};
 
 /**
  * TimescaleDB store. Queries the continuous aggregates created by
@@ -363,6 +439,31 @@ export class TimescaleAnalyticsStore implements IAnalyticsStore {
       volume: String(r.volume),
       count: Number(r.fills),
     }));
+  }
+
+  async queryGrouped(query: AnalyticsGroupedQuery): Promise<GroupedPoint[]> {
+    // normalizeGroupBy throws on anything outside the allowlist, so only the
+    // fixed GROUP_BY_COLUMNS identifiers below can ever reach the SQL text.
+    const dims = normalizeGroupBy(query.groupBy);
+    const metricColumn = GROUPED_METRIC_COLUMNS[query.metric];
+    if (!metricColumn) throw new Error(`Unsupported grouped metric "${String(query.metric)}"`);
+
+    const dimSelect = dims.map((d) => `, ${GROUP_BY_COLUMNS[d]} AS "${d}"`).join("");
+    const dimGroup = dims.map((d) => `, ${GROUP_BY_COLUMNS[d]}`).join("");
+    const rows = await this.prisma.$queryRawUnsafe<
+      ({ bucket: Date; value: string } & Partial<Record<GroupByDimension, string>>)[]
+    >(
+      `SELECT time_bucket('1 ${unit(query.interval)}', bucket) AS bucket${dimSelect}, sum(${metricColumn}) AS value
+       FROM ${this.view(query)}
+       WHERE ${this.where(query)}
+       GROUP BY 1${dimGroup} ORDER BY 1${dimGroup}`,
+    );
+    return rows.map((r) => {
+      const point: GroupedPoint = { start: r.bucket.toISOString() };
+      for (const d of dims) point[d] = String(r[d]);
+      point[query.metric] = String(r.value);
+      return point;
+    });
   }
 
   /** SQL-escape a string literal (single quotes). */

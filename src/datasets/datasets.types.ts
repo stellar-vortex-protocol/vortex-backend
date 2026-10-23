@@ -102,4 +102,13 @@ export interface DatasetsConfig {
   storageKind: "local" | "memory";
   /** Root directory for the local storage backend. */
   localDir: string;
+  /**
+   * Endpoints POSTed the manifest after each successful publication. Empty or
+   * unset disables notifications. See DatasetWebhookNotifier.
+   */
+  webhookUrls?: string[];
+  /** Dedicated HMAC-SHA256 key for webhook signatures (never shared). */
+  webhookSecret?: string;
+  /** Hostnames webhook deliveries may reach; defaults to the URLs' own hosts. */
+  webhookAllowlist?: string[];
 }

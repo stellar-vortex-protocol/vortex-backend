@@ -4,8 +4,10 @@ import { IAnalyticsStore, median, medianBigInt } from "./analytics.store";
 import { ANALYTICS_STORE } from "./analytics.tokens";
 import {
   AnalyticsFillEvent,
+  AnalyticsGroupedQuery,
   AnalyticsQuery,
   FeesPoint,
+  GroupedPoint,
   LatencyPoint,
   SolverBenchmarkPoint,
   SolverSharePoint,
@@ -95,6 +97,11 @@ export class AnalyticsService {
           },
         };
       });
+  }
+
+  /** Ad-hoc `volume`/`fees` aggregate grouped by any subset of chain/token/solver. */
+  getGrouped(query: AnalyticsGroupedQuery): Promise<GroupedPoint[]> {
+    return this.store.queryGrouped(query);
   }
 
   // ── ingestion ─────────────────────────────────────────────────────────────

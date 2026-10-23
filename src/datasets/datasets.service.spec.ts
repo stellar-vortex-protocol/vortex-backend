@@ -6,6 +6,7 @@ import { SolverRecord } from "../solvers/solvers.types";
 import { IntentsService } from "../intents/intents.service";
 import { SolversService } from "../solvers/solvers.service";
 import { ParquetReader } from "parquetjs";
+import { DatasetWebhookNotifier, WebhookEgress, verifyDatasetWebhookSignature } from "./dataset-webhook.notifier";
 
 function makeConfig(overrides: Partial<DatasetsConfig> = {}): DatasetsConfig {
   return {
@@ -61,11 +62,12 @@ function makeService(
   intents: Intent[],
   solvers: SolverRecord[],
   config: DatasetsConfig = makeConfig(),
+  notifier?: DatasetWebhookNotifier,
 ) {
   const intentsService = { getAll: jest.fn().mockResolvedValue(intents) } as unknown as IntentsService;
   const solversService = { getAll: jest.fn().mockResolvedValue(solvers) } as unknown as SolversService;
   const storage = new InMemoryObjectStorage();
-  const service = new DatasetsService(config, storage, intentsService, solversService);
+  const service = new DatasetsService(config, storage, intentsService, solversService, notifier);
   return { service, storage, intentsService, solversService };
 }
 
@@ -159,6 +161,88 @@ describe("DatasetsService", () => {
       expect(publications[0].date).toBe("2026-09-28");
       expect(publications[0].revision).toBe(1);
       expect(publications[0].datasets.some((d) => d.kind === "intents")).toBe(true);
+    });
+  });
+
+  describe("getLatest", () => {
+    const at = (date: string) => new Date(`${date}T12:00:00Z`);
+    const dayIntent = (date: string) =>
+      makeIntent({ intentId: `i-${date}`, createdAt: new Date(`${date}T01:00:00Z`).getTime() / 1000 });
+
+    it("returns null on a freshly-provisioned bucket with no manifests", async () => {
+      const { service } = makeService([], []);
+      await expect(service.getLatest()).resolves.toBeNull();
+    });
+
+    it("returns the only publication when there is one", async () => {
+      const { service } = makeService([dayIntent("2026-09-28")], []);
+      await service.exportDaily(at("2026-09-28"));
+
+      const latest = await service.getLatest();
+      expect(latest).toMatchObject({ date: "2026-09-28", revision: 1 });
+      expect(latest).toEqual((await service.listDatasets())[0]);
+    });
+
+    it("returns the highest revision of the newest date", async () => {
+      const { service } = makeService([dayIntent("2026-09-27"), dayIntent("2026-09-28")], []);
+      await service.exportDaily(at("2026-09-28")); // rev 1
+      await service.exportDaily(at("2026-09-28")); // rev 2
+      await service.exportDaily(at("2026-09-28")); // rev 3
+      // An older date published afterwards must not win.
+      await service.exportDaily(at("2026-09-27"));
+
+      await expect(service.getLatest()).resolves.toMatchObject({ date: "2026-09-28", revision: 3 });
+    });
+  });
+
+  describe("dataset webhook notifications", () => {
+    const SECRET = "dataset-webhook-secret-0123456789abcdef";
+    const day = new Date("2026-09-28T00:00:00Z").getTime() / 1000;
+
+    it("POSTs the exact manifest.json bytes with a verifiable signature", async () => {
+      const fetch = jest.fn().mockResolvedValue({ statusCode: 204 });
+      const notifier = new DatasetWebhookNotifier(
+        { webhookUrls: ["https://hooks.example.com/datasets"], webhookSecret: SECRET },
+        { fetch } as WebhookEgress,
+      );
+      const { service, storage } = makeService([makeIntent({ createdAt: day + 1 })], [], makeConfig(), notifier);
+
+      const manifest = await service.exportDaily(new Date("2026-09-28T12:00:00Z"));
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const [url, opts] = fetch.mock.calls[0];
+      expect(url).toBe("https://hooks.example.com/datasets");
+      const stored = await storage.get("vortex-public-datasets/datasets/2026-09-28/rev-1/manifest.json");
+      expect(opts.body).toBe(stored!.toString("utf8"));
+      expect(JSON.parse(opts.body)).toEqual(manifest);
+      expect(verifyDatasetWebhookSignature(SECRET, opts.body, opts.headers["X-Vortex-Signature"])).toBe(true);
+    });
+
+    it("still publishes and returns the manifest when every webhook delivery fails", async () => {
+      const fetch = jest.fn().mockRejectedValue(new Error("connect ECONNREFUSED"));
+      const notifier = new DatasetWebhookNotifier(
+        { webhookUrls: ["https://down.example.com/hook", "https://also-down.example.com/hook"], webhookSecret: SECRET },
+        { fetch } as WebhookEgress,
+        { maxAttempts: 3, sleep: () => Promise.resolve() },
+      );
+      const { service, storage } = makeService([makeIntent({ createdAt: day + 1 })], [], makeConfig(), notifier);
+
+      const manifest = await service.exportDaily(new Date("2026-09-28T12:00:00Z"));
+
+      expect(manifest).toMatchObject({ date: "2026-09-28", revision: 1 });
+      expect(fetch).toHaveBeenCalledTimes(6); // 2 URLs × 3 bounded attempts
+      expect(
+        await storage.get("vortex-public-datasets/datasets/2026-09-28/rev-1/manifest.json"),
+      ).not.toBeNull();
+      await expect(service.getLatest()).resolves.toMatchObject({ date: "2026-09-28", revision: 1 });
+    });
+
+    it("does not call out when no webhook URLs are configured", async () => {
+      const fetch = jest.fn();
+      const notifier = new DatasetWebhookNotifier({ webhookUrls: [] }, { fetch } as WebhookEgress);
+      const { service } = makeService([], [], makeConfig(), notifier);
+      await service.exportDaily(new Date("2026-09-28T12:00:00Z"));
+      expect(fetch).not.toHaveBeenCalled();
     });
   });
 

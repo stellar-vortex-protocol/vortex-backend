@@ -56,7 +56,7 @@ function setup(ageFor: (address: string) => Promise<number | undefined>) {
   const lookup = jest.fn(ageFor);
   const accountAge = { getAccountAgeSeconds: lookup } as unknown as AccountAgeService;
   const allowlist = { isAllowlisted: () => false } as unknown as AllowlistService;
-  const guard = new AbuseDetectorGuard(scorer, allowlist, accountAge);
+  const guard = new AbuseDetectorGuard(scorer, allowlist, undefined, accountAge);
   return { guard, scorer, scored, lookup };
 }
 

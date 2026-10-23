@@ -5,6 +5,7 @@ import { SolversModule } from "../solvers/solvers.module";
 import { AppConfig } from "../config/configuration";
 import { DatasetsController } from "./datasets.controller";
 import { DatasetsService } from "./datasets.service";
+import { DatasetWebhookNotifier } from "./dataset-webhook.notifier";
 import { DATASETS_CONFIG, DATASETS_STORAGE } from "./datasets.tokens";
 import { DatasetsConfig } from "./datasets.types";
 import { InMemoryObjectStorage, LocalFilesystemStorage, ObjectStorage } from "./object-storage";
@@ -27,6 +28,9 @@ import { InMemoryObjectStorage, LocalFilesystemStorage, ObjectStorage } from "./
           publicBucket: datasets.publicBucket,
           storageKind: datasets.storageKind,
           localDir: datasets.localDir,
+          webhookUrls: datasets.webhookUrls,
+          webhookSecret: datasets.webhookSecret,
+          webhookAllowlist: datasets.webhookAllowlist,
         };
       },
     },
@@ -39,6 +43,11 @@ import { InMemoryObjectStorage, LocalFilesystemStorage, ObjectStorage } from "./
           ? new InMemoryObjectStorage()
           : new LocalFilesystemStorage(datasets.localDir);
       },
+    },
+    {
+      provide: DatasetWebhookNotifier,
+      inject: [DATASETS_CONFIG],
+      useFactory: (config: DatasetsConfig) => DatasetWebhookNotifier.fromConfig(config),
     },
     DatasetsService,
   ],

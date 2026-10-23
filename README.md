@@ -40,6 +40,9 @@ POST /api/v1/admin/tokens         — register a token (admin key, on-chain meta
 PATCH /api/v1/admin/tokens        — update status or re-verified metadata
 DELETE /api/v1/admin/tokens       — soft-delist a token (existing intents keep working)
 GET  /api/v1/stats                — protocol stats
+GET  /api/v1/datasets             — published dataset dates, revisions, and schemas
+GET  /api/v1/datasets/latest      — most recent dataset publication (404 if none)
+GET  /api/v1/datasets/schemas     — versioned dataset schemas
 GET  /health                      — service health
 WS   /ws                          — real-time intent feed
 GET  /docs                        — Swagger / OpenAPI docs

@@ -321,6 +321,12 @@ export interface AppConfig {
     publicBucket: string;
     storageKind: "local" | "memory";
     localDir: string;
+    /** Endpoints POSTed the manifest after each publication (best-effort). */
+    webhookUrls: string[];
+    /** Dedicated HMAC secret for dataset webhook signatures. */
+    webhookSecret: string;
+    /** Hostnames webhook deliveries may reach (WEBHOOK_ALLOWLIST). */
+    webhookAllowlist: string[];
   };
   secrets: {
     /** Provider name: "env" | "aws-secrets-manager" | "vault-kv". */
@@ -588,6 +594,9 @@ export default (): AppConfig => ({
     publicBucket: process.env.DATASETS_PUBLIC_BUCKET ?? "vortex-public-datasets",
     storageKind: (process.env.DATASETS_STORAGE ?? "local") as "local" | "memory",
     localDir: process.env.DATASETS_LOCAL_DIR ?? ".datasets",
+    webhookUrls: splitList(process.env.DATASETS_WEBHOOK_URLS),
+    webhookSecret: process.env.DATASETS_WEBHOOK_SECRET ?? "",
+    webhookAllowlist: splitList(process.env.WEBHOOK_ALLOWLIST),
   },
   secrets: {
     provider: (process.env.SECRETS_PROVIDER ?? "env") as "env" | "aws-secrets-manager" | "vault-kv",
@@ -745,4 +754,12 @@ function clampPositiveInt(raw: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < 1) return fallback;
   return parsed;
+}
+
+/** Split a comma-separated env value into trimmed, non-empty entries. */
+function splitList(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }

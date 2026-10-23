@@ -440,6 +440,38 @@ export const envValidationSchema = Joi.object({
   DATASETS_PUBLIC_BUCKET: Joi.string().default("vortex-public-datasets"),
   DATASETS_STORAGE: Joi.string().valid("local", "memory").default("local"),
   DATASETS_LOCAL_DIR: Joi.string().default(".datasets"),
+  // Optional webhook notified after each dataset publication (issue #597).
+  // Comma-separated http(s) URLs; deliveries go through HttpEgressService.
+  DATASETS_WEBHOOK_URLS: Joi.string()
+    .allow("")
+    .default("")
+    .custom((value: string, helpers) => {
+      for (const raw of value.split(",").map((s) => s.trim()).filter(Boolean)) {
+        let url: URL;
+        try {
+          url = new URL(raw);
+        } catch {
+          return helpers.message({ custom: `DATASETS_WEBHOOK_URLS entry "${raw}" is not a valid URL.` });
+        }
+        if (url.protocol !== "https:" && url.protocol !== "http:") {
+          return helpers.message({ custom: `DATASETS_WEBHOOK_URLS entry "${raw}" must use http or https.` });
+        }
+      }
+      return value;
+    }),
+  // HMAC-SHA256 key for the X-Vortex-Signature header. Dedicated to dataset
+  // webhooks (never reuse SOROBAN_SIGNING_KEY); required once URLs are set.
+  DATASETS_WEBHOOK_SECRET: Joi.string()
+    .allow("")
+    .default("")
+    .when("DATASETS_WEBHOOK_URLS", {
+      is: Joi.string().trim().min(1),
+      then: Joi.string().min(32).required().messages({
+        "any.required": "DATASETS_WEBHOOK_SECRET must be set when DATASETS_WEBHOOK_URLS is configured.",
+        "string.empty": "DATASETS_WEBHOOK_SECRET must be set when DATASETS_WEBHOOK_URLS is configured.",
+        "string.min": "DATASETS_WEBHOOK_SECRET must be at least 32 characters.",
+      }),
+    }),
 
   // ── #412 — Cursor HMAC secret ──────────────────────────────────────────────
   // HMAC-SHA256 key used to sign opaque pagination cursors.

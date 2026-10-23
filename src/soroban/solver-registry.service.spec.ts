@@ -135,6 +135,9 @@ function makeConfigService(
       publicBucket: "vortex-public-datasets",
       storageKind: "local",
       localDir: ".datasets",
+      webhookUrls: [],
+      webhookSecret: "",
+      webhookAllowlist: [],
     },
     secrets: {
       provider: "env",

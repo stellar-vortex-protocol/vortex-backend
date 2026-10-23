@@ -1,6 +1,10 @@
 import { Type } from "class-transformer";
 import { IsIn, IsInt, IsOptional, IsString, Min } from "class-validator";
+import { ApiPropertyOptional } from "@nestjs/swagger";
 import { ANALYTICS_INTERVALS, AnalyticsInterval } from "../analytics.types";
+
+export const ANALYTICS_FORMATS = ["json", "csv"] as const;
+export type AnalyticsFormat = (typeof ANALYTICS_FORMATS)[number];
 
 export class AnalyticsQueryDto {
   @IsIn(ANALYTICS_INTERVALS)
@@ -30,4 +34,10 @@ export class AnalyticsQueryDto {
   @IsOptional()
   @IsString()
   solver?: string;
+
+  /** Response format. Defaults to JSON; `csv` returns `text/csv`. */
+  @ApiPropertyOptional({ enum: ANALYTICS_FORMATS, default: "json" })
+  @IsOptional()
+  @IsIn(ANALYTICS_FORMATS)
+  format?: AnalyticsFormat;
 }
