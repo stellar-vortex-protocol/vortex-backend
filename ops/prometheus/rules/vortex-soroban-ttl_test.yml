@@ -1,0 +1,46 @@
+rule_files:
+  - vortex-soroban-ttl.yml
+
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      # Settlement instance drops below 7 days at t=5m and stays there.
+      - series: 'vortex_soroban_ttl_remaining_ledgers{kind="instance",contract="settlement"}'
+        values: 200000x4 120000x30
+      # Registry instance healthy throughout.
+      - series: 'vortex_soroban_ttl_remaining_ledgers{kind="instance",contract="solver-registry"}'
+        values: 500000x34
+      # Settlement code entry already archived.
+      - series: 'vortex_soroban_ttl_remaining_ledgers{kind="code",contract="settlement"}'
+        values: -1x34
+      # Intents below 7 days must not page.
+      - series: 'vortex_soroban_ttl_remaining_ledgers{kind="intent",contract="settlement"}'
+        values: 10x34
+      - series: 'vortex_soroban_ttl_extension_tx_total{result="over_budget"}'
+        values: 0x10 1x24
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: VortexContractInstanceTtlLow
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: VortexContractInstanceTtlLow
+        exp_alerts:
+          - exp_labels: { severity: page, kind: instance, contract: settlement }
+            exp_annotations:
+              summary: "settlement contract instance TTL below 7 days (120000 ledgers)"
+              description: "The TTL keeper is not keeping the contract instance alive (-1 = already archived). See docs/runbooks/contract-ttl.md"
+      - eval_time: 20m
+        alertname: VortexContractCodeTtlLow
+        exp_alerts:
+          - exp_labels: { severity: page, kind: code, contract: settlement }
+            exp_annotations:
+              summary: "settlement contract WASM code TTL below 7 days (-1 ledgers)"
+              description: "The TTL keeper is not keeping the contract code alive (-1 = already archived). See docs/runbooks/contract-ttl.md"
+      - eval_time: 15m
+        alertname: VortexTtlKeeperBudgetExhausted
+        exp_alerts:
+          - exp_labels: { severity: ticket, result: over_budget }
+            exp_annotations:
+              summary: "TTL keeper hit its daily fee budget; some entries were not extended"
+              description: "Raise TTL_KEEPER_DAILY_BUDGET_STROOPS or investigate fee spikes. See docs/runbooks/contract-ttl.md"

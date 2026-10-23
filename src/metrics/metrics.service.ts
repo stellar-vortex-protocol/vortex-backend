@@ -104,6 +104,13 @@ export class MetricsService implements OnModuleInit {
   public readonly auditDefaultPartitionRows: client.Gauge<string>;
   public readonly auditPartitionOpsTotal: client.Counter<string>;
 
+  // ── Contract-state TTL keeper (issue #395) ────────────────────────────────
+  public readonly sorobanTtlRemainingLedgers: client.Gauge<string>;
+  public readonly sorobanTtlKeysExtendedTotal: client.Counter<string>;
+  public readonly sorobanTtlExtensionTxTotal: client.Counter<string>;
+  public readonly sorobanTtlBudgetSpentStroops: client.Gauge<string>;
+  public readonly sorobanTtlKeeperLastRunTimestamp: client.Gauge<string>;
+
   // ── Remote signer call latency (issue #400) ───────────────────────────────
   public readonly signerCallDurationSeconds: client.Histogram<string>;
 
@@ -336,6 +343,39 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}audit_log_partition_ops_total`,
       help: "Partition maintenance operations, by op (create | detach | export | drop) and result",
       labelNames: ["op", "result"],
+      registers: [this.register],
+    });
+
+    // ── Contract-state TTL keeper (issue #395) ────────────────────────────
+    // `kind` is instance|code|intent|bond and `contract` is settlement|
+    // solver-registry, so cardinality stays at 8 series: intent and bond
+    // series report the minimum across all tracked keys of that kind.
+    this.sorobanTtlRemainingLedgers = new client.Gauge({
+      name: `${prefix}soroban_ttl_remaining_ledgers`,
+      help: "Minimum remaining TTL (ledgers) across tracked protocol entries of this kind; -1 = missing/archived",
+      labelNames: ["kind", "contract"],
+      registers: [this.register],
+    });
+    this.sorobanTtlKeysExtendedTotal = new client.Counter({
+      name: `${prefix}soroban_ttl_keys_extended_total`,
+      help: "Ledger keys whose TTL the keeper extended (confirmed transactions only)",
+      labelNames: ["kind"],
+      registers: [this.register],
+    });
+    this.sorobanTtlExtensionTxTotal = new client.Counter({
+      name: `${prefix}soroban_ttl_extension_tx_total`,
+      help: "ExtendFootprintTTL transactions attempted by the keeper, by result",
+      labelNames: ["result"],
+      registers: [this.register],
+    });
+    this.sorobanTtlBudgetSpentStroops = new client.Gauge({
+      name: `${prefix}soroban_ttl_budget_spent_stroops`,
+      help: "Fees the TTL keeper has spent in the current UTC day (stroops)",
+      registers: [this.register],
+    });
+    this.sorobanTtlKeeperLastRunTimestamp = new client.Gauge({
+      name: `${prefix}soroban_ttl_keeper_last_run_timestamp_seconds`,
+      help: "Unix time of the TTL keeper's last completed scan",
       registers: [this.register],
     });
 
@@ -832,6 +872,28 @@ export class MetricsService implements OnModuleInit {
 
   incAuditPartitionOp(op: "create" | "detach" | "export" | "drop", result: "success" | "failed"): void {
     this.auditPartitionOpsTotal.inc({ op, result });
+  }
+
+  // ── Contract-state TTL keeper helpers (issue #395) ───────────────────────
+
+  setSorobanTtlRemaining(kind: string, contract: string, ledgers: number): void {
+    this.sorobanTtlRemainingLedgers.set({ kind, contract }, ledgers);
+  }
+
+  incSorobanTtlKeysExtended(kind: string, count: number): void {
+    if (count > 0) this.sorobanTtlKeysExtendedTotal.inc({ kind }, count);
+  }
+
+  incSorobanTtlExtensionTx(result: "success" | "dry_run" | "over_budget" | "failed"): void {
+    this.sorobanTtlExtensionTxTotal.inc({ result });
+  }
+
+  setSorobanTtlBudgetSpent(stroops: number): void {
+    this.sorobanTtlBudgetSpentStroops.set(stroops);
+  }
+
+  markSorobanTtlKeeperRun(atMs: number): void {
+    this.sorobanTtlKeeperLastRunTimestamp.set(Math.floor(atMs / 1000));
   }
 
   // ── Remote signer helpers (issue #400) ────────────────────────────────────

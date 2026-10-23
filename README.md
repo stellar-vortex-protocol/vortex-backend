@@ -178,6 +178,7 @@ from those that are safe to leave at their testnet/dev defaults.
 | `INTENTS_STORE` | Yes — set to `postgres` | `memory` | `memory` loses all intents on restart and cannot scale horizontally. Promote via `dual` per [`docs/runbooks/intents-store-migration.md`](./docs/runbooks/intents-store-migration.md). `INTENTS_PERSISTENCE=prisma` is a deprecated alias for `postgres` |
 | `SOLVERS_PERSISTENCE` | Recommended | `memory` | Set to `prisma` to persist solver registry to Postgres; `memory` loses solver state on restart |
 | `EVM_DEPOSIT_VERIFICATION_ENABLED` | Yes — set to `true` | `false` | EVM-source intents are hidden from solvers until the escrow deposit is confirmed; needs `EVM_RPC_URLS` and `EVM_ESCROW_ADDRESSES`. See [`docs/runbooks/evm-deposit-verification.md`](./docs/runbooks/evm-deposit-verification.md) |
+| `TTL_KEEPER_ENABLED` | Yes (on-chain path) | `false` | Extends the TTL of the contract instances, WASM code, active intents and solver bonds before they archive. Budget-capped by `TTL_KEEPER_DAILY_BUDGET_STROOPS`. See [`docs/runbooks/contract-ttl.md`](./docs/runbooks/contract-ttl.md) |
 | `SOROBAN_FEE_PERCENTILE` | Recommended | `p50` | Raise to `p90` on mainnet for better confirmation speed under load |
 | `WS_MAX_CONNECTIONS` | Recommended | `1000` | Tune to expected solver + frontend connection count |
 | `SENTRY_DSN` | Recommended | — (Sentry disabled) | Set to your Sentry project DSN for error alerting |

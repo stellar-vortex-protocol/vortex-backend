@@ -1,0 +1,47 @@
+# Contract-state TTL keeper alerts (issue #395). Metrics are defined in
+# src/metrics/metrics.service.ts and exported by TtlKeeperService.
+#
+# vortex_soroban_ttl_remaining_ledgers is the minimum remaining TTL across all
+# tracked entries of a kind; -1 means an entry is missing (archived or never
+# created). 120960 ledgers ≈ 7 days at ~5 s per ledger.
+groups:
+  - name: vortex-soroban-ttl
+    rules:
+      # The contract instance must never archive: every call to the contract
+      # fails until it is restored.
+      - alert: VortexContractInstanceTtlLow
+        expr: vortex_soroban_ttl_remaining_ledgers{kind="instance"} < 120960
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.contract }} contract instance TTL below 7 days ({{ $value }} ledgers)"
+          description: "The TTL keeper is not keeping the contract instance alive (-1 = already archived). See docs/runbooks/contract-ttl.md"
+
+      - alert: VortexContractCodeTtlLow
+        expr: vortex_soroban_ttl_remaining_ledgers{kind="code"} < 120960
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.contract }} contract WASM code TTL below 7 days ({{ $value }} ledgers)"
+          description: "The TTL keeper is not keeping the contract code alive (-1 = already archived). See docs/runbooks/contract-ttl.md"
+
+      # The keeper stopped completing runs (leader lost, RPC down, crash loop).
+      - alert: VortexTtlKeeperStale
+        expr: time() - vortex_soroban_ttl_keeper_last_run_timestamp_seconds > 3 * 3600
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "TTL keeper has not completed a run for over 3 hours"
+          description: "See docs/runbooks/contract-ttl.md"
+
+      # Extensions were skipped because the daily fee budget ran out.
+      - alert: VortexTtlKeeperBudgetExhausted
+        expr: increase(vortex_soroban_ttl_extension_tx_total{result="over_budget"}[1h]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "TTL keeper hit its daily fee budget; some entries were not extended"
+          description: "Raise TTL_KEEPER_DAILY_BUDGET_STROOPS or investigate fee spikes. See docs/runbooks/contract-ttl.md"

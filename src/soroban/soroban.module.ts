@@ -5,6 +5,8 @@ import { ShadowController } from "./shadow.controller";
 import { ShadowService } from "./shadow.service";
 import { SorobanController } from "./soroban.controller";
 import { SorobanService } from "./soroban.service";
+import { TtlKeeperController } from "./ttl-keeper.controller";
+import { TtlKeeperService } from "./ttl-keeper.service";
 import { SolverRegistryService } from "./solver-registry.service";
 import { SignerService } from "./signer.service";
 import { StellarTxService } from "./stellar-tx.service";
@@ -28,7 +30,7 @@ import { IntentsModule } from "../intents/intents.module";
   // EventIngestionService and, via IntentsModule, also participates in the
   // cycle — so it is deferred too.
   imports: [forwardRef(() => IntentsModule), forwardRef(() => SolversModule)],
-  controllers: [SorobanController, ShadowController],
+  controllers: [SorobanController, ShadowController, TtlKeeperController],
   providers: [
     SorobanService,
 
@@ -58,6 +60,8 @@ import { IntentsModule } from "../intents/intents.module";
     // Issue #401 — shadow-mode divergence monitor. Exported so IntentsService
     // can report off-chain transitions to it without importing Soroban internals.
     ShadowService,
+    // Issue #395 — extends TTLs of protocol-owned persistent entries.
+    TtlKeeperService,
   ],
   exports: [
     SorobanService,

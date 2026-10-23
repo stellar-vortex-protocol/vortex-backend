@@ -97,6 +97,27 @@ export interface InvokeContractParams {
  */
 export const INVOKE_TX_TIMEOUT_SECONDS = 30;
 
+/** Result of {@link StellarTxService.extendFootprintTtl} (issue #395). */
+export interface ExtendFootprintTtlResult {
+  /** Transaction hash; null when nothing was submitted. */
+  hash: string | null;
+  status: "SUCCESS" | "DRY_RUN" | "OVER_BUDGET";
+  dryRun: boolean;
+  /** Fee charged (SUCCESS) or estimated (DRY_RUN / OVER_BUDGET), in stroops. */
+  feeStroops: number;
+}
+
+/** The prepared ExtendFootprintTTL fee exceeded the caller's remaining budget. */
+export class TtlExtensionOverBudgetError extends Error {
+  constructor(
+    readonly feeStroops: number,
+    readonly maxFeeStroops: number,
+  ) {
+    super(`extendFootprintTtl fee ${feeStroops} exceeds budget ${maxFeeStroops} stroops`);
+    this.name = "TtlExtensionOverBudgetError";
+  }
+}
+
 export interface InvokeContractOptions {
   /**
    * Called with the signed envelope's hash after signing and *before*
@@ -391,6 +412,96 @@ export class StellarTxService {
         dryRun: false,
         restored,
       };
+    });
+  }
+
+  /**
+   * Extend the TTL of `keys` to `extendTo` ledgers past the current ledger with
+   * one `ExtendFootprintTTL` operation (issue #395, the TTL keeper).
+   *
+   * 1. Estimate: simulate against a fresh account read, outside the sequence
+   *    lock, so a dry run or a budget refusal never consumes a sequence number.
+   * 2. Refuse (`OVER_BUDGET`) when the estimate exceeds `maxFeeStroops`.
+   * 3. Dry run (`ONCHAIN_DRY_RUN` / `onchain-dry-run` flag): return the estimate.
+   * 4. Otherwise prepare with the real sequence, re-check the prepared fee
+   *    against the budget, sign, submit and wait for confirmation.
+   *
+   * Subject to the `onchain` kill-switch like every other chain write.
+   *
+   * @param keys - Ledger keys of persistent entries (instance, code, data).
+   *   The caller keeps this within the network's per-transaction footprint.
+   * @param extendTo - Ledgers past the current ledger the TTL is extended to.
+   * @param options.maxFeeStroops - Upper bound on the total fee for this tx.
+   */
+  async extendFootprintTtl(
+    keys: xdr.LedgerKey[],
+    extendTo: number,
+    options: { maxFeeStroops?: number } = {},
+  ): Promise<ExtendFootprintTtlResult> {
+    if (keys.length === 0) throw new Error("extendFootprintTtl: no ledger keys");
+    this.assertOnChainWriteAllowed("extend_footprint_ttl");
+
+    const source = this.signerService.getPublicKey();
+    const passphrase = this.signerService.getNetworkPassphrase();
+    const build = async (account: Account) =>
+      new TransactionBuilder(account, { fee: await this.estimateBaseFee(), networkPassphrase: passphrase })
+        .addOperation(Operation.extendFootprintTtl({ extendTo }))
+        .setSorobanData(new SorobanDataBuilder().setReadOnly(keys).build())
+        .setTimeout(INVOKE_TX_TIMEOUT_SECONDS)
+        .build();
+
+    const probe = await build(await this.sorobanService.getAccount(source));
+    const simulation = await this.sorobanService.simulateTransaction(probe);
+    if (SorobanRpc.Api.isSimulationError(simulation)) {
+      throw new Error(
+        `extendFootprintTtl simulation failed: ${(simulation as SorobanRpc.Api.SimulateTransactionErrorResponse).error}`,
+      );
+    }
+    const estimate =
+      Number(probe.fee) +
+      Number((simulation as SorobanRpc.Api.SimulateTransactionSuccessResponse).minResourceFee ?? 0);
+    const overBudget = (fee: number) =>
+      options.maxFeeStroops !== undefined && fee > options.maxFeeStroops;
+
+    if (overBudget(estimate)) {
+      return { hash: null, status: "OVER_BUDGET", dryRun: false, feeStroops: estimate };
+    }
+    const dryRun = this.flags
+      ? await this.flags.getBooleanValue("onchain-dry-run", { chain: "stellar" })
+      : this.dryRun;
+    if (dryRun) {
+      this.logger.log(
+        `[dry-run] extendFootprintTtl keys=${keys.length} extendTo=${extendTo} estimatedFee=${estimate} — not submitted`,
+      );
+      return { hash: null, status: "DRY_RUN", dryRun: true, feeStroops: estimate };
+    }
+
+    return this.signerService.withNextSequence(async (sequence) => {
+      const prepared = await this.sorobanService.prepareTransaction(
+        await build(new Account(source, sequence)),
+      );
+      const fee = Number(prepared.fee);
+      if (overBudget(fee)) {
+        // Throwing (not returning) resets the signer's cached sequence, which
+        // this unsubmitted transaction would otherwise leave one ahead.
+        throw new TtlExtensionOverBudgetError(fee, options.maxFeeStroops ?? 0);
+      }
+      const signed = await this.signerService.sign(prepared);
+      const submittedAt = Date.now();
+      const sendResponse = await this.sorobanService.submitTransaction(signed);
+      if (sendResponse.status === "ERROR") {
+        throw new Error(
+          `extendFootprintTtl submit failed: ${(sendResponse as { errorResultXdr?: string }).errorResultXdr ?? "unknown error"}`,
+        );
+      }
+      const confirmation = await this.confirmationService.waitForConfirmation(sendResponse.hash, submittedAt);
+      if (confirmation.status !== "SUCCESS") {
+        throw new Error(
+          `extendFootprintTtl did not confirm: status=${confirmation.status} error=${confirmation.error}`,
+        );
+      }
+      this.logger.log(`extendFootprintTtl confirmed: hash=${sendResponse.hash} keys=${keys.length} fee=${fee}`);
+      return { hash: sendResponse.hash, status: "SUCCESS" as const, dryRun: false, feeStroops: fee };
     });
   }
 
