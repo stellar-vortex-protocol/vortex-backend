@@ -38,7 +38,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.654.0",
     "@bull-board/api": "^9.10.1",
-    "@bull-board/express": "^9.10.1",
+    "@bull-board/express": "^9.10.2",
     "@nestjs/common": "^11.1.28",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.1.28",
