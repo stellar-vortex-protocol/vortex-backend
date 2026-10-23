@@ -127,6 +127,18 @@ export interface JobQueueDriver {
   defineQueue(queue: string, settings: QueueSettings): void;
   enqueue<T>(def: JobDefinition<T>, data: T, opts?: EnqueueOptions): Promise<string>;
   enqueue<T>(queue: string, defOrName: JobDefinition<T> | string, data: T, opts?: EnqueueOptions): Promise<string>;
+  /**
+   * Enqueues a linear chain of jobs where each step only starts after the
+   * previous step completes successfully. Returns the id of the first job.
+   *
+   * `opts` (including `idempotencyKey`) apply per step, not to the chain as a
+   * whole. If a step exhausts its retries and dead-letters, all subsequent
+   * un-started steps are abandoned; the failure is visible via
+   * {@link deadLetters} for the queue of the step that failed.
+   */
+  enqueueChain?<T>(
+    steps: { def: JobDefinition<T>; data: T; opts?: EnqueueOptions }[],
+  ): Promise<string>;
   /** Repeating job; idempotent per job name. */
   schedule<T>(def: JobDefinition<T>, everyMs: number, data: T): Promise<void>;
   schedule<T>(def: JobDefinition<T>, opts: { everyMs: number; data: T }): Promise<void>;

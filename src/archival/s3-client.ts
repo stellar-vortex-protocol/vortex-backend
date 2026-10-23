@@ -3,6 +3,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import { Readable } from "node:stream";
 import { ArchivalConfig } from "./archival-config";
@@ -71,6 +72,39 @@ export class ArchivalS3Client {
       }
       throw err;
     }
+  }
+
+  /**
+   * List object keys under `prefix` using S3 `ListObjectsV2` (paginated).
+   *
+   * Returns the keys found on this page plus `nextContinuationToken` when more
+   * results are available — pass it back in `opts.continuationToken` to fetch
+   * the next page. Used by the integrity re-verification job to enumerate
+   * archived manifest keys without a side-table of archived dates.
+   */
+  async listKeys(
+    prefix: string,
+    opts: { maxKeys?: number; continuationToken?: string } = {},
+  ): Promise<{ keys: string[]; nextContinuationToken?: string }> {
+    const response = await this.client.send(
+      new ListObjectsV2Command({
+        Bucket: this.bucket,
+        Prefix: prefix,
+        MaxKeys: opts.maxKeys,
+        ContinuationToken: opts.continuationToken,
+      }),
+    );
+
+    const keys = (response.Contents ?? [])
+      .map((obj) => obj.Key)
+      .filter((key): key is string => typeof key === "string");
+
+    return {
+      keys,
+      nextContinuationToken: response.IsTruncated
+        ? response.NextContinuationToken
+        : undefined,
+    };
   }
 
   /**

@@ -17,6 +17,23 @@ import { DistributedRateLimiter } from "./distributed-rate-limiter";
 const WINDOW_MS = 60_000;
 
 /**
+ * Extract the API key from `Authorization: Bearer` or `x-api-key`.
+ *
+ * Shared by {@link TieredThrottleGuard} and the self-service
+ * `GET /api/v1/api-keys/me` endpoint so both parse credentials identically.
+ */
+export function extractApiKey(req: Request): string | null {
+  const auth = req.headers?.authorization;
+  if (typeof auth === "string" && auth.startsWith("Bearer ")) {
+    const token = auth.slice(7).trim();
+    if (token) return token;
+  }
+  const header = req.headers?.["x-api-key"];
+  if (typeof header === "string" && header) return header;
+  return null;
+}
+
+/**
  * Tiered, distributed rate-limit guard (issue #441).
  *
  * Replaces the legacy per-process global IP throttle. The quota is selected by
@@ -49,8 +66,12 @@ export class TieredThrottleGuard implements CanActivate {
     const req = context.switchToHttp().getRequest<Request>();
     const res = context.switchToHttp().getResponse<Response>();
 
-    const presented = TieredThrottleGuard.extractApiKey(req);
+    const presented = extractApiKey(req);
     const keyRecord = presented ? await this.apiKeys.resolveKey(presented) : null;
+
+    // Thread the resolved record onto the request so downstream guards (e.g.
+    // ApiKeyScopeGuard) can enforce scopes without re-resolving the key.
+    (req as Request & { apiKeyRecord?: typeof keyRecord }).apiKeyRecord = keyRecord;
 
     const tier = keyRecord?.tier ?? DEFAULT_TIER;
     const limit = TIER_LIMITS[tier].requestsPerMinute;
@@ -82,18 +103,6 @@ export class TieredThrottleGuard implements CanActivate {
       throw new HttpException("Too Many Requests", HttpStatus.TOO_MANY_REQUESTS);
     }
     return true;
-  }
-
-  /** Extract the API key from `Authorization: Bearer` or `x-api-key`. */
-  private static extractApiKey(req: Request): string | null {
-    const auth = req.headers?.authorization;
-    if (typeof auth === "string" && auth.startsWith("Bearer ")) {
-      const token = auth.slice(7).trim();
-      if (token) return token;
-    }
-    const header = req.headers?.["x-api-key"];
-    if (typeof header === "string" && header) return header;
-    return null;
   }
 
   private clientIp(req: Request): string {

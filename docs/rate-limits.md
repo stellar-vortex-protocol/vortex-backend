@@ -19,10 +19,11 @@ retry guidelines for API consumers of `vortex-backend` (including
    - [WebSocket chain-filter cap](#websocket-chain-filter-cap)
    - [WebSocket subscription-count cap](#websocket-subscription-count-cap)
    - [DB statement_timeout per route class](#db-statementtimeout-per-route-class)
-4. [Error Response Formats](#error-response-formats)
-5. [ReDoS Audit Status](#redos-audit-status)
-6. [Client Integration Best Practices](#client-integration--best-practices)
-7. [State-mutating endpoint signature audit](#state-mutating-endpoint-signature-audit)
+4. [API-Key Scopes](#api-key-scopes)
+5. [Error Response Formats](#error-response-formats)
+6. [ReDoS Audit Status](#redos-audit-status)
+7. [Client Integration Best Practices](#client-integration--best-practices)
+8. [State-mutating endpoint signature audit](#state-mutating-endpoint-signature-audit)
 
 ---
 
@@ -165,6 +166,67 @@ Postgres level so even queries that bypass application middleware are bounded.
 - **SDK note:** These timeouts are generous relative to typical indexed-read
   latency. They fire only on pathological inputs (missing indexes, huge offsets,
   table scans) — not on normal traffic.
+
+---
+
+## API-Key Scopes
+
+API keys may optionally carry a `scopes: string[]` list (set at creation time
+via `POST /api/v1/auth/api-keys` and preserved across rotation). When a key has
+a non-empty `scopes` array, every request made with that key is checked against
+the scope required by the matched route.
+
+### Behaviour
+
+| Key `scopes` | Behaviour |
+|---|---|
+| `[]` (empty / omitted) | **Unrestricted** — the key is only subject to its tier's rate limits. This is the default and keeps pre-existing keys working. |
+| Non-empty | **Restricted** — the request is allowed only if the route's required scope is present in the key's `scopes`. |
+| Non-empty, route unmapped | **Denied** — routes without a scope requirement are deny-by-default for scoped keys. |
+
+Requests with **no** API key (public tier) are never scope-checked; they are
+only tiered. Expired or revoked keys fail during key resolution, before any
+scope check runs.
+
+### Scope names and required routes
+
+Scopes are defined in `src/auth/api-keys/api-key-tiers.ts` (`API_KEY_SCOPES`)
+and enforced by `ApiKeyScopeGuard` (`src/auth/api-keys/api-key-scope.guard.ts`),
+which runs after `TieredThrottleGuard` has resolved the key.
+
+| Scope | Required by |
+|---|---|
+| `tokens:read` | `GET /api/v1/tokens/admin` (admin-token listing) |
+| `tokens:write` | `POST /api/v1/tokens/admin` (admin-token mutation) |
+| `datasets:export` | `GET /api/v1/datasets/export` (dataset export) |
+
+Only the routes above are scoped today. All other endpoints remain reachable by
+any valid key regardless of its `scopes` (subject to tier limits); additional
+routes will be mapped incrementally.
+
+### Denied response
+
+A scoped key calling a route outside its scopes receives:
+
+```json
+{
+  "statusCode": 403,
+  "error": "Forbidden",
+  "message": "API key is missing required scope: tokens:read"
+}
+```
+
+### Example
+
+```http
+POST /api/v1/auth/api-keys
+Content-Type: application/json
+
+{ "name": "read-only exporter", "tier": "integrator", "scopes": ["datasets:export"] }
+```
+
+The resulting key can call `GET /api/v1/datasets/export` but is rejected with
+`403` on `GET /api/v1/tokens/admin` (and on any other unmapped route).
 
 ---
 

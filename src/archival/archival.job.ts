@@ -10,6 +10,7 @@ import {
 import { Cron, CronExpression } from "@nestjs/schedule";
 import { ConfigService } from "@nestjs/config";
 import { ArchivalService } from "./archival.service";
+import { MetricsService } from "../metrics/metrics.service";
 import { AppConfig } from "../config/configuration";
 import { JobsService } from "../jobs/jobs.service";
 import { AdminGuard, RequireAdminRole } from "../admin/admin.guard";
@@ -218,5 +219,86 @@ export class ArchivalAdminController {
       `[archival] restore enqueued for ${date} (schema=${schema}, dryRun=${dryRun}) jobId=${jobId}`,
     );
     return { jobId };
+  }
+}
+
+/**
+ * Scheduled integrity re-verification job (#697).
+ *
+ * Periodically re-runs `verifyManifest()` against a rolling sample of
+ * previously archived date partitions so silent bit rot, accidental
+ * overwrites, or lifecycle-policy misconfiguration on the bucket are
+ * detected long before a restore is attempted.  Detection only — no
+ * automatic repair is performed.
+ *
+ * Runs at 03:00 UTC every day (one hour after the archival job) so the two
+ * sweeps never contend for the same S3 objects.  The job is a no-op when
+ * `ARCHIVAL_ENABLED=false`.
+ *
+ * Leader election: mirrors `ArchivalJob.runDaily()` — when
+ * `LEADER_ELECTION_ENABLED=true` only the elected leader fires, so a
+ * multi-replica deployment does not run duplicate verification sweeps.
+ */
+@Injectable()
+export class ArchivalIntegrityJob {
+  private readonly logger = new Logger(ArchivalIntegrityJob.name);
+  private running = false;
+
+  constructor(
+    private readonly archivalService: ArchivalService,
+    private readonly configService: ConfigService<AppConfig, true>,
+    private readonly metricsService: MetricsService,
+  ) {}
+
+  @Cron(CronExpression.EVERY_DAY_AT_3AM, { name: "archival-integrity", timeZone: "UTC" })
+  async runVerification(): Promise<void> {
+    const config = this.configService.get("archival", { infer: true });
+    if (!config.enabled) {
+      this.logger.debug("[archival-integrity] job disabled (ARCHIVAL_ENABLED=false)");
+      return;
+    }
+
+    if (this.running) {
+      this.logger.warn("[archival-integrity] previous run still in progress — skipping");
+      return;
+    }
+
+    this.running = true;
+    try {
+      const summary = await this.archivalService.verifyArchivedPartitions();
+
+      this.metricsService.incrementArchivalIntegrityChecks(summary.checked);
+      if (summary.failed > 0) {
+        this.metricsService.incrementArchivalIntegrityFailures(summary.failed);
+      }
+
+      this.logger.log(
+        `[archival-integrity] verified ${summary.checked} partition(s): ` +
+        `${summary.passed} passed, ${summary.failed} failed, ` +
+        `took ${summary.durationMs}ms`,
+      );
+
+      for (const failure of summary.failures) {
+        this.logger.error(
+          JSON.stringify({
+            event: "archival_integrity_failure",
+            date: failure.date,
+            key: failure.key,
+            reason: failure.reason,
+            expected: failure.expected,
+            actual: failure.actual,
+          }),
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `[archival-integrity] verification sweep failed: ${(err as Error).message}`,
+        (err as Error).stack,
+      );
+    } finally {
+      this.running = false;
+    }
+  }
+}
   }
 }

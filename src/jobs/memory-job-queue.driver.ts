@@ -1,5 +1,6 @@
 import { Logger } from "@nestjs/common";
 import {
+  ChainStep,
   DeadLetter,
   EnqueueOptions,
   JobDefinition,
@@ -22,6 +23,8 @@ interface MemJob {
   attempt: number;
   idempotencyKey?: string;
   priority?: number;
+  /** Invoked once this specific job completes successfully (chain advancement). */
+  onComplete?: () => void;
 }
 
 interface MemDeadLetter extends DeadLetter {
@@ -113,6 +116,16 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
     optsOrData?: EnqueueOptions | T,
     maybeOpts?: EnqueueOptions,
   ): Promise<string> {
+    return this.enqueueInternal(defOrQueue, dataOrDef, optsOrData, maybeOpts);
+  }
+
+  private enqueueInternal<T>(
+    defOrQueue: JobDefinition<T> | string,
+    dataOrDef: T | JobDefinition<T> | string,
+    optsOrData?: EnqueueOptions | T,
+    maybeOpts?: EnqueueOptions,
+    onComplete?: () => void,
+  ): string {
     let def: JobDefinition<T>;
     let data: T;
     let opts: EnqueueOptions;
@@ -144,6 +157,7 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
       attempt: 1,
       idempotencyKey: opts.idempotencyKey,
       priority: opts.priority,
+      onComplete,
     };
     this.setResult(def.queue, id, { status: "pending" });
     if (opts.delayMs) this.delay(q, def.queue, job, opts.delayMs);
@@ -152,6 +166,24 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
       this.pump(def.queue);
     }
     return id;
+  }
+
+  async enqueueChain<T>(steps: { def: JobDefinition<T>; data: T; opts?: EnqueueOptions }[]): Promise<string> {
+    if (steps.length === 0) throw new Error("enqueueChain() requires at least one step");
+    return this.enqueueStep(steps, 0);
+  }
+
+  /**
+   * Enqueue `steps[index]` and arrange for `steps[index + 1]` to be enqueued
+   * only once this step completes successfully. On final failure the next
+   * step is never enqueued, so the chain is abandoned and the failure is
+   * visible via the dead-letter list for the step that failed.
+   */
+  private enqueueStep<T>(steps: { def: JobDefinition<T>; data: T; opts?: EnqueueOptions }[], index: number): string {
+    const step = steps[index];
+    const onComplete =
+      index + 1 < steps.length ? () => this.enqueueStep(steps, index + 1) : undefined;
+    return this.enqueueInternal(step.def, step.data, step.opts, undefined, onComplete);
   }
 
   async schedule<T>(
@@ -176,7 +208,6 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
       everyMs = everyMsOrDefOrOpts as number;
       data = dataOrOpts as T;
     }
-
     const key = `${def.queue}:${def.name}`;
     if (this.schedules.has(key)) return;
     const timer = setInterval(() => {
@@ -416,6 +447,7 @@ export class MemoryJobQueueDriver implements JobQueueDriver {
       if (!q.active.delete(job.id)) return; // returned to the queue by close()
       this.setResult(queue, job.id, { status: "completed", result });
       events.onComplete(job.def, Date.now() - started);
+      job.onComplete?.();
     } catch (err) {
       if (!q.active.delete(job.id)) return;
       const willRetry = job.attempt < job.def.attempts;

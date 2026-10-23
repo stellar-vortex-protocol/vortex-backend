@@ -148,6 +148,18 @@ export class MetricsService implements OnModuleInit {
   public readonly griefingConcurrencyLimit: client.Gauge<string>;
   public readonly legacyStellarSignatures: client.Counter<string>;
 
+  /**
+   * Archival integrity re-verification metrics (issue #697).
+   *
+   * `vortex_archival_integrity_failures_total{date,reason}` counts manifests
+   * whose re-verification found a problem (`checksum_mismatch`,
+   * `size_mismatch`, `missing_file`); page on any increase, since the Parquet
+   * objects are the only remaining copy of the archived rows.
+   * `vortex_archival_verify_runs_total{outcome}` counts completed sweeps.
+   */
+  public readonly archivalIntegrityFailuresTotal: client.Counter<string>;
+  public readonly archivalVerifyRunsTotal: client.Counter<string>;
+
   /** Dual-write / consistency-verifier metrics (issue #404). */
   public readonly intentsDualWriteFailuresTotal: client.Counter<string>;
   public readonly intentsStoreMismatches: client.Gauge<string>;
@@ -592,6 +604,21 @@ export class MetricsService implements OnModuleInit {
       registers: [this.register],
     });
 
+    // ── Archival integrity re-verification (issue #697) ─────────────────────
+    this.archivalIntegrityFailuresTotal = new client.Counter({
+      name: `${prefix}archival_integrity_failures_total`,
+      help: "Archived manifests that failed re-verification, by date partition and reason",
+      labelNames: ["date", "reason"],
+      registers: [this.register],
+    });
+
+    this.archivalVerifyRunsTotal = new client.Counter({
+      name: `${prefix}archival_verify_runs_total`,
+      help: "Completed archival integrity verification sweeps, by outcome",
+      labelNames: ["outcome"],
+      registers: [this.register],
+    });
+
     // ── Dual-write / consistency verifier (issue #404) ───────────────────────
     this.intentsDualWriteFailuresTotal = new client.Counter({
       name: `${prefix}intents_dual_write_failures_total`,
@@ -1014,6 +1041,24 @@ export class MetricsService implements OnModuleInit {
   recordLeadershipLost(workerName: string): void {
     this.leaderElectionIsLeader.set({ worker: workerName }, 0);
     this.leaderElectionChangesTotal.inc({ worker: workerName, transition: "lost" });
+  }
+
+  // ── Archival integrity helpers (issue #697) ──────────────────────────────
+
+  /**
+   * Record one archived manifest that failed re-verification.
+   * Detection only — no automatic repair is attempted.
+   */
+  recordArchivalIntegrityFailure(
+    date: string,
+    reason: "checksum_mismatch" | "size_mismatch" | "missing_file",
+  ): void {
+    this.archivalIntegrityFailuresTotal.inc({ date, reason });
+  }
+
+  /** Record the outcome of one archival integrity verification sweep. */
+  recordArchivalVerifyRun(outcome: "ok" | "failed" | "error"): void {
+    this.archivalVerifyRunsTotal.inc({ outcome });
   }
 
   /** Count a Postgres mirror write that failed in dual-write mode. */

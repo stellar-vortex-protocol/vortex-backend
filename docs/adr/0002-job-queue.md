@@ -95,3 +95,27 @@ unknown job id yields `{ cancelled: false }`.
 - Reference migration: the intents store-size / retention loop is now the
   `maintenance/intents.store-size` repeatable job. Other loops migrate
   separately.
+
+## Follow-up: chained jobs (dependent steps)
+
+`JobQueueDriver.enqueueChain(steps)` submits a **linear** chain of jobs where
+each step starts only after the previous one completes successfully. It
+returns the first job's id, matching the single-job `enqueue()` shape; callers
+never see driver-specific types.
+
+- **BullMQ driver**: the chain is built with BullMQ's `FlowProducer.add()`,
+  nesting each step as the `children` of the next, so the dependency is
+  recorded atomically in Redis — a crash between steps cannot silently break
+  the chain.
+- **Memory driver**: each step's `process()` wrapper enqueues the next step
+  only in its `onComplete` callback, giving the same ordering in-process.
+- **Scope**: linear chains only. Branching/fan-out (multiple parallel
+  children, DAGs) is out of scope and can be a follow-up using BullMQ's fuller
+  flow support.
+- **Idempotency**: `EnqueueOptions.idempotencyKey` applies **per step**, not to
+  the chain as a whole.
+- **Failure**: if a step exhausts its retries and dead-letters, all subsequent
+  un-started steps are abandoned (never run out of order), and the failure is
+  visible via the existing dead-letter list for the step that failed.
+- **Concurrency**: a chain spanning queues with different
+  `QueueSettings.concurrency` still advances one step at a time.

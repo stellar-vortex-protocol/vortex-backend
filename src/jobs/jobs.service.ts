@@ -112,6 +112,14 @@ export class JobsService implements OnApplicationShutdown {
     return this.driver.enqueue(def, data, opts);
   }
 
+  /**
+   * Enqueues a linear chain of jobs: each step starts only after the previous
+   * one completes successfully. Returns the first job's id.
+   */
+  enqueueChain<T>(steps: { def: JobDefinition<T>; data: T }[]): Promise<string> {
+    return this.driver.enqueueChain(steps);
+  }
+
   /** Enqueues `def` every `everyMs`. Safe to call from every instance. */
   schedule<T>(def: JobDefinition<T>, everyMsOrOpts: number | { everyMs: number; data: T }, maybeData?: T): Promise<void> {
     if (typeof everyMsOrOpts === "object") {

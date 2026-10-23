@@ -3,15 +3,18 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Optional,
   Param,
   Post,
   Query,
+  UnauthorizedException,
   UseGuards,
 } from "@nestjs/common";
 import {
   ApiBadRequestResponse,
   ApiCreatedResponse,
+  ApiHeader,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -21,6 +24,7 @@ import {
 } from "@nestjs/swagger";
 import { AdminGuard, RequireAdminRole } from "../../admin/admin.guard";
 import { SolverCredentialService } from "../solver-credentials/solver-credential.service";
+import { extractApiKey } from "../rate-limit/tiered-throttle.guard";
 import { ApiKeyService } from "./api-key.service";
 import { CreateApiKeyDto } from "./dto/create-api-key.dto";
 import { RotateApiKeyDto } from "./dto/rotate-api-key.dto";
@@ -257,6 +261,67 @@ export class ApiKeyController {
         lastUsedAt: k.lastUsedAt,
       })),
       count: keys.length,
+    };
+  }
+}
+
+/**
+ * Self-service API key introspection (issue #700).
+ *
+ * Authenticated by the key itself (`Authorization: Bearer` or `x-api-key`),
+ * using the same header extraction as `TieredThrottleGuard`. Deliberately NOT
+ * behind `AdminGuard`: a key's owner may inspect their own key's metadata.
+ *
+ * Missing, revoked, expired and nonexistent keys all collapse to a 401 so the
+ * endpoint never discloses whether a presented prefix exists.
+ */
+@ApiTags("api-keys")
+@Controller({ path: "api-keys", version: "1" })
+export class ApiKeySelfController {
+  constructor(private readonly apiKeys: ApiKeyService) {}
+
+  @Get("me")
+  @ApiOperation({
+    summary: "Introspect the calling API key",
+    description:
+      "Returns metadata for the API key used to authenticate this request: " +
+      "tier, scopes, creation/expiry timestamps, last-used timestamp and key " +
+      "prefix. Never returns the plaintext secret or its hash. Revoked, " +
+      "expired and unknown keys all yield 401.",
+  })
+  @ApiHeader({
+    name: "Authorization",
+    required: false,
+    description: "Bearer <api key> (alternative to x-api-key)",
+  })
+  @ApiHeader({
+    name: "x-api-key",
+    required: false,
+    description: "API key (alternative to Authorization: Bearer)",
+  })
+  @ApiOkResponse({ description: "Metadata for the calling key" })
+  @ApiUnauthorizedResponse({
+    description: "Missing, invalid, revoked or expired API key",
+  })
+  async me(
+    @Headers("authorization") authorization?: string,
+    @Headers("x-api-key") xApiKey?: string,
+  ) {
+    const presented = extractApiKey(authorization, xApiKey);
+    if (!presented) {
+      throw new UnauthorizedException("API key required");
+    }
+    const record = await this.apiKeys.resolveKey(presented);
+    if (!record) {
+      throw new UnauthorizedException("Invalid API key");
+    }
+    return {
+      tier: record.tier,
+      scopes: record.scopes,
+      createdAt: record.createdAt,
+      expiresAt: record.expiresAt,
+      lastUsedAt: record.lastUsedAt,
+      keyPrefix: record.keyPrefix,
     };
   }
 }

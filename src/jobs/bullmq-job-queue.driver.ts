@@ -1,8 +1,9 @@
 import { Logger } from "@nestjs/common";
-import { Job, Queue, Worker } from "bullmq";
+import { FlowProducer, Job, Queue, Worker } from "bullmq";
 import {
   DeadLetter,
   EnqueueOptions,
+  JobChainStep,
   JobDefinition,
   JobEvents,
   JobHandler,
@@ -33,6 +34,7 @@ export class BullMqJobQueueDriver implements JobQueueDriver {
   private readonly workers = new Map<string, Worker>();
   private readonly handlers = new Map<string, Map<string, { handler: JobHandler<unknown>; events: JobEvents; def: JobDefinition }>>();
   private readonly redisUrl: string;
+  private readonly flowProducer: FlowProducer;
   /** Test-only direct queue override used by unit specs. */
   public queue?: { add?: Queue["add"]; getJob?: Queue["getJob"] };
 
@@ -41,6 +43,7 @@ export class BullMqJobQueueDriver implements JobQueueDriver {
       typeof redisUrlOrConfig === "string"
         ? redisUrlOrConfig
         : redisUrlOrConfig?.get?.("redisUrl") ?? "redis://localhost:6379";
+    this.flowProducer = new FlowProducer({ connection: { url: this.redisUrl } });
   }
 
   defineQueue(name: string, settings: QueueSettings): void {
@@ -84,6 +87,7 @@ export class BullMqJobQueueDriver implements JobQueueDriver {
     return job.id as string;
   }
 
+<<<<<<< HEAD
   async cancel(queue: string, jobId: string): Promise<boolean> {
     const source = this.queue?.getJob ? (this.queue as Queue) : this.entry(queue).queue;
     const job = await source.getJob(jobId);
@@ -99,6 +103,62 @@ export class BullMqJobQueueDriver implements JobQueueDriver {
       this.logger.warn(`[jobs] ${queue}: failed to cancel job ${jobId}: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }
+  }
+
+  async schedule<T>(
+    defOrQueue: JobDefinition<T> | string,
+    everyMsOrDefOrOpts: number | JobDefinition<T> | { everyMs: number; data: T },
+    dataOrOpts?: T | { everyMs: number; data: T },
+  ): Promise<void> {
+    let def: JobDefinition<T>;
+    let everyMs: number;
+    let data: T;
+    if (typeof defOrQueue === "string") {
+      def = everyMsOrDefOrOpts as JobDefinition<T>;
+      const opts = dataOrOpts as { everyMs: number; data: T };
+      everyMs = opts.everyMs;
+      data = opts.data;
+    } else if (typeof everyMsOrDefOrOpts === "number") {
+      def = defOrQueue;
+      everyMs = everyMsOrDefOrOpts;
+      data = dataOrOpts as T;
+    } else {
+      def = defOrQueue;
+      const opts = everyMsOrDefOrOpts as { everyMs: number; data: T };
+      everyMs = opts.everyMs;
+      data = opts.data;
+    }
+  }
+
+  /**
+   * Enqueues a linear chain via BullMQ's FlowProducer: each step is added as
+   * the `children` of the next, so BullMQ only moves a step to `waiting` once
+   * its parent completes successfully. Steps may live on different queues.
+   * Returns the first (root) job's id.
+   */
+  async enqueueChain<T>(steps: JobChainStep<T>[]): Promise<string> {
+    if (steps.length === 0) throw new Error("enqueueChain() requires at least one step");
+    for (const step of steps) this.entry(step.def.queue);
+
+    // Build from the last step backwards so each node nests the previous one.
+    let node: Parameters<FlowProducer["add"]>[0] | undefined;
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const { def, data, opts } = steps[i];
+      node = {
+        name: def.name,
+        queueName: def.queue,
+        data,
+        opts: {
+          ...this.jobOptions(def),
+          jobId: opts?.idempotencyKey,
+          delay: opts?.delayMs,
+        },
+        children: node ? [node] : undefined,
+      };
+    }
+
+    const { job } = await this.flowProducer.add(node!);
+    return job.id as string;
   }
 
   async schedule<T>(
@@ -277,6 +337,7 @@ export class BullMqJobQueueDriver implements JobQueueDriver {
     await Promise.all(
       [...this.queueMap.values()].flatMap(({ queue, dlq }) => [queue.close(), dlq.close()]),
     );
+    await this.flowProducer.close();
   }
 
   queues(): string[] {

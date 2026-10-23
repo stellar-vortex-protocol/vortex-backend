@@ -82,6 +82,35 @@ export class ApiKeyService {
     return this.repo.findById(id);
   }
 
+  /**
+   * Self-service introspection (issue #700).
+   *
+   * Resolves a presented plaintext key and returns only non-secret metadata.
+   * Returns `null` for missing, unknown, revoked, or expired keys — callers
+   * must map `null` to a 401 without distinguishing the underlying reason,
+   * reusing `resolveKey`'s existing non-disclosure behavior verbatim.
+   */
+  async introspectKey(plaintext: string | null | undefined): Promise<{
+    tier: ApiKeyTier;
+    scopes: string[];
+    createdAt: number;
+    expiresAt: number | null;
+    lastUsedAt: number | null;
+    keyPrefix: string;
+  } | null> {
+    if (!plaintext) return null;
+    const record = await this.resolveKey(plaintext);
+    if (!record) return null;
+    return {
+      tier: record.tier,
+      scopes: record.scopes ?? [],
+      createdAt: record.createdAt,
+      expiresAt: record.expiresAt,
+      lastUsedAt: record.lastUsedAt,
+      keyPrefix: record.keyPrefix,
+    };
+  }
+
   /** List keys for an owner (metadata only — never plaintext). */
   async listKeys(owner: string): Promise<ApiKeyRecord[]> {
     return this.repo.listByOwner(owner);
