@@ -91,6 +91,10 @@ function makeConfigService(
     sep10JwtSigningKey: "",
     sep10AdminAccounts: "",
     sep10NonceStore: "memory",
+    signatureNonceStore: "memory",
+    egress: {
+      circuitBreaker: { failureThreshold: 5, cooldownMs: 30000, successThreshold: 2 },
+    },
     intentRetentionSweepMs: 60000,
     intentsVerifyIntervalMs: 60000,
     safetySweepIntervalMs: 300000,

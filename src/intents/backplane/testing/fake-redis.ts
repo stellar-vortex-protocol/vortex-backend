@@ -2,12 +2,14 @@ import type { RedisLike } from "../redis.backplane";
 
 /**
  * In-memory stand-in for the Redis features RedisBackplane uses (INCR+XADD
- * script, XREAD BLOCK, XREVRANGE), shared by every client it creates so
- * several "replicas" can talk through it. `outage(ms)` makes every client
- * fail like a dropped connection, to exercise reconnect handling.
+ * script, XREAD BLOCK, XREVRANGE) plus the SET NX EX primitive used by the
+ * signature nonce store, shared by every client it creates so several
+ * "replicas" can talk through it. `outage(ms)` makes every client fail like a
+ * dropped connection, to exercise reconnect handling.
  */
 export class FakeRedisBroker {
   private readonly entries: Array<[string, string[]]> = [];
+  private readonly strings = new Map<string, string>();
   private seq = 0;
   private idCounter = 0;
   private downUntil = 0;
@@ -27,6 +29,13 @@ export class FakeRedisBroker {
       if (Date.now() < broker.downUntil) throw new Error("Connection is closed.");
     };
     return {
+      async set(key, value, ...options) {
+        guard();
+        const nx = options.some((opt) => String(opt).toUpperCase() === "NX");
+        if (nx && broker.strings.has(key)) return null;
+        broker.strings.set(key, value);
+        return "OK";
+      },
       async eval(_script, _numKeys, _seqKey, _streamKey, _maxLen, payload) {
         guard();
         const seq = ++broker.seq;
@@ -68,5 +77,51 @@ export class FakeRedisBroker {
         /* no-op */
       },
     };
+  }
+}
+
+export interface FakeRedisSetCall {
+  key: string;
+  value: string;
+  options?: { NX?: boolean; EX?: number };
+}
+
+/**
+ * Stand-in Redis client used by `SignatureNonceService` unit tests (#713).
+ */
+export class FakeRedis {
+  readonly setCalls: FakeRedisSetCall[] = [];
+  private readonly store = new Map<string, string>();
+  private nextError: Error | null = null;
+
+  failNextSet(err: Error): void {
+    this.nextError = err;
+  }
+
+  async set(
+    key: string,
+    value: string,
+    optionsOrMode?: { NX?: boolean; EX?: number } | string,
+    ...rest: (string | number)[]
+  ): Promise<"OK" | null> {
+    let options: { NX?: boolean; EX?: number } | undefined;
+    if (optionsOrMode && typeof optionsOrMode === "object") {
+      options = optionsOrMode;
+    } else if (typeof optionsOrMode === "string") {
+      const all = [optionsOrMode, ...rest];
+      const nx = all.some((a) => String(a).toUpperCase() === "NX");
+      const exIdx = all.findIndex((a) => String(a).toUpperCase() === "EX");
+      const ex = exIdx >= 0 ? Number(all[exIdx + 1]) : undefined;
+      options = { ...(nx ? { NX: true } : {}), ...(ex !== undefined ? { EX: ex } : {}) };
+    }
+    this.setCalls.push({ key, value, options });
+    if (this.nextError) {
+      const err = this.nextError;
+      this.nextError = null;
+      throw err;
+    }
+    if (options?.NX && this.store.has(key)) return null;
+    this.store.set(key, value);
+    return "OK";
   }
 }

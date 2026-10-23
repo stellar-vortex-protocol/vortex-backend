@@ -11,6 +11,7 @@ import { Module, Global, DynamicModule, Provider } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 
 import { SecretsService } from "./secrets.service";
+import { SecretsAlertingService } from "./secrets-alerting.service";
 import { SecretsProvider } from "./secrets.provider";
 import { EnvProvider } from "./providers/env.provider";
 import { AwsSecretsManagerProvider } from "./providers/aws-secrets-manager.provider";
@@ -43,8 +44,8 @@ export class SecretsModule {
     return {
       module: SecretsModule,
       imports: [ConfigModule],
-      providers: [providerFactory, SecretsService],
-      exports: [SecretsService, SECRETS_PROVIDER_TOKEN],
+      providers: [providerFactory, SecretsService, SecretsAlertingService],
+      exports: [SecretsService, SecretsAlertingService, SECRETS_PROVIDER_TOKEN],
     };
   }
 
@@ -54,14 +55,16 @@ export class SecretsModule {
       providers: [
         { provide: SECRETS_PROVIDER_TOKEN, useValue: provider },
         SecretsService,
+        SecretsAlertingService,
       ],
-      exports: [SecretsService, SECRETS_PROVIDER_TOKEN],
+      exports: [SecretsService, SecretsAlertingService, SECRETS_PROVIDER_TOKEN],
     };
   }
 }
 
 export { SECRETS_PROVIDER_TOKEN };
 export { SecretsService } from "./secrets.service";
+export { SecretsAlertingService } from "./secrets-alerting.service";
 export { SecretsProvider, SecretVersion, SecretChangeEvent, SecretsWatchHandle, SecretResult, SecretConfig, SecretMapping, SECRET_ROTATED_EVENT, SECRET_ERROR_EVENT } from "./secrets.provider";
 export { EnvProvider } from "./providers/env.provider";
 export { AwsSecretsManagerProvider } from "./providers/aws-secrets-manager.provider";

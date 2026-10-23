@@ -20,6 +20,7 @@ import {
   SecretVersion,
   SecretChangeEvent,
   SecretsWatchHandle,
+  SecretErrorEvent,
 } from "../secrets.provider";
 
 interface AWSSecretsManagerClient {
@@ -122,6 +123,7 @@ export class AwsSecretsManagerProvider implements SecretsProvider {
     names: string[],
     onChange: (event: SecretChangeEvent) => void,
     intervalMs?: number,
+    onError?: (event: SecretErrorEvent) => void,
   ): Promise<SecretsWatchHandle> {
     const client = await this.ensureClient();
     const pollMs = intervalMs ?? this.pollIntervalMs;
@@ -166,7 +168,10 @@ export class AwsSecretsManagerProvider implements SecretsProvider {
           }
         } catch (err) {
           this.logger.warn(`Poll failed for secret ${name}: ${(err as Error).message}`);
-          // Don't crash the watch loop on transient errors
+          // Don't crash the watch loop on transient errors, but surface the
+          // failure so it can be reported (SECRET_ERROR_EVENT) rather than
+          // silently swallowed.
+          onError?.({ name, error: err instanceof Error ? err : new Error(String(err)) });
         }
       }
     }, pollMs);

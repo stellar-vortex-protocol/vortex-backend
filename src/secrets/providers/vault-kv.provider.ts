@@ -141,6 +141,7 @@ export class VaultKvProvider implements SecretsProvider {
     names: string[],
     onChange: (event: SecretChangeEvent) => void,
     intervalMs?: number,
+    onError?: (name: string, error: Error) => void,
   ): Promise<SecretsWatchHandle> {
     await this.ensureClient();
     const pollMs = intervalMs ?? this.pollIntervalMs;
@@ -183,7 +184,19 @@ export class VaultKvProvider implements SecretsProvider {
             });
           }
         } catch (err) {
-          this.logger.warn(`Poll failed for secret ${name}: ${(err as Error).message}`);
+          const error = err instanceof Error ? err : new Error(String(err));
+          this.logger.warn(`Poll failed for secret ${name}: ${error.message}`);
+          // Surface the failure so SecretsService can emit SECRET_ERROR_EVENT
+          // (and downstream alerting) instead of only logging a warning.
+          if (onError) {
+            try {
+              onError(name, error);
+            } catch (cbErr) {
+              this.logger.error(
+                `Error callback failed for secret ${name}: ${(cbErr as Error).message}`,
+              );
+            }
+          }
         }
       }
     }, pollMs);

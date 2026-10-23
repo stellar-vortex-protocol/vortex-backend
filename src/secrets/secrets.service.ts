@@ -214,7 +214,15 @@ export class SecretsService implements OnModuleInit, OnModuleDestroy {
   /** Refresh all configured secrets from the provider. */
   async refreshAllSecrets(): Promise<void> {
     const names = this.secretConfigs.map((c) => c.name);
-    const results = await this.provider.getSecrets(names);
+    let results: Map<string, SecretVersion>;
+    try {
+      results = await this.provider.getSecrets(names);
+    } catch (err) {
+      // Surface provider-level load failures through the error event path so
+      // alerting (Sentry) can observe them, then rethrow for fail-closed startup.
+      this.emitSecretError(names, err);
+      throw err;
+    }
 
     const now = Date.now();
     for (const [name, version] of results) {
@@ -227,6 +235,22 @@ export class SecretsService implements OnModuleInit, OnModuleDestroy {
       if (cfg.required && !this.secretCache.has(cfg.name)) {
         this.logger.warn(`Required secret "${cfg.name}" not found from provider`);
       }
+    }
+  }
+
+  /**
+   * Publish a secret error event for the given logical secret names.
+   * Only the logical name is included — never the secret value.
+   */
+  private emitSecretError(names: string[], err: unknown): void {
+    const error = err instanceof Error ? err : new Error(String(err));
+    for (const name of names) {
+      this.logger.error(`Secret "${name}" failed to load/refresh from provider ${this.provider.name}: ${error.message}`);
+      this.eventEmitter.emit(SECRET_ERROR_EVENT, {
+        name,
+        error,
+        provider: this.provider.name,
+      });
     }
   }
 
@@ -299,8 +323,13 @@ export class SecretsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Subscribe to secret error events. */
-  onSecretError(listener: (event: SecretChangeEvent) => void): () => void {
+  onSecretError(listener: (event: { name: string; error: Error; provider?: string }) => void): () => void {
     this.eventEmitter.on(SECRET_ERROR_EVENT, listener);
     return () => this.eventEmitter.off(SECRET_ERROR_EVENT, listener);
+  }
+
+  /** Emit a secret error event (used by providers/tests to signal failures). */
+  reportSecretError(name: string, err: unknown): void {
+    this.emitSecretError([name], err);
   }
 }

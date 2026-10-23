@@ -4,6 +4,8 @@ import { AdminAuditService } from "./admin-audit.service";
 import { AdminSecretsController } from "./admin-secrets.controller";
 import { CanaryRegistryController } from "./canary-registry.controller";
 import { CanaryRegistryService } from "./canary-registry.service";
+import { EgressHealthController } from "./egress-health.controller";
+import { AdminConfigController } from "./admin-config.controller";
 import { SecretsModule } from "../secrets/secrets.module";
 import { PrismaModule } from "../prisma/prisma.module";
 
@@ -11,7 +13,12 @@ import { PrismaModule } from "../prisma/prisma.module";
 @Global()
 @Module({
   imports: [SecretsModule, PrismaModule],
-  controllers: [AdminSecretsController, CanaryRegistryController],
+  controllers: [
+    AdminSecretsController,
+    CanaryRegistryController,
+    EgressHealthController,
+    AdminConfigController,
+  ],
   providers: [AdminGuard, AdminAuditService, CanaryRegistryService],
   exports: [AdminGuard, AdminAuditService, CanaryRegistryService],
 })

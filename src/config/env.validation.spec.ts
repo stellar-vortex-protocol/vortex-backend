@@ -1,4 +1,12 @@
 import { envValidationSchema } from "./env.validation";
+import { AppConfig, loadConfiguration } from "./configuration";
+import {
+  REDACTED_CONFIG_FIELDS,
+  SECRET_SHAPED_FIELD_PATTERN,
+  isSecretShapedField,
+  redactConfig,
+  REDACTED_PLACEHOLDER,
+} from "./config-redaction";
 
 const BASE_ENV = {
   NODE_ENV: "development",
@@ -263,6 +271,112 @@ describe("envValidationSchema — kill-switch propagation (issue #477)", () => {
     });
     expect(error).toBeUndefined();
     expect(value.KILLSWITCH_REDIS_URL).toBe("");
+  });
+});
+
+describe("config redaction — GET /api/v1/admin/config (#715)", () => {
+  const resolvedConfig = loadConfiguration();
+
+  /** Recursively collect dotted paths of every leaf key in an object. */
+  const collectKeyPaths = (value: unknown, prefix = ""): string[] => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return prefix ? [prefix] : [];
+    }
+    return Object.entries(value as Record<string, unknown>).flatMap(
+      ([key, child]) => {
+        const path = prefix ? `${prefix}.${key}` : key;
+        return collectKeyPaths(child, path);
+      },
+    );
+  };
+
+  const allKeyPaths = collectKeyPaths(resolvedConfig);
+
+  it("enumerates the resolved AppConfig shape", () => {
+    expect(allKeyPaths.length).toBeGreaterThan(0);
+    // Sanity-check a few operationally significant fields are present.
+    expect(allKeyPaths).toEqual(
+      expect.arrayContaining([
+        "onchainDryRun",
+        "wsMaxConnections",
+        "leaderElection.enabled",
+        "processRole",
+      ]),
+    );
+  });
+
+  it("denylists every secret-shaped AppConfig field", () => {
+    const secretShapedPaths = allKeyPaths.filter((path) => {
+      const leaf = path.split(".").pop() as string;
+      return SECRET_SHAPED_FIELD_PATTERN.test(leaf);
+    });
+
+    // Guard against the regex silently matching nothing.
+    expect(secretShapedPaths.length).toBeGreaterThan(0);
+
+    const missing = secretShapedPaths.filter(
+      (path) => !REDACTED_CONFIG_FIELDS.includes(path),
+    );
+
+    expect(missing).toEqual([]);
+  });
+
+  it("redacts every currently-known secret-shaped field", () => {
+    const redacted = redactConfig(resolvedConfig) as unknown as Record<
+      string,
+      unknown
+    >;
+
+    for (const path of REDACTED_CONFIG_FIELDS) {
+      const segments = path.split(".");
+      let cursor: unknown = redacted;
+      for (const segment of segments) {
+        expect(cursor).toBeDefined();
+        cursor = (cursor as Record<string, unknown>)[segment];
+      }
+      expect(cursor).toBe(REDACTED_PLACEHOLDER);
+    }
+  });
+
+  it("redacts databaseUrl and secrets.extra", () => {
+    const redacted = redactConfig(resolvedConfig) as unknown as {
+      databaseUrl: string;
+      secrets: { extra: unknown };
+    };
+    expect(redacted.databaseUrl).toBe(REDACTED_PLACEHOLDER);
+    expect(redacted.secrets.extra).toBe(REDACTED_PLACEHOLDER);
+  });
+
+  it("leaves non-secret operational fields intact", () => {
+    const redacted = redactConfig(resolvedConfig) as unknown as AppConfig;
+    expect(redacted.onchainDryRun).toBe(resolvedConfig.onchainDryRun);
+    expect(redacted.wsMaxConnections).toBe(resolvedConfig.wsMaxConnections);
+    expect(redacted.leaderElection.enabled).toBe(
+      resolvedConfig.leaderElection.enabled,
+    );
+    expect(redacted.processRole).toBe(resolvedConfig.processRole);
+  });
+
+  it("fails when a denylist entry is removed", () => {
+    const withoutDatabaseUrl = REDACTED_CONFIG_FIELDS.filter(
+      (field) => field !== "databaseUrl",
+    );
+    const redacted = redactConfig(resolvedConfig, {
+      fields: withoutDatabaseUrl,
+    }) as unknown as { databaseUrl: string };
+
+    // The redaction helper honours the supplied denylist, so dropping an entry
+    // leaks the value — exactly what the enumeration test above catches.
+    expect(redacted.databaseUrl).not.toBe(REDACTED_PLACEHOLDER);
+  });
+
+  it("treats secret-shaped leaf names as secret regardless of nesting", () => {
+    expect(isSecretShapedField("apiKey")).toBe(true);
+    expect(isSecretShapedField("clientSecret")).toBe(true);
+    expect(isSecretShapedField("accessToken")).toBe(true);
+    expect(isSecretShapedField("dbPassword")).toBe(true);
+    expect(isSecretShapedField("wsMaxConnections")).toBe(false);
+    expect(isSecretShapedField("onchainDryRun")).toBe(false);
   });
 });
 

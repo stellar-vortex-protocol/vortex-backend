@@ -1,6 +1,12 @@
 import { request, Agent, Dispatcher } from 'undici';
 import { isIP, isIPv4, isIPv6 } from 'node:net';
 import { lookup } from 'node:dns/promises';
+import {
+  CircuitBreakerRegistry,
+  CircuitBreakerOptions,
+  CircuitBreakerSnapshot,
+  CircuitOpenError,
+} from './circuit-breaker';
 
 export enum EgressPurpose {
   WEBHOOK = 'webhook',
@@ -17,6 +23,7 @@ export interface EgressConfig {
   maxBodySizeBytes: number;
   allowlist?: string[];
   blockPrivateRanges: boolean;
+  circuitBreaker?: CircuitBreakerOptions;
 }
 
 export interface EgressResponse {
@@ -45,6 +52,7 @@ const LOOPBACK_IPS = ['127.0.0.0', '127.0.0.1', '::1'];
 export class HttpEgressService {
   private readonly agent: Agent;
   private readonly config: EgressConfig;
+  private readonly breakers: CircuitBreakerRegistry;
 
   constructor(config: EgressConfig) {
     this.config = config;
@@ -55,6 +63,19 @@ export class HttpEgressService {
       bodyTimeout: config.timeoutMs,
       headersTimeout: config.timeoutMs,
     });
+    this.breakers = new CircuitBreakerRegistry(config.circuitBreaker);
+  }
+
+  /**
+   * Returns a snapshot of every tracked circuit breaker, keyed by
+   * `(purpose, hostname)`. Used by the admin health endpoint.
+   */
+  getCircuitBreakerHealth(): CircuitBreakerSnapshot[] {
+    return this.breakers.snapshots();
+  }
+
+  getBreakerSnapshots(): CircuitBreakerSnapshot[] {
+    return this.breakers.snapshots();
   }
 
   async fetch(url: string, options?: {
@@ -92,11 +113,16 @@ export class HttpEgressService {
 
     const requestHeaders = { ...headers, Host: parsedUrl.hostname };
 
+    const breaker = this.breakers.get(purpose, parsedUrl.hostname);
+    breaker.assertClosed();
+
     const response = await this.makeRequest(requestUrl, resolvedIp, {
       method,
       headers: requestHeaders,
       body,
       maxRedirects: this.config.maxRedirects,
+      purpose,
+      breaker,
     });
 
     if (response.bodyBytes > this.config.maxBodySizeBytes) {
@@ -230,20 +256,31 @@ export class HttpEgressService {
       headers: Record<string, string>;
       body?: string | Buffer;
       maxRedirects: number;
+      purpose: EgressPurpose;
+      breaker: ReturnType<CircuitBreakerRegistry['get']>;
     }
   ): Promise<EgressResponse> {
     let redirects = 0;
     let currentUrl = url;
     let lastIp = initialIp;
     let lastResponse: Dispatcher.ResponseData | null = null;
+    let breaker = options.breaker;
 
     while (redirects <= options.maxRedirects) {
-      const response = await request(currentUrl, {
-        method: options.method,
-        headers: options.headers,
-        body: options.body,
-        dispatcher: this.agent,
-      });
+      breaker.assertClosed();
+
+      let response: Dispatcher.ResponseData;
+      try {
+        response = await request(currentUrl, {
+          method: options.method,
+          headers: options.headers,
+          body: options.body,
+          dispatcher: this.agent,
+        });
+      } catch (err: unknown) {
+        breaker.recordFailure();
+        throw err;
+      }
 
       lastResponse = response;
 
@@ -252,6 +289,7 @@ export class HttpEgressService {
         const locationHeader = response.headers['location'];
         const location = Array.isArray(locationHeader) ? locationHeader[0] : locationHeader;
         if (!location) {
+          breaker.recordFailure();
           throw new Error('Redirect without Location header');
         }
 
@@ -266,11 +304,18 @@ export class HttpEgressService {
           lastIp = resolvedIp;
           options.headers.Host = currentUrl.hostname;
         } catch (err: unknown) {
+          breaker.recordFailure();
           const message = err instanceof Error ? err.message : 'Unknown error';
           throw new Error(`Invalid redirect URL: ${message}`);
         }
+
+        // The redirect target is a different destination: evaluate it against
+        // its own breaker rather than bypassing the breaker entirely.
+        breaker = this.breakers.get(options.purpose, currentUrl.hostname);
         continue;
       }
+
+      breaker.recordSuccess();
 
       const chunks: Buffer[] = [];
       for await (const chunk of response.body) {
@@ -288,6 +333,9 @@ export class HttpEgressService {
       };
     }
 
+    breaker.recordFailure();
     throw new Error(`Too many redirects (${redirects})`);
   }
 }
+
+export { CircuitOpenError };

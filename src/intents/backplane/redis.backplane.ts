@@ -14,6 +14,12 @@ export interface RedisLike {
   eval(script: string, numKeys: number, ...args: (string | number)[]): Promise<unknown>;
   xread(...args: (string | number)[]): Promise<Array<[string, Array<[string, string[]]>]> | null>;
   xrevrange(key: string, end: string, start: string, count: "COUNT", n: number): Promise<Array<[string, string[]]>>;
+  /**
+   * SET with options. Used by the signature nonce store for atomic
+   * check-and-set (`SET key value NX EX ttl`). Resolves to "OK" when the key
+   * was written, or null when NX prevented the write (key already existed).
+   */
+  set(key: string, value: string, ...args: (string | number)[]): Promise<"OK" | null>;
   disconnect(): void;
 }
 

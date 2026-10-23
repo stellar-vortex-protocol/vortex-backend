@@ -24,6 +24,15 @@ export interface SecretChangeEvent {
   previousVersion: SecretVersion | null;
 }
 
+export interface SecretErrorEvent {
+  /** Logical name of the secret that failed to load or refresh. */
+  name: string;
+  /** Error reported by the provider. */
+  error: Error;
+  /** Provider name, if available. */
+  provider?: string;
+}
+
 /**
  * A pluggable secrets backend.
  *

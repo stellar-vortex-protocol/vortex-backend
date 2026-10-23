@@ -390,6 +390,32 @@ export interface AppConfig {
   /** Backing store for single-use SEP-10 challenge nonces (#442). */
   sep10NonceStore: "memory" | "redis";
   /**
+   * Backing store for signature replay-protection nonces (#713).
+   *
+   * - "prisma": Postgres `signature_nonce` table (INSERT ... ON CONFLICT).
+   * - "redis":  `SET key value NX EX <ttl>` — atomic check-and-set, shared
+   *             across replicas without touching the primary database.
+   * - "memory": in-process Map; single-replica only and rejected in production.
+   *
+   * Defaults to "prisma" when INTENTS_PERSISTENCE=prisma, otherwise "memory".
+   */
+  signatureNonceStore: "prisma" | "redis" | "memory";
+  /** Outbound HTTP egress hardening (#714). */
+  egress: {
+    /**
+     * Per-(purpose, hostname) circuit breaker. State is in-memory per process;
+     * cross-replica sharing is out of scope.
+     */
+    circuitBreaker: {
+      /** Consecutive failures that trip a closed breaker to open. */
+      failureThreshold: number;
+      /** Cooldown (ms) before an open breaker moves to half-open. */
+      cooldownMs: number;
+      /** Consecutive successes in half-open required to close the breaker. */
+      successThreshold: number;
+    };
+  };
+  /**
    * How often (ms) the local rate-limiter fallback prunes expired window
    * entries (issue #441). Only relevant during a Redis outage.
    */
@@ -558,7 +584,8 @@ export interface AppConfig {
   };
 }
 
-export default (): AppConfig => ({
+export function loadConfiguration(): AppConfig {
+  return ({
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: parseInt(process.env.PORT ?? "4000", 10),
   databaseUrl:
@@ -733,6 +760,17 @@ export default (): AppConfig => ({
   sep10JwtSigningKey: process.env.SEP10_JWT_SIGNING_KEY ?? "",
   sep10AdminAccounts: process.env.SEP10_ADMIN_ACCOUNTS ?? "",
   sep10NonceStore: (process.env.SEP10_NONCE_STORE ?? "memory") as "memory" | "redis",
+  // #713 — signature replay-protection backend. Defaults to the Postgres path
+  // whenever the intent persistence layer is Postgres (production), otherwise
+  // the in-process Map, matching the pre-#713 behaviour.
+  signatureNonceStore: resolveSignatureNonceStore(process.env),
+  egress: {
+    circuitBreaker: {
+      failureThreshold: clampPositiveInt(process.env.EGRESS_BREAKER_FAILURE_THRESHOLD, 5),
+      cooldownMs: clampPositiveInt(process.env.EGRESS_BREAKER_COOLDOWN_MS, 30000),
+      successThreshold: clampPositiveInt(process.env.EGRESS_BREAKER_SUCCESS_THRESHOLD, 2),
+    },
+  },
   rateLimitLocalPruneMs: parseInt(process.env.RATE_LIMIT_LOCAL_PRUNE_MS ?? "60000", 10),
   // Redis URL for the distributed rate limiter. Defaults to REDIS_URL so an
   // existing multi-replica deployment keeps a global quota; set it explicitly
@@ -823,7 +861,10 @@ export default (): AppConfig => ({
     enabled: (process.env.PARTIAL_FILLS_ENABLED ?? "true") === "true",
     onchainEnabled: process.env.PARTIAL_FILLS_ONCHAIN_ENABLED === "true",
   },
-});
+  });
+}
+
+export default loadConfiguration;
 
 /**
  * Parse a JSON object of string values from an env var, falling back to an
@@ -915,4 +956,21 @@ function splitList(raw: string | undefined): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+/**
+ * Resolve the signature replay-protection backend (#713).
+ *
+ * Explicit `SIGNATURE_NONCE_STORE` wins; otherwise the default mirrors the
+ * intent persistence layer so a production deploy (INTENTS_PERSISTENCE=prisma)
+ * keeps the Postgres path without any extra configuration. Unrecognised values
+ * fall back to the same default rather than crashing boot — env.validation.ts
+ * is responsible for rejecting typos in production.
+ */
+function resolveSignatureNonceStore(
+  env: NodeJS.ProcessEnv,
+): AppConfig["signatureNonceStore"] {
+  const raw = env.SIGNATURE_NONCE_STORE?.trim().toLowerCase();
+  if (raw === "prisma" || raw === "redis" || raw === "memory") return raw;
+  return env.INTENTS_PERSISTENCE === "prisma" ? "prisma" : "memory";
 }

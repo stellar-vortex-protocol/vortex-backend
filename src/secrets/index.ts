@@ -5,6 +5,7 @@
  */
 export { SecretsModule, SECRETS_PROVIDER_TOKEN } from "./secrets.module";
 export { SecretsService } from "./secrets.service";
+export { SecretsAlertingService } from "./secrets-alerting.service";
 export {
   SecretsProvider,
   SecretVersion,
