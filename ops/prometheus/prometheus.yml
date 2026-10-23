@@ -31,6 +31,7 @@ global:
 # silently breaks startup.
 rule_files:
   - /etc/prometheus/rules/vortex-slo.yml
+  - /etc/prometheus/rules/vortex-audit-partitions.yml
 
 scrape_configs:
   # The API. `host.docker.internal` so the metrics endpoint is reachable from a

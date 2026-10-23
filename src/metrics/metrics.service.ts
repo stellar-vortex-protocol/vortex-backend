@@ -98,6 +98,12 @@ export class MetricsService implements OnModuleInit {
   public readonly sorobanRestoreTotal: client.Counter<string>;
   public readonly sorobanRestoreFeeStroops: client.Histogram<string>;
 
+  // ── intent_audit_log partitions (issue #407) ──────────────────────────────
+  public readonly auditPartitions: client.Gauge<string>;
+  public readonly auditPartitionMonthsAhead: client.Gauge<string>;
+  public readonly auditDefaultPartitionRows: client.Gauge<string>;
+  public readonly auditPartitionOpsTotal: client.Counter<string>;
+
   // ── Remote signer call latency (issue #400) ───────────────────────────────
   public readonly signerCallDurationSeconds: client.Histogram<string>;
 
@@ -306,6 +312,30 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}soroban_restore_fee_stroops`,
       help: "Fee paid for RestoreFootprint transactions in stroops",
       buckets: [1000, 5000, 10000, 50000, 100000, 500000, 1000000],
+      registers: [this.register],
+    });
+
+    // ── intent_audit_log partitions (issue #407) ──────────────────────────
+    this.auditPartitions = new client.Gauge({
+      name: `${prefix}audit_log_partitions`,
+      help: "Monthly intent_audit_log partitions, by state (attached | detached)",
+      labelNames: ["state"],
+      registers: [this.register],
+    });
+    this.auditPartitionMonthsAhead = new client.Gauge({
+      name: `${prefix}audit_log_partition_months_ahead`,
+      help: "Consecutive future months (after the current one) that already have a partition",
+      registers: [this.register],
+    });
+    this.auditDefaultPartitionRows = new client.Gauge({
+      name: `${prefix}audit_log_default_partition_rows`,
+      help: "Rows in intent_audit_log_default (should be 0: a month was missing its partition)",
+      registers: [this.register],
+    });
+    this.auditPartitionOpsTotal = new client.Counter({
+      name: `${prefix}audit_log_partition_ops_total`,
+      help: "Partition maintenance operations, by op (create | detach | export | drop) and result",
+      labelNames: ["op", "result"],
       registers: [this.register],
     });
 
@@ -789,6 +819,19 @@ export class MetricsService implements OnModuleInit {
 
   observeRestoreFee(stroops: number): void {
     this.sorobanRestoreFeeStroops.observe(stroops);
+  }
+
+  // ── intent_audit_log partition helpers (issue #407) ─────────────────────
+
+  setAuditPartitionState(attached: number, detached: number, monthsAhead: number, defaultRows: number): void {
+    this.auditPartitions.set({ state: "attached" }, attached);
+    this.auditPartitions.set({ state: "detached" }, detached);
+    this.auditPartitionMonthsAhead.set(monthsAhead);
+    this.auditDefaultPartitionRows.set(defaultRows);
+  }
+
+  incAuditPartitionOp(op: "create" | "detach" | "export" | "drop", result: "success" | "failed"): void {
+    this.auditPartitionOpsTotal.inc({ op, result });
   }
 
   // ── Remote signer helpers (issue #400) ────────────────────────────────────

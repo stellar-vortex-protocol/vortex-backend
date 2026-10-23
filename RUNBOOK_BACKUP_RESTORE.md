@@ -251,6 +251,113 @@ automatically (logged as `[replica] All replicas lagging or unhealthy — fallin
 
 ---
 
+## 8a. Audit-log partitions (issue #407)
+
+`intent_audit_log` becomes a table range-partitioned by month on
+`"timestamp"`. Partitions are named `intent_audit_log_yYYYYmMM`, bounds are
+UTC month starts, and `intent_audit_log_default` catches any row whose month
+has no partition, so an insert can never fail at a month boundary. Prisma
+keeps using the model `IntentAuditLog` → `intent_audit_log`; it cannot model
+partitions, so everything partition-specific is raw SQL.
+
+### 8a.1 Rollout (zero downtime)
+
+| Step | Action | Rollback |
+|------|--------|----------|
+| 1 | Deploy migration `20261022000000_audit_log_partitioned_expand`. It creates `intent_audit_log_p` (partitioned, sharing `intent_audit_log_id_seq`), its default partition, monthly partitions from the oldest row through three months ahead, and a trigger that mirrors every change on the live table. | `down.sql` |
+| 2 | `npm run db:backfill-audit-partitions` copies existing rows in ≤ 5k-row batches (`lock_timeout` 1 s, resumable via `.backfill-audit-partitions.json`). Repeat with `-- --verify` until it prints `0 row(s) missing`. | Nothing to undo |
+| 3 | In a later release, move `prisma/staged-migrations/407-audit-log-partitioning/20261201000000_audit_log_partition_swap` into `prisma/migrations/`, together with the `@@id([id, timestamp])` schema change (see that folder's README). It re-verifies, then swaps names in one catalog-only transaction. | swap `down.sql` copies post-swap rows back and swaps the names back |
+| 4 | Optional, later: `…_audit_log_drop_legacy` drops `intent_audit_log_legacy` after re-verifying. | Restore from backup |
+
+### 8a.2 Creating partitions ahead
+
+`AuditPartitionService` (leader-elected worker `audit-partitions`) runs at
+start-up and every `AUDIT_PARTITION_INTERVAL_MS` (default 6 h). It makes sure
+the current month and the next `AUDIT_PARTITION_PREMAKE_MONTHS` (default 3)
+have partitions by calling:
+
+```sql
+SELECT intent_audit_log_ensure_partition('intent_audit_log'::regclass, DATE '2027-02-01');
+```
+
+The function is idempotent. If rows for that month already landed in the
+default partition, it moves them into the new partition in the same
+transaction. Run it by hand to create a month early. Before the swap the
+parent is `intent_audit_log_p`; the service picks whichever table is
+partitioned.
+
+**Alternative: `pg_partman`.** Where the extension is available (RDS, Cloud
+SQL and Timescale images ship it), it can own creation and retention instead:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_partman;
+SELECT partman.create_parent(
+  p_parent_table   => 'public.intent_audit_log',
+  p_control        => 'timestamp',
+  p_interval       => '1 month',
+  p_premake        => 3,
+  p_default_table  => true);
+UPDATE partman.part_config
+   SET retention = '24 months', retention_keep_table = true
+ WHERE parent_table = 'public.intent_audit_log';
+-- schedule: SELECT partman.run_maintenance(); (pg_cron or an external cron)
+```
+
+When using pg_partman, set `AUDIT_PARTITION_MAINTENANCE_ENABLED=false`, and
+note that its child tables follow its own naming (`intent_audit_log_p20270201`),
+not `_yYYYYmMM`.
+
+### 8a.3 Retention
+
+`AUDIT_RETENTION_MONTHS=0` (default) keeps every partition attached. With
+`N > 0`, partitions whose month began more than `N` months before the current
+month are:
+
+1. **Detached.** This is a plain `DETACH PARTITION` under a 1 s lock timeout.
+   It is catalog-only. `DETACH … CONCURRENTLY` is not allowed while a default
+   partition exists.
+2. **Renamed** to `intent_audit_log_detached_yYYYYmMM`, with the foreign key to
+   `intents` dropped so intent archival (§4.2) can no longer cascade into the
+   retained history.
+3. **Exported**, when archival is enabled (`ARCHIVAL_*`), to
+   `s3://$ARCHIVAL_BUCKET_NAME/audit-partitions/yYYYYmMM/part-NNNNN.parquet`
+   plus `manifest.json` (row counts and SHA-256 per file). An existing
+   manifest means the export already happened and is skipped.
+4. **Kept** as a table. Only with `AUDIT_RETENTION_DROP_AFTER_EXPORT=true`, and
+   only after every file in the manifest is confirmed present, is the
+   detached table dropped.
+
+### 8a.4 Restoring a detached or exported month
+
+```sql
+-- Re-attach a detached table (it must not overlap an attached partition):
+ALTER TABLE intent_audit_log_detached_y2025m03 RENAME TO intent_audit_log_y2025m03;
+ALTER TABLE intent_audit_log ATTACH PARTITION intent_audit_log_y2025m03
+  FOR VALUES FROM ('2025-03-01 00:00+00') TO ('2025-04-01 00:00+00');
+```
+
+For a dropped month, load the Parquet files from `audit-partitions/yYYYYmMM/`
+into a table of the same shape, then attach it as above. The files use the
+same audit Parquet schema and manifest entries (`type: "audit"`) as intent
+archival, so the audit-file import in `scripts/restore-archive.ts` is the
+reference for loading them.
+
+### 8a.5 Monitoring
+
+| Metric | Meaning |
+|--------|---------|
+| `vortex_audit_log_partition_months_ahead` | Future months that already have a partition (should be ≥ 1) |
+| `vortex_audit_log_default_partition_rows` | Rows in the default partition (should be 0) |
+| `vortex_audit_log_partitions{state}` | Attached / detached partition counts |
+| `vortex_audit_log_partition_ops_total{op,result}` | create / detach / export / drop outcomes |
+
+Alerts are in `ops/prometheus/rules/vortex-audit-partitions.yml`. If rows
+show up in the default partition, run
+`intent_audit_log_ensure_partition()` for the month they belong to (find it
+with `SELECT date_trunc('month', "timestamp"), count(*) FROM intent_audit_log_default GROUP BY 1`).
+
+---
+
 ## 9. Monitoring & Alerting
 
 | Alert | Condition | Destination |
@@ -285,3 +392,4 @@ Document each drill in `#ops-drills` with: date, backup file used, actual RTO, a
 - **#412** — Keyset pagination (reduces primary load from list endpoints)
 - **#413** — Cold-storage archival (this document updated)
 - **#62** — Audit trail for intent lifecycle transitions
+- **#407** — Monthly partitions and retention for `intent_audit_log` (§8a)

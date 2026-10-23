@@ -1,0 +1,32 @@
+# intent_audit_log partition maintenance alerts (issue #407). Metrics are
+# defined in src/metrics/metrics.service.ts and set by AuditPartitionService.
+groups:
+  - name: vortex-audit-partitions
+    rules:
+      # Next month has no partition yet: its rows will land in the default
+      # partition (inserts still succeed, but pruning and retention suffer).
+      - alert: VortexAuditPartitionMissingAhead
+        expr: vortex_audit_log_partition_months_ahead < 1
+        for: 30m
+        labels:
+          severity: page
+        annotations:
+          summary: "No intent_audit_log partition exists for next month"
+          description: "AuditPartitionService is not creating partitions ahead. See RUNBOOK_BACKUP_RESTORE.md#8a-audit-log-partitions-issue-407"
+
+      - alert: VortexAuditDefaultPartitionRows
+        expr: vortex_audit_log_default_partition_rows > 0
+        for: 1h
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} audit rows are in intent_audit_log_default"
+          description: "A month was missing its partition. Run intent_audit_log_ensure_partition() for it. See RUNBOOK_BACKUP_RESTORE.md#8a-audit-log-partitions-issue-407"
+
+      - alert: VortexAuditPartitionOpFailed
+        expr: increase(vortex_audit_log_partition_ops_total{result="failed"}[6h]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Audit partition {{ $labels.op }} failed"
+          description: "Check logs tagged [audit-partitions]. See RUNBOOK_BACKUP_RESTORE.md#8a-audit-log-partitions-issue-407"

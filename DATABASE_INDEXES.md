@@ -97,6 +97,23 @@ CREATE INDEX IF NOT EXISTS audit_log_intent_idx
     ON intent_audit_log (intent_id, timestamp ASC);
 ```
 
+**Partitioned by month (issue #407).** After the rollout in
+`RUNBOOK_BACKUP_RESTORE.md` §8a, the table is `PARTITION BY RANGE ("timestamp")`
+with monthly partitions `intent_audit_log_yYYYYmMM` and a default partition.
+The changes:
+
+- The primary key is `(id, "timestamp")`, because a unique constraint on a
+  partitioned table must include the partition key. `id` still comes from
+  `intent_audit_log_id_seq`, so ids keep increasing across the migration.
+- `audit_log_intent_idx (intent_id, "timestamp")` is defined on the parent,
+  so every partition has its own copy.
+- The audit endpoint's table read (`IntentsService.getAuditTrail`) adds
+  `"timestamp" >= <intent createdAt − 1 h>`. With that bound the planner, or
+  the executor for Prisma's parameterised queries ("Subplans Removed"),
+  skips every partition older than the intent. Without it, the lookup would
+  probe `audit_log_intent_idx` in every monthly partition. The pruned plan
+  is pinned by the EXPLAIN snapshot in `src/scripts/audit-partitions.spec.ts`.
+
 ---
 
 ## Migration

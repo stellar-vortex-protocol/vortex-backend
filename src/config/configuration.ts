@@ -470,6 +470,19 @@ export interface AppConfig {
     maxSubmitAttempts: number;
   };
 
+  /** Monthly partitions of intent_audit_log (issue #407). */
+  auditPartition: {
+    /** Create upcoming partitions and apply retention on the leader. */
+    maintenanceEnabled: boolean;
+    intervalMs: number;
+    /** Months ahead of the current one that must always have a partition. */
+    premakeMonths: number;
+    /** Detach (and export) partitions older than this many months; 0 = keep all. */
+    retentionMonths: number;
+    /** Drop a detached partition once its export is verified. Off = keep the table. */
+    dropAfterExport: boolean;
+  };
+
   // #413 — Cold-storage archival
   archival: {
     enabled: boolean;
@@ -695,6 +708,14 @@ export default (): AppConfig => ({
     challengeWindowSeconds: parseInt(process.env.SLASH_CHALLENGE_WINDOW_SECONDS ?? "600", 10),
     clockSkewToleranceSeconds: parseInt(process.env.SLASH_CLOCK_SKEW_TOLERANCE_SECONDS ?? "30", 10),
     maxSubmitAttempts: parseInt(process.env.SLASH_MAX_SUBMIT_ATTEMPTS ?? "5", 10),
+  },
+
+  auditPartition: {
+    maintenanceEnabled: (process.env.AUDIT_PARTITION_MAINTENANCE_ENABLED ?? "true") === "true",
+    intervalMs: parseInt(process.env.AUDIT_PARTITION_INTERVAL_MS ?? "21600000", 10),
+    premakeMonths: parseInt(process.env.AUDIT_PARTITION_PREMAKE_MONTHS ?? "3", 10),
+    retentionMonths: parseInt(process.env.AUDIT_RETENTION_MONTHS ?? "0", 10),
+    dropAfterExport: process.env.AUDIT_RETENTION_DROP_AFTER_EXPORT === "true",
   },
 
   archival: {

@@ -55,6 +55,13 @@ const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slash
  */
 const NONE_STATE = "none";
 
+/**
+ * Slack below an intent's `createdAt` when reading its persisted audit trail
+ * (issue #407): an entry written on a replica whose clock lags may carry a
+ * slightly earlier timestamp than the creation time recorded elsewhere.
+ */
+export const AUDIT_CLOCK_SKEW_SECONDS = 3600;
+
 /** pending_* state each chain write parks in (issue #385). */
 const PENDING_STATE_BY_OP: Record<PendingIntentOp, IntentState> = {
   create: "pending_open",
@@ -1459,6 +1466,63 @@ export class IntentsService {
    *
    * Returns an empty array if the intent has no recorded transitions.
    */
+  /**
+   * Audit trail for the `GET /intents/:id/audit` endpoint: the in-memory log
+   * when this replica holds entries for the intent, otherwise the persisted
+   * `intent_audit_log` rows (after a restart, or when another replica wrote
+   * them).
+   *
+   * The persisted query bounds `timestamp` from below by the intent's creation
+   * time (minus {@link AUDIT_CLOCK_SKEW_SECONDS}), so on the monthly-
+   * partitioned table (issue #407) PostgreSQL prunes every partition older
+   * than the intent instead of probing each partition's index.
+   */
+  async getAuditTrail(
+    intent: Pick<Intent, "intentId" | "createdAt">,
+    limit: number,
+    offset: number,
+  ): Promise<{ entries: IntentAuditEntry[]; total: number }> {
+    const inMemory = this.auditLog.get(intent.intentId) ?? [];
+    if (inMemory.length > 0) {
+      return { entries: this.getAuditLog(intent.intentId, limit, offset), total: inMemory.length };
+    }
+    const audit = (this.prisma as unknown as {
+      intentAuditLog?: {
+        findMany?: (args: unknown) => Promise<
+          Array<{ timestamp: Date; toState: string; actor: string; reason: string; metadata: unknown }>
+        >;
+        count?: (args: unknown) => Promise<number>;
+      };
+    }).intentAuditLog;
+    if (typeof audit?.findMany !== "function") return { entries: [], total: 0 };
+    const where = {
+      intentId: intent.intentId,
+      timestamp: { gte: new Date((intent.createdAt - AUDIT_CLOCK_SKEW_SECONDS) * 1000) },
+    };
+    try {
+      const [rows, total] = await Promise.all([
+        audit.findMany({
+          where,
+          orderBy: [{ timestamp: "asc" }, { id: "asc" }],
+          skip: Math.max(0, offset),
+          take: Math.min(limit, 100),
+        }),
+        typeof audit.count === "function" ? audit.count({ where }) : Promise.resolve(undefined),
+      ]);
+      const entries: IntentAuditEntry[] = rows.map((r) => ({
+        timestamp: r.timestamp.toISOString(),
+        toState: r.toState as IntentState,
+        actor: r.actor,
+        reason: r.reason,
+        ...(r.metadata ? { metadata: r.metadata as Record<string, unknown> } : {}),
+      }));
+      return { entries, total: total ?? entries.length };
+    } catch (err) {
+      this.logger.warn(`[audit] persisted read failed for intent ${intent.intentId}: ${(err as Error).message}`);
+      return { entries: [], total: 0 };
+    }
+  }
+
   getAuditLog(intentId: string, limit?: number, offset?: number): IntentAuditEntry[] {
     const entries = this.auditLog.get(intentId) ?? [];
     if (limit === undefined && offset === undefined) return entries;

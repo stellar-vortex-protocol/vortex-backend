@@ -1,0 +1,38 @@
+rule_files:
+  - vortex-audit-partitions.yml
+
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'vortex_audit_log_partition_months_ahead'
+        values: 3x20 0x60
+      - series: 'vortex_audit_log_default_partition_rows'
+        values: 0x10 5x80
+      - series: 'vortex_audit_log_partition_ops_total{op="detach",result="failed"}'
+        values: 0x10 1x80
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: VortexAuditPartitionMissingAhead
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: VortexAuditPartitionMissingAhead
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations:
+              summary: "No intent_audit_log partition exists for next month"
+              description: "AuditPartitionService is not creating partitions ahead. See RUNBOOK_BACKUP_RESTORE.md#8a-audit-log-partitions-issue-407"
+      - eval_time: 75m
+        alertname: VortexAuditDefaultPartitionRows
+        exp_alerts:
+          - exp_labels: { severity: ticket }
+            exp_annotations:
+              summary: "5 audit rows are in intent_audit_log_default"
+              description: "A month was missing its partition. Run intent_audit_log_ensure_partition() for it. See RUNBOOK_BACKUP_RESTORE.md#8a-audit-log-partitions-issue-407"
+      - eval_time: 20m
+        alertname: VortexAuditPartitionOpFailed
+        exp_alerts:
+          - exp_labels: { severity: ticket, op: detach, result: failed }
+            exp_annotations:
+              summary: "Audit partition detach failed"
+              description: "Check logs tagged [audit-partitions]. See RUNBOOK_BACKUP_RESTORE.md#8a-audit-log-partitions-issue-407"

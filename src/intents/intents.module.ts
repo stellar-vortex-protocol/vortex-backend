@@ -5,6 +5,7 @@ import { IntentsController } from "./intents.controller";
 import { IntentsGateway } from "./intents.gateway";
 import { WsDocsController } from "./ws-docs.controller";
 import { IntentsSweeperService } from "./intents-sweeper.service";
+import { AuditPartitionService } from "./audit-partition.service";
 import { IntentsMaintenanceJobs } from "./intents-maintenance.jobs";
 import { INTENTS_REPOSITORY, IIntentsRepository, InMemoryIntentsRepository } from "./intents.repository";
 import {
@@ -99,6 +100,8 @@ import { RedisReplayStore } from "./backplane/redis-replay.store";
     IntentCapabilityIndex,
     IntentsGateway,
     IntentsSweeperService,
+    // Issue #407 — monthly intent_audit_log partitions + retention.
+    AuditPartitionService,
     IntentsMaintenanceJobs,
     // Note: EventIngestionService is provided by SorobanModule (imported above)
     // and exported from there — no re-declaration needed here.

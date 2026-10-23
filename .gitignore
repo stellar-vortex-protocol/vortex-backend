@@ -30,3 +30,6 @@ coverage/
 
 # Public datasets local export directory
 .datasets/
+
+# Issue #407 backfill cursor
+.backfill-audit-partitions.json

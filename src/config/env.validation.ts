@@ -641,6 +641,14 @@ export const envValidationSchema = Joi.object({
   ORACLE_FAIL_OPEN_MAX_USD: Joi.number().min(0).default(100),
 
   // ── Transactional outbox (#396 #397) ──────────────────────────────────────
+  // ── intent_audit_log partitions (issue #407) ───────────────────────────────
+  AUDIT_PARTITION_MAINTENANCE_ENABLED: Joi.boolean().default(true),
+  AUDIT_PARTITION_INTERVAL_MS: Joi.number().integer().min(60000).default(21600000),
+  AUDIT_PARTITION_PREMAKE_MONTHS: Joi.number().integer().min(1).max(24).default(3),
+  // 0 keeps every partition attached.
+  AUDIT_RETENTION_MONTHS: Joi.number().integer().min(0).default(0),
+  AUDIT_RETENTION_DROP_AFTER_EXPORT: Joi.boolean().default(false),
+
   OUTBOX_RELAY_ENABLED: Joi.boolean().default(true),
   OUTBOX_RELAY_INTERVAL_MS: Joi.number().integer().min(100).default(2000),
   OUTBOX_RELAY_BATCH_SIZE: Joi.number().integer().min(1).default(10),

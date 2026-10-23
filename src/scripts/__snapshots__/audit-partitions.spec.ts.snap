@@ -1,0 +1,12 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`intent_audit_log partitioning (Postgres) the audit endpoint's query prunes partitions older than the intent (EXPLAIN snapshot) 1`] = `
+{
+  "partitions": [
+    "intent_audit_log_default",
+    "intent_audit_log_y2026m08",
+    "intent_audit_log_y2026m09",
+    "intent_audit_log_y2026m10",
+  ],
+}
+`;
