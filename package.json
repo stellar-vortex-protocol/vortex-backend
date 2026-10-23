@@ -7,9 +7,9 @@
   ],
   "license": "MIT",
   "scripts": {
-    "dev": "nest start --watch",
-    "build": "nest build",
-    "start": "node dist/main.js",
+    "dev": "node init && nest start --watch",
+    "build": "node init && nest build",
+    "start": "node init && node dist/main.js",
     "lint": "eslint src test scripts tools packages/solver-sdk/src packages/solver-sdk/examples --ext .ts",
     "typecheck": "tsc --noEmit",
     "test": "jest",

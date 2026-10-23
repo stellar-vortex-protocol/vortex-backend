@@ -5,17 +5,44 @@ import { IntentsService } from "../intents/intents.service";
 import { dutchAuctionPrice } from "./dutch";
 
 const AUCTION_TICK_INTERVAL_MS = 5_000;
+const DEFAULT_PRICE_HISTORY_CAP = 200;
+
+export interface AuctionPriceTick {
+  currentDstAmount: string;
+  timestamp: number;
+}
 
 @Injectable()
 export class AuctionTickerService {
   private readonly logger = new Logger(AuctionTickerService.name);
   private readonly lastPrices = new Map<string, string>();
+  private readonly priceHistory = new Map<string, AuctionPriceTick[]>();
+  private readonly historyCap: number;
   private publishing = false;
 
   constructor(
     private readonly intentsService: IntentsService,
     private readonly intentsGateway: IntentsGateway,
-  ) {}
+  ) {
+    const configured = Number(process.env.AUCTION_PRICE_HISTORY_CAP);
+    this.historyCap =
+      Number.isFinite(configured) && configured > 0
+        ? Math.floor(configured)
+        : DEFAULT_PRICE_HISTORY_CAP;
+  }
+
+  getPriceHistory(intentId: string): AuctionPriceTick[] {
+    return [...(this.priceHistory.get(intentId) ?? [])];
+  }
+
+  private appendPriceTick(intentId: string, tick: AuctionPriceTick): void {
+    const history = this.priceHistory.get(intentId) ?? [];
+    history.push(tick);
+    if (history.length > this.historyCap) {
+      history.splice(0, history.length - this.historyCap);
+    }
+    this.priceHistory.set(intentId, history);
+  }
 
   @Interval(AUCTION_TICK_INTERVAL_MS)
   async publishPriceTicks(): Promise<void> {
@@ -37,6 +64,7 @@ export class AuctionTickerService {
           timestamp: now,
         });
         this.lastPrices.set(intent.intentId, currentDstAmount);
+        this.appendPriceTick(intent.intentId, { currentDstAmount, timestamp: now });
       }
       for (const intentId of this.lastPrices.keys()) {
         if (!activeIds.has(intentId)) this.lastPrices.delete(intentId);
