@@ -661,6 +661,9 @@ export const envValidationSchema = Joi.object({
   TTL_KEEPER_MAX_KEYS_PER_TX: Joi.number().integer().min(1).max(100).default(20),
   TTL_KEEPER_INTENT_KEY_VARIANT: Joi.string().pattern(/^[A-Za-z0-9_]{1,32}$/).default("Intent"),
   TTL_KEEPER_BOND_KEY_VARIANT: Joi.string().pattern(/^[A-Za-z0-9_]{1,32}$/).default("Bond"),
+  // Issue #409 — read epoch timestamps from the INTEGER columns ("epoch") or
+  // their timestamptz twins ("timestamptz", after the backfill is verified).
+  TIMESTAMP_READ_SOURCE: Joi.string().valid("epoch", "timestamptz").default("epoch"),
 
   OUTBOX_RELAY_ENABLED: Joi.boolean().default(true),
   OUTBOX_RELAY_INTERVAL_MS: Joi.number().integer().min(100).default(2000),

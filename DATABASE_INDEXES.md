@@ -133,6 +133,30 @@ node-pg-migrate up
 
 ---
 
+## Issue #409 — timestamptz twins of the epoch-column indexes
+
+Every `intents` index on `created_at` or `deadline` has a twin on the
+timestamptz column that replaces it, built `CONCURRENTLY` by migrations
+`20261021000001…09`:
+
+| Epoch-column index | timestamptz twin |
+|--------------------|------------------|
+| `intents_created_at_idx` | `intents_created_at_ts_idx` |
+| `intents_deadline_idx` | `intents_deadline_ts_idx` |
+| `intents_user_created_idx` | `intents_user_created_ts_idx` |
+| `intents_state_created_idx` | `intents_state_created_ts_idx` |
+| `intents_solver_created_idx` | `intents_solver_created_ts_idx` |
+| `intents_open_partial_idx` | `intents_open_partial_ts_idx` |
+| `intents_open_verified_idx` | `intents_open_verified_ts_idx` |
+| `intents_volume_by_token_idx` | `intents_volume_by_token_ts_idx` |
+| `intents_volume_by_dst_token_idx` | `intents_volume_by_dst_token_ts_idx` |
+
+Queries use the twins once `TIMESTAMP_READ_SOURCE=timestamptz`. The epoch
+indexes are dropped together with their columns by the staged contract
+migration. See `prisma/migrations/README.md`.
+
+---
+
 ## Monitoring
 
 After deploying, verify the indexes are being used with `EXPLAIN ANALYZE`:

@@ -28,7 +28,7 @@ describe("PrismaIntentsRepository.amendIfOpen", () => {
     ).toBeNull();
     expect(updateMany).toHaveBeenCalledWith({
       where: { intentId: "intent-1", state: "open", deadline: { gt: 1_000 } },
-      data: { minDstAmount: "900", deadline: 2_000 },
+      data: { minDstAmount: "900", deadline: 2_000, deadlineTs: new Date(2_000_000) },
     });
     expect(findUnique).not.toHaveBeenCalled();
   });
@@ -53,6 +53,20 @@ describeDb("PrismaIntentsRepository (Postgres)", () => {
   const pg = () => new PrismaIntentsRepository(prisma as unknown as PrismaService);
 
   runIntentsRepositoryContract("postgres", pg);
+  // Issue #409: the same contract with reads switched to the timestamptz twins.
+  // The contract reuses fixed tx hashes, so clear the previous run's rows first.
+  describe("timestamptz reads", () => {
+    beforeAll(async () => {
+      await prisma.$executeRaw`DELETE FROM intents WHERE "user" LIKE 'GCONTRACTUSER%' OR "user" LIKE 'GUSER%' OR "user" = 'GMixedCaseUser'`;
+    });
+    runIntentsRepositoryContract(
+      "postgres (TIMESTAMP_READ_SOURCE=timestamptz)",
+      () => new PrismaIntentsRepository(prisma as unknown as PrismaService, { timestampReadSource: "timestamptz" }),
+    );
+    afterAll(async () => {
+      await prisma.$executeRaw`DELETE FROM intents WHERE "user" LIKE 'GCONTRACTUSER%' OR "user" LIKE 'GUSER%' OR "user" = 'GMixedCaseUser'`;
+    });
+  });
   runIntentsRepositoryContract(
     "dual-write (memory + postgres)",
     () => new DualWriteIntentsRepository(new InMemoryIntentsRepository({ seed: false }), pg()),

@@ -3,6 +3,12 @@ import { PrismaService } from "../prisma/prisma.service";
 import { ISolversRepository } from "./solvers.repository";
 import { SolverRecord } from "./solvers.types";
 import { Prisma } from "@prisma/client";
+import {
+  epochToDate,
+  EpochTimestampOptions,
+  readEpoch,
+  TimestampReadSource,
+} from "../prisma/epoch-timestamps";
 
 /**
  * Prisma-backed implementation of ISolversRepository.
@@ -18,10 +24,21 @@ import { Prisma } from "@prisma/client";
  * JSON columns (supportedChains, supportedTokens) are stored/retrieved
  * consistently with InMemorySolversRepository: the raw TypeScript arrays
  * are serialised to JSON by Prisma and deserialised back to the same shapes.
+ *
+ * `registeredAt` / `lastActiveAt` are written to both their epoch INTEGER
+ * columns and timestamptz twins, and read from the column selected by
+ * `TIMESTAMP_READ_SOURCE` (issue #409). The API keeps epoch seconds.
  */
 @Injectable()
 export class PrismaSolversRepository implements ISolversRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly readSource: TimestampReadSource;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    options: EpochTimestampOptions = {},
+  ) {
+    this.readSource = options.timestampReadSource ?? "epoch";
+  }
 
   save(solver: SolverRecord): Promise<SolverRecord> {
     const data = this.toDbData(solver);
@@ -58,7 +75,9 @@ export class PrismaSolversRepository implements ISolversRepository {
       avgFillTime: solver.avgFillTime,
       isActive: solver.isActive,
       registeredAt: solver.registeredAt,
+      registeredAtTs: epochToDate(solver.registeredAt),
       lastActiveAt: solver.lastActiveAt,
+      lastActiveAtTs: epochToDate(solver.lastActiveAt),
       supportedChains: solver.supportedChains as unknown as Prisma.InputJsonValue,
       supportedTokens: solver.supportedTokens as unknown as Prisma.InputJsonValue,
       source: solver.source ?? "api",
@@ -77,6 +96,8 @@ export class PrismaSolversRepository implements ISolversRepository {
     isActive: boolean;
     registeredAt: number;
     lastActiveAt: number;
+    registeredAtTs?: Date | null;
+    lastActiveAtTs?: Date | null;
     supportedChains: Prisma.JsonValue;
     supportedTokens: Prisma.JsonValue;
     source?: string | null;
@@ -91,8 +112,8 @@ export class PrismaSolversRepository implements ISolversRepository {
       totalVolume: row.totalVolume,
       avgFillTime: row.avgFillTime,
       isActive: row.isActive,
-      registeredAt: row.registeredAt,
-      lastActiveAt: row.lastActiveAt,
+      registeredAt: readEpoch(this.readSource, row.registeredAt, row.registeredAtTs) ?? row.registeredAt,
+      lastActiveAt: readEpoch(this.readSource, row.lastActiveAt, row.lastActiveAtTs) ?? row.lastActiveAt,
       supportedChains: row.supportedChains as SolverRecord["supportedChains"],
       supportedTokens: row.supportedTokens as SolverRecord["supportedTokens"],
       source: (row.source as SolverRecord["source"]) ?? "api",

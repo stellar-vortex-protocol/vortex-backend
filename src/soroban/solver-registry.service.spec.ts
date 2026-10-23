@@ -54,6 +54,7 @@ function makeConfigService(
       intentKeyVariant: "Intent",
       bondKeyVariant: "Bond",
     },
+    timestampReadSource: "epoch",
     stellar,
     treasury: { address: "" },
     onchainIntentsEnabled: false,

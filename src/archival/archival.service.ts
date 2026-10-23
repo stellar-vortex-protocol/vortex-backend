@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../prisma/prisma.service";
 import { AppConfig } from "../config/configuration";
+import { epochToDate, readEpoch } from "../prisma/epoch-timestamps";
 import { ArchivalConfig } from "./archival-config";
 import { ArchivalS3Client } from "./s3-client";
 import { writeIntentsParquet, writeAuditParquet } from "./parquet-writer";
@@ -111,7 +112,10 @@ export class ArchivalService {
         (tx as unknown as typeof this.prisma).intent.findMany({
           where: {
             state: { in: terminalStates as never[] },
-            createdAt: { gte: from, lt: to },
+            // Issue #409: filter on the configured timestamp column.
+            ...(this.readsTimestamptz()
+              ? { createdAtTs: { gte: epochToDate(from), lt: epochToDate(to) } }
+              : { createdAt: { gte: from, lt: to } }),
           },
           orderBy: { intentId: "asc" },
           take: this.archivalConfig.maxRowsPerFile,
@@ -133,6 +137,9 @@ export class ArchivalService {
             createdAt: true,
             deadline: true,
             filledAt: true,
+            createdAtTs: true,
+            deadlineTs: true,
+            filledAtTs: true,
             slashedAt: true,
             slashReason: true,
             txHash: true,
@@ -149,33 +156,37 @@ export class ArchivalService {
       if (batch.length === 0) break;
 
       // Convert to Parquet-safe rows.
-      const rows = batch.map((r) => ({
-        intent_id: r.intentId,
-        user: r.user,
-        src_chain: String(r.srcChain),
-        src_token: JSON.stringify(r.srcToken),
-        src_amount: r.srcAmount,
-        dst_token: JSON.stringify(r.dstToken),
-        min_dst_amount: r.minDstAmount,
-        quoted_dst_amount: r.quotedDstAmount ?? null,
-        accepted_dst_amount: r.acceptedDstAmount ?? null,
-        fill_amount: r.fillAmount ?? null,
-        fee_amount: r.feeAmount ?? null,
-        solver: r.solver ?? null,
-        state: String(r.state),
-        created_at: BigInt(r.createdAt),
-        deadline: BigInt(r.deadline),
-        filled_at: r.filledAt != null ? BigInt(r.filledAt) : null,
-        slashed_at: r.slashedAt != null ? BigInt(r.slashedAt) : null,
-        slash_reason: r.slashReason ?? null,
-        tx_hash: r.txHash ?? null,
-        version: r.version,
-        src_verified: r.srcVerified,
-        src_token_id: r.srcTokenId ?? null,
-        dst_token_id: r.dstTokenId ?? null,
-        src_decimals: r.srcDecimals ?? null,
-        dst_decimals: r.dstDecimals ?? null,
-      }));
+      const rows = batch.map((r) => {
+        const source = this.readSource();
+        const filledAt = readEpoch(source, r.filledAt, r.filledAtTs);
+        return {
+          intent_id: r.intentId,
+          user: r.user,
+          src_chain: String(r.srcChain),
+          src_token: JSON.stringify(r.srcToken),
+          src_amount: r.srcAmount,
+          dst_token: JSON.stringify(r.dstToken),
+          min_dst_amount: r.minDstAmount,
+          quoted_dst_amount: r.quotedDstAmount ?? null,
+          accepted_dst_amount: r.acceptedDstAmount ?? null,
+          fill_amount: r.fillAmount ?? null,
+          fee_amount: r.feeAmount ?? null,
+          solver: r.solver ?? null,
+          state: String(r.state),
+          created_at: BigInt(readEpoch(source, r.createdAt, r.createdAtTs) ?? r.createdAt),
+          deadline: BigInt(readEpoch(source, r.deadline, r.deadlineTs) ?? r.deadline),
+          filled_at: filledAt !== null ? BigInt(filledAt) : null,
+          slashed_at: r.slashedAt != null ? BigInt(r.slashedAt) : null,
+          slash_reason: r.slashReason ?? null,
+          tx_hash: r.txHash ?? null,
+          version: r.version,
+          src_verified: r.srcVerified,
+          src_token_id: r.srcTokenId ?? null,
+          dst_token_id: r.dstTokenId ?? null,
+          src_decimals: r.srcDecimals ?? null,
+          dst_decimals: r.dstDecimals ?? null,
+        };
+      });
 
       const parquetBuffer = await writeIntentsParquet(rows);
       const key = this.intentFileKey(date, fileIndex++);
@@ -301,6 +312,15 @@ export class ArchivalService {
   }
 
   // ── Key builders ──────────────────────────────────────────────────────────
+
+  /** Issue #409: which epoch column pair this deployment reads from. */
+  private readSource(): "epoch" | "timestamptz" {
+    return this.configService.get("timestampReadSource", { infer: true }) ?? "epoch";
+  }
+
+  private readsTimestamptz(): boolean {
+    return this.readSource() === "timestamptz";
+  }
 
   private manifestKey(date: string): string {
     return `${this.archivalConfig.partitionPrefix}${date}/manifest.json`;

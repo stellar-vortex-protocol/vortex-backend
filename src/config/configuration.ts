@@ -500,6 +500,11 @@ export interface AppConfig {
     /** Solver-registry `DataKey` variant holding a bond, keyed by solver address. */
     bondKeyVariant: string;
   };
+  /**
+   * Issue #409: which column epoch timestamps are read from during the
+   * epoch → timestamptz migration. Writes always go to both.
+   */
+  timestampReadSource: "epoch" | "timestamptz";
 
   // #413 — Cold-storage archival
   archival: {
@@ -745,6 +750,8 @@ export default (): AppConfig => ({
     intentKeyVariant: process.env.TTL_KEEPER_INTENT_KEY_VARIANT ?? "Intent",
     bondKeyVariant: process.env.TTL_KEEPER_BOND_KEY_VARIANT ?? "Bond",
   },
+  timestampReadSource:
+    process.env.TIMESTAMP_READ_SOURCE === "timestamptz" ? "timestamptz" : "epoch",
 
   archival: {
     enabled: process.env.ARCHIVAL_ENABLED === "true",

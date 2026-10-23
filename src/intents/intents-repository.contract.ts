@@ -168,7 +168,8 @@ export function runIntentsRepositoryContract(
           wrongFrom: { state: "accepted", solver: "GOTHER" },
           to: "filled",
           run: (r, id, v) =>
-            r.fillIfAccepted(id, "GSOLVER", { fillAmount: "995000", filledAt: now, txHash: "h" }, undefined, v),
+            // tx_hash is unique in Postgres, so each filled intent needs its own.
+            r.fillIfAccepted(id, "GSOLVER", { fillAmount: "995000", filledAt: now, txHash: `h-${id}` }, undefined, v),
         },
         {
           name: "cancelIfOpen",

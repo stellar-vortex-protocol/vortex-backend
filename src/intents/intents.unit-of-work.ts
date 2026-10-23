@@ -1,4 +1,5 @@
 import { PrismaService } from "../prisma/prisma.service";
+import { EpochTimestampOptions } from "../prisma/epoch-timestamps";
 import { IIntentsRepository } from "./intents.repository";
 import { PrismaIntentsRepository } from "./prisma-intents.repository";
 import {
@@ -32,12 +33,15 @@ export interface IIntentsUnitOfWork {
  * `onchain_outbox` insert commit or roll back together.
  */
 export class PrismaIntentsUnitOfWork implements IIntentsUnitOfWork {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly options: EpochTimestampOptions = {},
+  ) {}
 
   run<T>(work: (tx: IntentsTransaction) => Promise<T>): Promise<T> {
     return this.prisma.$transaction((client) =>
       work({
-        intents: new PrismaIntentsRepository(client),
+        intents: new PrismaIntentsRepository(client, this.options),
         outbox: new PrismaOutboxRepository(client),
       }),
     );

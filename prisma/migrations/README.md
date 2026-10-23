@@ -108,6 +108,79 @@ npm run test:scripts              # run the checker's fixture-based tests
 
 ---
 
+## `CREATE INDEX CONCURRENTLY` under Prisma
+
+Prisma sends a whole migration file as one query. When the file has more than
+one statement, PostgreSQL runs them in an implicit transaction, and
+`CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY` fail with
+`cannot run inside a transaction block`. A file that contains **exactly one**
+statement (comments are fine) runs outside a transaction, so the concurrent
+build works. Put each concurrent index build in its own migration directory.
+
+If a concurrent build is interrupted it leaves an `INVALID` index behind and
+`IF NOT EXISTS` will then skip it. Check and drop before re-running:
+
+```sql
+SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;
+DROP INDEX CONCURRENTLY IF EXISTS "<name>";
+```
+
+---
+
+## Expand/contract: epoch → timestamptz (issue #409)
+
+`intents.created_at`, `intents.deadline`, `intents.filled_at`,
+`solvers.registered_at` and `solvers.last_active_at` are epoch-second
+`INTEGER`s, which overflow in 2038. They move to `timestamptz` with no
+downtime. API payloads stay in epoch seconds throughout; only the storage and
+the mapping layer (`src/prisma/epoch-timestamps.ts`) change.
+
+| Phase | What ships | How it is applied | Rollback |
+|-------|------------|-------------------|----------|
+| **1. Expand** | `20261021000000_epoch_ts_expand`: nullable `*_ts` twins plus `*_sync_epoch_ts` triggers. App writes both columns. | `prisma migrate deploy` | `down.sql`, then deploy the previous app version. The Int columns were never touched. |
+| **1b. Indexes** | `20261021000001…09_epoch_ts_idx_*`: the nine `created_at`/`deadline` indexes rebuilt on the twins, one `CONCURRENTLY` statement per migration. | `prisma migrate deploy` (same release) | Each directory's `down.sql` (`DROP INDEX CONCURRENTLY`). |
+| **2. Backfill** | `scripts/backfill-timestamps.ts` | `npm run db:backfill-timestamps`, then `npm run db:backfill-timestamps -- --verify` until it reports 0 | Nothing to undo. The script only writes the twins, and phase 1's rollback drops them. |
+| **3. Switch reads** | `TIMESTAMP_READ_SOURCE=timestamptz` | Config change + rolling restart | Set it back to `epoch`. Writes went to both columns the whole time. |
+| **4. Contract** | `prisma/staged-migrations/409-epoch-timestamptz/` steps 1–4 + schema change | A **later release**: move the directories into `prisma/migrations/` (see that folder's README) | Each step's `down.sql`. After step 4: re-add the Int columns, then `npm run db:backfill-timestamps -- --direction to-epoch`. |
+
+**Dual-write.** The repositories write both columns. The triggers keep a
+row's pair in sync for any writer that knows only one side, such as an old
+replica during the rolling deploy, the backfill, or raw SQL. On `UPDATE` the
+side that changed wins; on `INSERT` the missing side is derived.
+
+**Lock budget (< 1 s per statement).**
+- `ADD COLUMN` without a default and `CREATE TRIGGER` are catalog-only.
+  `SET LOCAL lock_timeout = '1s'` makes the deploy fail fast rather than queue.
+- Indexes are built `CONCURRENTLY`.
+- The backfill updates ≤ 5,000 rows per transaction, in one statement, with
+  `lock_timeout = 1s`. It retries with backoff on lock timeouts and warns
+  when a batch takes longer than 1 s (lower `--batch-size`).
+- NOT NULL is added as a `NOT VALID` check, validated under
+  `SHARE UPDATE EXCLUSIVE` (no write blocking), then turned into `SET NOT NULL`,
+  which skips the scan because the validated check proves it.
+- The contract step drops columns, which is catalog-only. The old indexes go
+  with them.
+
+**Verification guard.** Contract steps 1 and 4 start with a `DO` block that
+raises if any row's twin differs from its epoch value. Deploying them early,
+before the backfill finishes, therefore fails without changing anything.
+
+**Backfill operations.** The script walks each table by primary key and saves
+the last key after every batch to `.backfill-timestamps.json`. Re-running
+resumes from there; `--fresh` starts over, which is safe because the update
+is idempotent. Use `--sleep-ms` to leave headroom for traffic and
+`--table intents|solvers` to run one table.
+
+**Tests.** `src/scripts/backfill-timestamps.spec.ts` runs every phase against
+a seeded database in a scratch schema: expand, dual-writes, the nine
+concurrent builds, the guard refusing early, an interrupted and resumed
+backfill with per-batch timing, the four contract steps, and the contract
+rollback. Set `TEST_DATABASE_URL` to run it.
+`src/intents/prisma-intents.repository.spec.ts` runs the full repository
+contract in both read modes.
+
+---
+
 ## Out of scope
 
 This convention and its CI checks only verify `down.sql` reversal in isolation

@@ -53,7 +53,9 @@ import { RedisReplayStore } from "./backplane/redis-replay.store";
       useFactory: (config: ConfigService<AppConfig, true>, prisma: PrismaService) => {
         const adapter = process.env.INTENTS_PERSISTENCE ?? "memory";
         if (adapter === "prisma") {
-          return new PrismaIntentsRepository(prisma);
+          return new PrismaIntentsRepository(prisma, {
+            timestampReadSource: config.get("timestampReadSource", { infer: true }),
+          });
         }
         return new InMemoryIntentsRepository();
       },

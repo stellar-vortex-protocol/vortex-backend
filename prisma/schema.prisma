@@ -145,6 +145,13 @@ model Intent {
   deadline       Int         @map("deadline")
   /// Unix epoch seconds – set when state becomes `filled`.
   filledAt       Int?        @map("filled_at")
+  // ── #409: timestamptz twins of the epoch columns (expand phase) ───────────
+  // Written alongside the Int columns by the repository and by the
+  // `intents_sync_epoch_ts` trigger; read when TIMESTAMP_READ_SOURCE=timestamptz.
+  // The Int columns are dropped by the staged contract migration.
+  createdAtTs    DateTime?   @map("created_at_ts") @db.Timestamptz
+  deadlineTs     DateTime?   @map("deadline_ts") @db.Timestamptz
+  filledAtTs     DateTime?   @map("filled_at_ts") @db.Timestamptz
   /// Actual amount received by the user (base unit string).
   fillAmount     String?     @map("fill_amount")
   /// Realized protocol fee charged on this fill (destination-token base units).
@@ -184,6 +191,12 @@ model Intent {
   // express WHERE clauses on indexes).
   @@index([srcTokenId, createdAt(sort: Desc)], name: "intents_volume_by_token_idx")
   @@index([dstTokenId, createdAt(sort: Desc)], name: "intents_volume_by_dst_token_idx")
+  // #409 timestamptz equivalents, built CONCURRENTLY by raw migrations
+  // 20261021000001…09 (the partial ones cannot be expressed here).
+  @@index([user, createdAtTs(sort: Desc)], name: "intents_user_created_ts_idx")
+  @@index([state, createdAtTs(sort: Desc)], name: "intents_state_created_ts_idx")
+  @@index([srcTokenId, createdAtTs(sort: Desc)], name: "intents_volume_by_token_ts_idx")
+  @@index([dstTokenId, createdAtTs(sort: Desc)], name: "intents_volume_by_dst_token_ts_idx")
   @@index([solver])
   @@map("intents")
 
@@ -210,6 +223,9 @@ model Solver {
   registeredAt     Int      @map("registered_at")
   /// Unix epoch seconds of the solver's most recent activity (registration, fill, or status change).
   lastActiveAt     Int      @map("last_active_at")
+  /// #409 timestamptz twins (expand phase); see Intent.createdAtTs.
+  registeredAtTs   DateTime? @map("registered_at_ts") @db.Timestamptz
+  lastActiveAtTs   DateTime? @map("last_active_at_ts") @db.Timestamptz
   /// Chains this solver supports (stored as JSON array of SupportedChain values).
   supportedChains  Json     @map("supported_chains")
   /// Token symbols this solver can handle.

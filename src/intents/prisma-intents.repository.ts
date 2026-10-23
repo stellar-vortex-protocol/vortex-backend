@@ -12,6 +12,15 @@ import {
 } from "./intents.repository";
 import { Intent, IntentState, StellarToken, TokenInfo } from "./intents.types";
 import { IntentState as PrismaIntentState, Prisma } from "@prisma/client";
+import {
+  epochToDate,
+  EpochTimestampOptions,
+  readEpoch,
+  TimestampReadSource,
+} from "../prisma/epoch-timestamps";
+
+/** Range operators used on epoch-second columns. */
+type EpochRange = Partial<Record<"gt" | "gte" | "lt" | "lte", number>>;
 
 /** PrismaService, or the client handed to a `$transaction` callback (issue #396). */
 export type IntentsPrismaClient = PrismaService | Prisma.TransactionClient;
@@ -27,10 +36,22 @@ export type IntentsPrismaClient = PrismaService | Prisma.TransactionClient;
  * stored and returned as strings per the project's bigint-as-string convention
  * (see CONTRIBUTING.md).  JSON columns (srcToken, dstToken) are cast back to
  * their TypeScript types on the way out.
+ *
+ * Epoch timestamps (issue #409): `createdAt`, `deadline` and `filledAt` are
+ * written to both the INTEGER columns and their timestamptz twins. Filters,
+ * sorts and reads use the column picked by `TIMESTAMP_READ_SOURCE`; the API
+ * shape (epoch seconds) never changes.
  */
 @Injectable()
 export class PrismaIntentsRepository implements IIntentsRepository {
-  constructor(private readonly prisma: IntentsPrismaClient) {}
+  private readonly readSource: TimestampReadSource;
+
+  constructor(
+    private readonly prisma: IntentsPrismaClient,
+    options: EpochTimestampOptions = {},
+  ) {
+    this.readSource = options.timestampReadSource ?? "epoch";
+  }
 
   async save(intent: Intent): Promise<Intent> {
     const data = this.toDbData(intent);
@@ -89,7 +110,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     if (replay) return { intent: replay, created: false };
 
     await this.prisma.intent.updateMany({
-      where: { idempotencyKey, createdAt: { lt: minCreatedAt } },
+      where: { idempotencyKey, ...this.epochWhere("createdAt", { lt: minCreatedAt }) },
       data: { idempotencyKey: null },
     });
 
@@ -110,7 +131,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
   /** Find the unexpired intent created with `idempotencyKey`, if any. */
   async findByIdempotencyKey(idempotencyKey: string, minCreatedAt: number): Promise<Intent | undefined> {
     const row = await this.prisma.intent.findFirst({
-      where: { idempotencyKey, createdAt: { gte: minCreatedAt } },
+      where: { idempotencyKey, ...this.epochWhere("createdAt", { gte: minCreatedAt }) },
     });
     return row ? this.fromRow(row) : undefined;
   }
@@ -130,7 +151,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
 
   async findAll(): Promise<Intent[]> {
     const rows = await this.prisma.intent.findMany({
-      orderBy: { createdAt: "desc" },
+      orderBy: this.epochOrder("createdAt", "desc"),
     });
     return rows.map((r) => this.fromRow(r));
   }
@@ -138,7 +159,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
   async findByState(state: IntentState): Promise<Intent[]> {
     const rows = await this.prisma.intent.findMany({
       where: { state: this.toPrismaState(state) },
-      orderBy: { createdAt: "desc" },
+      orderBy: this.epochOrder("createdAt", "desc"),
     });
     return rows.map((r) => this.fromRow(r));
   }
@@ -147,7 +168,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     // Postgres is case-sensitive; normalise the address comparison in-query.
     const rows = await this.prisma.intent.findMany({
       where: { user: { equals: user, mode: "insensitive" } },
-      orderBy: { createdAt: "desc" },
+      orderBy: this.epochOrder("createdAt", "desc"),
     });
     return rows.map((r) => this.fromRow(r));
   }
@@ -195,12 +216,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       where.usdValueAtCreate = { lte: query.maxAmountUsd };
     }
 
-    if (query.createdFrom !== undefined && query.createdTo !== undefined) {
-      where.createdAt = { gte: query.createdFrom, lte: query.createdTo };
-    } else if (query.createdFrom !== undefined) {
-      where.createdAt = { gte: query.createdFrom };
-    } else if (query.createdTo !== undefined) {
-      where.createdAt = { lte: query.createdTo };
+    if (query.createdFrom !== undefined || query.createdTo !== undefined) {
+      Object.assign(where, this.epochWhere("createdAt", { gte: query.createdFrom, lte: query.createdTo }));
     }
 
     // JSONB token-symbol filters — raw SQL so the expression indexes apply.
@@ -221,14 +238,14 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     let orderBy: Prisma.IntentOrderByWithRelationInput;
     switch (dimension) {
       case "deadline":
-        orderBy = { deadline: dir };
+        orderBy = this.epochOrder("deadline", dir);
         break;
       case "usd":
         orderBy = { usdValueAtCreate: dir };
         break;
       case "created":
       default:
-        orderBy = { createdAt: dir };
+        orderBy = this.epochOrder("createdAt", dir);
     }
 
     const offset = query.offset ?? 0;
@@ -270,8 +287,12 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     now = Math.floor(Date.now() / 1000),
   ): Promise<Intent | null> {
     const result = await this.prisma.intent.updateMany({
-      where: { intentId: id, state: PrismaIntentState.open, deadline: { gt: now } },
-      data: { minDstAmount: patch.minDstAmount, deadline: patch.deadline },
+      where: { intentId: id, state: PrismaIntentState.open, ...this.epochWhere("deadline", { gt: now }) },
+      data: {
+        minDstAmount: patch.minDstAmount,
+        deadline: patch.deadline,
+        deadlineTs: epochToDate(patch.deadline),
+      },
     });
     if (result.count === 0) return null;
     const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
@@ -311,13 +332,14 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       where: {
         intentId: id,
         state: PrismaIntentState.open,
-        deadline: { gt: nowSec },
+        ...this.epochWhere("deadline", { gt: nowSec }),
         ...(expectedVersion !== undefined ? { version: expectedVersion } : {}),
       },
       data: {
         state: PrismaIntentState.accepted,
         solver,
         deadline: newDeadline,
+        deadlineTs: epochToDate(newDeadline),
         version: { increment: 1 },
       },
     });
@@ -376,13 +398,15 @@ export class PrismaIntentsRepository implements IIntentsRepository {
         intentId: id,
         state: PrismaIntentState.accepted,
         solver,
-        deadline: { gt: nowSec },
+        ...this.epochWhere("deadline", { gt: nowSec }),
         ...(expectedVersion !== undefined ? { version: expectedVersion } : {}),
       },
       data: {
         state: PrismaIntentState.filled,
         version: { increment: 1 },
-        ...(patch.filledAt !== undefined ? { filledAt: patch.filledAt } : {}),
+        ...(patch.filledAt !== undefined
+          ? { filledAt: patch.filledAt, filledAtTs: epochToDate(patch.filledAt) }
+          : {}),
         ...(patch.fillAmount !== undefined ? { fillAmount: patch.fillAmount } : {}),
         ...(patch.feeAmount !== undefined
           ? { feeAmount: patch.feeAmount as string }
@@ -505,10 +529,10 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       where: {
         intentId: id,
         state: PrismaIntentState.accepted,
-        deadline: { lt: newDeadline },
+        ...this.epochWhere("deadline", { lt: newDeadline }),
         ...(expectedVersion !== undefined ? { version: expectedVersion } : {}),
       },
-      data: { deadline: newDeadline, version: { increment: 1 } },
+      data: { deadline: newDeadline, deadlineTs: epochToDate(newDeadline), version: { increment: 1 } },
     });
 
     if (result.count === 0) return this.resolveMiss(id, expectedVersion);
@@ -571,6 +595,22 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     }
   }
 
+  /**
+   * Range filter on an epoch field against the configured read column
+   * (issue #409). Undefined bounds are dropped.
+   */
+  private epochWhere(field: "createdAt" | "deadline", range: EpochRange): Prisma.IntentWhereInput {
+    const bounds = Object.entries(range).filter(([, v]) => v !== undefined) as Array<[keyof EpochRange, number]>;
+    if (this.readSource === "timestamptz") {
+      return { [`${field}Ts`]: Object.fromEntries(bounds.map(([op, v]) => [op, epochToDate(v)])) };
+    }
+    return { [field]: Object.fromEntries(bounds) };
+  }
+
+  /** Sort on an epoch field using the configured read column (issue #409). */
+  private epochOrder(field: "createdAt" | "deadline", dir: "asc" | "desc"): Prisma.IntentOrderByWithRelationInput {
+    return { [this.readSource === "timestamptz" ? `${field}Ts` : field]: dir };
+  }
 
   /**
    * Classify a zero-row conditional update (issue #405): a stale
@@ -605,8 +645,11 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       solver: intent.solver ?? null,
       state: this.toPrismaState(intent.state),
       createdAt: intent.createdAt,
+      createdAtTs: epochToDate(intent.createdAt),
       deadline: intent.deadline,
+      deadlineTs: epochToDate(intent.deadline),
       filledAt: intent.filledAt ?? null,
+      filledAtTs: epochToDate(intent.filledAt),
       fillAmount: intent.fillAmount ?? null,
       txHash: intent.txHash ?? null,
       ...(intent.usdValueAtCreate !== undefined
@@ -635,8 +678,14 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     const data = {} as Prisma.IntentUpdateInput & { feeAmount?: string | null };
     if (patch.state !== undefined) data.state = this.toPrismaState(patch.state);
     if (patch.solver !== undefined) data.solver = patch.solver;
-    if (patch.deadline !== undefined) data.deadline = patch.deadline;
-    if (patch.filledAt !== undefined) data.filledAt = patch.filledAt;
+    if (patch.deadline !== undefined) {
+      data.deadline = patch.deadline;
+      data.deadlineTs = epochToDate(patch.deadline);
+    }
+    if (patch.filledAt !== undefined) {
+      data.filledAt = patch.filledAt;
+      data.filledAtTs = epochToDate(patch.filledAt);
+    }
     if (patch.fillAmount !== undefined) data.fillAmount = patch.fillAmount;
     if (patch.feeAmount !== undefined) (data as { feeAmount?: string | null }).feeAmount = patch.feeAmount ?? null;
     if (patch.txHash !== undefined) data.txHash = patch.txHash;
@@ -683,6 +732,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     createdAt: number;
     deadline: number;
     filledAt: number | null;
+    createdAtTs?: Date | null;
+    deadlineTs?: Date | null;
+    filledAtTs?: Date | null;
     fillAmount: string | null;
     feeAmount?: string | null;
     txHash: string | null;
@@ -711,9 +763,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       ...(row.quotedDstAmount !== null ? { quotedDstAmount: row.quotedDstAmount } : {}),
       ...(row.solver !== null ? { solver: row.solver } : {}),
       state: row.state as IntentState,
-      createdAt: row.createdAt,
-      deadline: row.deadline,
-      ...(row.filledAt !== null ? { filledAt: row.filledAt } : {}),
+      createdAt: readEpoch(this.readSource, row.createdAt, row.createdAtTs) ?? row.createdAt,
+      deadline: readEpoch(this.readSource, row.deadline, row.deadlineTs) ?? row.deadline,
+      ...(this.filledAtOf(row) !== null ? { filledAt: this.filledAtOf(row)! } : {}),
       ...(row.fillAmount !== null ? { fillAmount: row.fillAmount } : {}),
       ...(row.feeAmount !== undefined && row.feeAmount !== null ? { feeAmount: row.feeAmount } : {}),
       ...(row.txHash !== null ? { txHash: row.txHash } : {}),
@@ -737,6 +789,10 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       ...(row.slashedAt !== null && row.slashedAt !== undefined ? { slashedAt: row.slashedAt } : {}),
       ...(row.slashReason !== null && row.slashReason !== undefined ? { slashReason: row.slashReason } : {}),
     };
+  }
+
+  private filledAtOf(row: { filledAt: number | null; filledAtTs?: Date | null }): number | null {
+    return readEpoch(this.readSource, row.filledAt, row.filledAtTs);
   }
 
   private toPrismaState(state: IntentState): PrismaIntentState {

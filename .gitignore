@@ -33,3 +33,5 @@ coverage/
 
 # Issue #407 backfill cursor
 .backfill-audit-partitions.json
+# Issue #409 backfill cursor
+.backfill-timestamps.json

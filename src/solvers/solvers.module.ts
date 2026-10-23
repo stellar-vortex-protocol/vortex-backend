@@ -10,7 +10,8 @@ import { PrismaSolversRepository } from "./prisma-solvers.repository";
 import { PrismaService } from "../prisma/prisma.service";
 import { IntentsModule } from "../intents/intents.module";
 import { SolverCredentialsModule } from "../auth/solver-credentials/solver-credentials.module";
-import { ConfigModule } from "@nestjs/config";
+import { ConfigModule, ConfigService } from "@nestjs/config";
+import { AppConfig } from "../config/configuration";
 import { MetricsService } from "../metrics/metrics.service";
 
 @Module({
@@ -20,11 +21,13 @@ import { MetricsService } from "../metrics/metrics.service";
     // Select the persistence adapter based on SOLVERS_PERSISTENCE env var.
     {
       provide: SOLVERS_REPOSITORY,
-      inject: [PrismaService],
-      useFactory: (prisma: PrismaService) => {
+      inject: [PrismaService, ConfigService],
+      useFactory: (prisma: PrismaService, config: ConfigService<AppConfig, true>) => {
         const adapter = process.env.SOLVERS_PERSISTENCE ?? "memory";
         if (adapter === "prisma") {
-          return new PrismaSolversRepository(prisma);
+          return new PrismaSolversRepository(prisma, {
+            timestampReadSource: config.get("timestampReadSource", { infer: true }),
+          });
         }
         return new InMemorySolversRepository();
       },

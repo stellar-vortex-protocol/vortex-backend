@@ -33,6 +33,7 @@
     "db:studio": "prisma studio",
     "db:validate": "prisma validate",
     "db:backfill-audit-partitions": "tsx scripts/backfill-audit-partitions.ts",
+    "db:backfill-timestamps": "tsx scripts/backfill-timestamps.ts",
     "generate:client": "npm run build && tsx scripts/generate-client.ts",
     "export:datasets": "tsx scripts/export-datasets.ts",
     "prepare": "husky"
