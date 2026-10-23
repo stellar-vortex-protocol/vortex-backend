@@ -6,8 +6,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 
-import { AdminGuard } from './admin.guard';
-import { RequireAdminRole } from './require-admin-role.decorator';
+import { AdminGuard, RequireAdminRole } from './admin.guard';
 import { SecretsService } from '../secrets/secrets.service';
 
 /**

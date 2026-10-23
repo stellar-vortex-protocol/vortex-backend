@@ -17,8 +17,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { IsNotEmpty, IsString } from 'class-validator';
-import { AdminGuard } from './admin.guard';
-import { CurrentAdmin } from './current-admin.decorator';
+import { AdminGuard, CurrentAdmin } from './admin.guard';
 import { CanaryRegistryService } from './canary-registry.service';
 
 export class AddCanaryAddressDto {

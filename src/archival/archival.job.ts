@@ -12,8 +12,7 @@ import { ConfigService } from "@nestjs/config";
 import { ArchivalService } from "./archival.service";
 import { AppConfig } from "../config/configuration";
 import { JobsService } from "../jobs/jobs.service";
-import { AdminGuard } from "../admin/admin.guard";
-import { RequireAdminRole } from "../admin/require-admin-role.decorator";
+import { AdminGuard, RequireAdminRole } from "../admin/admin.guard";
 import { defineJob } from "../jobs/jobs.types";
 
 /**

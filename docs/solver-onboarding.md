@@ -200,8 +200,9 @@ curl -X POST "$BACKEND_URL/api/v1/auth/token" \
 
 The JWT carries `sub` (your G-address), `role` (`solver` when the account is
 registered, `user` otherwise, `admin` for accounts listed in
-`SEP10_ADMIN_ACCOUNTS`), `iat`, and `exp`. It is signed with the Ed25519 key
-`SEP10_JWT_SIGNING_KEY` (never with the Soroban signer key).
+`SEP10_ADMIN_ACCOUNTS`), `jti` (a unique token id), `iat`, and `exp`. It is
+signed with the Ed25519 key `SEP10_JWT_SIGNING_KEY` (never with the Soroban
+signer key).
 
 **Each challenge is single-use.** A captured challenge cannot be exchanged
 twice; failed exchanges (bad signature, wrong threshold) do not consume it.
@@ -226,6 +227,60 @@ On success the gateway binds your solver identity to the connection
 `{ "type": "auth_error", "reason": "..." }`. Legacy HS256 tokens signed with
 `AUTH_JWT_SECRET` remain accepted during migration.
 
+### Revoking a session token early
+
+If a session token leaks (logged accidentally, exposed via a misconfigured
+proxy, etc.) you can kill it before its natural expiry:
+
+```
+POST /api/v1/auth/revoke
+Authorization: Bearer <token>
+```
+
+The token being revoked is itself the credential — no body is required. The
+server records the token's `jti` claim in a Redis-backed denylist with a TTL
+equal to the token's remaining lifetime (never longer than
+`SEP10_JWT_TTL_SECONDS`), so the denylist prunes itself. Every
+JWT-authenticated guard checks the denylist before accepting a token, on every
+replica, so revocation takes effect immediately across the fleet.
+
+**Responses**: `204 No Content` on success (including revoking an
+already-revoked token — revocation is idempotent); `401` if the token is
+missing, malformed, or already expired.
+
+Notes:
+
+- Revocation is **single-token only**. Other sessions issued to the same
+  account remain valid until their own expiry or until you revoke each one.
+  To disable *all* credentials for a solver, use the bulk
+  `disableAllForSolver` path in `SolverCredentialService` instead.
+- A revoked token stays revoked until its natural `exp`; there is no
+  un-revoke. Simply re-run the challenge/token flow to obtain a fresh token.
+
+### Discovering the auth endpoint (SEP-1 `stellar.toml`)
+
+Standard SEP-10 clients (wallets, SDKs) discover the auth endpoint and signing
+key by fetching `https://<home_domain>/.well-known/stellar.toml` rather than
+hardcoding the URL. The API serves this document:
+
+```
+GET /.well-known/stellar.toml
+```
+
+Content type is `application/toml` (with a `text/plain` fallback for clients
+that do not negotiate TOML). The document publishes the fields SEP-10 clients
+need:
+
+| Field | Source | Meaning |
+|---|---|---|
+| `WEB_AUTH_ENDPOINT` | `SEP10_HOME_DOMAIN` | URL of `POST /api/v1/auth/token` (the token exchange). |
+| `SIGNING_KEY` | `Sep10KeyMaterial.challenge.publicKey()` | Public key that signs challenges; clients verify the challenge transaction against it. |
+| `NETWORK_PASSPHRASE` | `STELLAR_NETWORK` (`NETWORK_PASSPHRASES`) | Passphrase of the network the challenge is valid on (testnet vs. mainnet). |
+
+The values are derived entirely from existing configuration — no new secrets
+are introduced. `CURRENCIES` and `DOCUMENTATION` sections are intentionally
+not published; this document exists solely for SEP-10 auth discovery.
+
 ### Key management
 
 ```bash
@@ -242,6 +297,7 @@ openssl genpkey -algorithm ed25519 | tail -n +2 | tr -d '\n'
 | `SEP10_HOME_DOMAIN` | Home domain embedded in challenges (default `localhost`). |
 | `SEP10_ADMIN_ACCOUNTS` | Comma-separated G-addresses issued `role=admin`. |
 | `SEP10_NONCE_STORE` | `memory` (default, single replica) or `redis` (multi-replica replay protection). |
+| `STELLAR_NETWORK` | Selects the `NETWORK_PASSPHRASE` published in `stellar.toml` (testnet vs. mainnet). |
 
 Notes:
 
@@ -250,7 +306,11 @@ Notes:
 - Deployments with more than one replica **must** set `SEP10_NONCE_STORE=redis`,
   otherwise a challenge issued by one replica could be replayed on another.
 - The challenge's `web_auth_domain` and `<domain> auth` key both come from
-  `SEP10_HOME_DOMAIN`; set it to your real API domain in production.
+  `SEP10_HOME_DOMAIN`; set it to your real API domain in production. The same
+  value drives `WEB_AUTH_ENDPOINT` in `/.well-known/stellar.toml`.
+- The session-token denylist used by `POST /api/v1/auth/revoke` is Redis-backed
+  in production; single-replica dev/test deployments fall back to an in-memory
+  store (same dual-adapter pattern as `SEP10_NONCE_STORE`).
 
 ---
 
@@ -384,6 +444,70 @@ The backend runs an automated sweeper service (`IntentsSweeperService`) every 30
    - **Contract Call**: `slash(solverAddress, intentId)`
    - **Penalty**: Collateral is slashed from the solver's bond and transferred/burned according to protocol rules.
 4. **WebSocket Alert**: An `intent_slashed` event is broadcast across the feed.
+
+### Scoped Solver Credentials
+
+Instead of handing out your full-trust SEP-10 session JWT to every piece of
+automation, you can mint narrowly-scoped credentials (issue #443). Each
+credential carries a fixed set of scopes chosen at creation/rotation time and
+an optional IP allowlist.
+
+| Scope | Grants |
+|---|---|
+| `solver:read` | Read the solver's own record and stats. |
+| `intents:read` | Read intents visible to the solver. |
+| `quote:respond` | Respond to RFQ quote requests. |
+| `intents:accept` | Accept intents. |
+| `intents:fill` | Fill intents. |
+| `solver:update` | Update the solver's own mutable profile fields (§1a). |
+| `solver:deregister` | Deregister the solver. |
+
+`SCOPE_REQUIREMENTS` in `solver-scopes.ts` is the single source of truth for
+which scope each operation requires. The profile-update and deregistration
+endpoints accept **either** a SEP-10 session JWT (unchanged, full trust) **or**
+a scoped credential carrying the matching scope — the scope path is an
+additional, opt-in acceptance path.
+
+> **Trust note:** a credential's scopes are fixed at creation/rotation time and
+> cannot be narrowed in place. Granting `solver:deregister` to a long-lived
+> automation credential is a meaningful trust decision: deregistration is
+> irreversible for that registration epoch, so a leaked credential with this
+> scope can take your solver offline permanently. Prefer short-lived
+> credentials for anything holding `solver:deregister`.
+
+#### Updating a credential's IP allowlist
+
+You can tighten or loosen a credential's IP allowlist **without rotating the
+secret**:
+
+```
+PATCH /api/v1/solvers/:address/credentials/:id/ip-allowlist
+Authorization: Bearer <session JWT or scoped credential>
+```
+
+```json
+{ "ipAllowlist": ["203.0.113.10", "198.51.100.0/24"] }
+```
+
+Send `null` (or an empty array) to clear the allowlist and allow any source IP.
+
+- **Authentication**: identical to the other credential endpoints
+  (`SolverJwtGuard` plus an ownership check against `:address`); a credential
+  belonging to another solver's address is rejected with `403`/`404`.
+- **Validation**: every entry is parsed with `parseAllowlistEntry` before
+  anything is persisted. If *any* entry is invalid the whole request is
+  rejected with the `describeAllowlistEntry` reason and **no partial write**
+  occurs — the previous allowlist stays in effect.
+- **Cache**: the update invalidates the in-process `activeCache` entry for the
+  credential's prefix, so the guard enforces the new allowlist immediately
+  rather than serving a stale entry for up to `CACHE_TTL_MS`.
+- **Audit**: the change is recorded via `AdminAuditService`, the same way
+  create/rotate/revoke are.
+- **Out of scope**: `scopes` and `expiresAt` cannot be changed here — those
+  remain rotation-only.
+
+**Responses**: `200 OK` with the updated credential metadata (never the
+secret); `400` for an invalid entry; `403`/`404` for a non-owned credential.
 
 ### Per-Chain Fill Windows
 

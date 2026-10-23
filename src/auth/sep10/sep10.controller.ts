@@ -1,5 +1,21 @@
-import { Body, Controller, Get, HttpCode, Post, Query } from "@nestjs/common";
-import { ApiBadRequestResponse, ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  Post,
+  Query,
+  UnauthorizedException,
+} from "@nestjs/common";
+import {
+  ApiBadRequestResponse,
+  ApiBearerAuth,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from "@nestjs/swagger";
 import { AuthChallengeQueryDto } from "./dto/auth-challenge.query.dto";
 import { AuthTokenDto } from "./dto/auth-token.dto";
 import { Sep10Service } from "./sep10.service";
@@ -52,4 +68,38 @@ export class Sep10Controller {
   token(@Body() dto: AuthTokenDto) {
     return this.sep10.exchange(dto.transaction);
   }
+
+  /**
+   * Revokes the presented session JWT (issue #704). The token's `jti` is
+   * added to the shared denylist for its remaining lifetime, so every replica
+   * rejects it on the next verification.
+   */
+  @Post("revoke")
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Revoke the presented session JWT",
+    description:
+      "Adds the JWT's `jti` to the shared denylist with a TTL equal to its " +
+      "remaining lifetime (never longer than SEP10_JWT_TTL_SECONDS). The token " +
+      "must be supplied as `Authorization: Bearer <jwt>` and is rejected on all " +
+      "replicas immediately after revocation.",
+  })
+  @ApiOkResponse({ description: "Session JWT revoked", schema: { example: { revoked: true } } })
+  @ApiUnauthorizedResponse({ description: "missing, invalid, expired or already-revoked token" })
+  async revoke(@Headers("authorization") authorization?: string): Promise<{ revoked: true }> {
+    const token = extractBearerToken(authorization);
+    if (!token) {
+      throw new UnauthorizedException("missing bearer token");
+    }
+    await this.sep10.revoke(token);
+    return { revoked: true };
+  }
+}
+
+/** Extracts the raw JWT from an `Authorization: Bearer <jwt>` header. */
+function extractBearerToken(header: string | undefined): string | undefined {
+  if (!header) return undefined;
+  const match = /^Bearer\s+(\S+)$/i.exec(header.trim());
+  return match?.[1];
 }

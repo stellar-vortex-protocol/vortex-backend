@@ -11,6 +11,7 @@ import type { KeyObject } from "node:crypto";
 import { AppConfig } from "../../config/configuration";
 import { verifyEddsaJwt, verifyHs256Jwt } from "../../common/jwt";
 import { sep10JwtPublicKey } from "../sep10/sep10-keys";
+import { Sep10DenylistStore } from "../sep10/denylist.store";
 
 type JwtRequest = Request & { solverAddress?: string };
 
@@ -27,7 +28,10 @@ type JwtRequest = Request & { solverAddress?: string };
  */
 @Injectable()
 export class SolverJwtGuard implements CanActivate {
-  constructor(config: ConfigService<AppConfig, true>) {
+  constructor(
+    config: ConfigService<AppConfig, true>,
+    private readonly denylist: Sep10DenylistStore,
+  ) {
     this.jwtSecret = config.get("authJwtSecret", { infer: true });
     this.sep10PublicKey = sep10JwtPublicKey(
       config.get("stellar.signerSecretKey", { infer: true }),
@@ -38,7 +42,7 @@ export class SolverJwtGuard implements CanActivate {
   private readonly jwtSecret: string;
   private readonly sep10PublicKey: KeyObject | null;
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<JwtRequest>();
     const address = context.switchToHttp().getRequest<{ params?: { address?: string } }>().params?.address ?? "";
     const presented = this.extractToken(req);
@@ -50,6 +54,9 @@ export class SolverJwtGuard implements CanActivate {
       verifyHs256Jwt(presented, this.jwtSecret);
     if (!claims) {
       throw new UnauthorizedException("Invalid or expired SEP-10 JWT");
+    }
+    if (claims.jti && (await this.denylist.isRevoked(claims.jti))) {
+      throw new UnauthorizedException("SEP-10 JWT has been revoked");
     }
     if (claims.sub !== address) {
       throw new ForbiddenException("JWT subject does not match the requested solver address");

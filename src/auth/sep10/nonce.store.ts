@@ -3,6 +3,9 @@ import Redis from "ioredis";
 /** Injection token for {@link Sep10NonceStore}. */
 export const SEP10_NONCE_STORE = "SEP10_NONCE_STORE";
 
+/** Injection token for {@link SessionDenylistStore}. */
+export const SEP10_DENYLIST_STORE = "SEP10_DENYLIST_STORE";
+
 /**
  * Single-use store for SEP-10 challenge nonces (issue #442).
  *
@@ -75,5 +78,76 @@ export class RedisSep10NonceStore implements Sep10NonceStore {
 
   private key(nonce: string): string {
     return `sep10:nonce:${nonce}`;
+  }
+}
+
+/**
+ * Denylist for revoked session JWTs (issue #704).
+ *
+ * Session JWTs are stateless, so early invalidation needs a shared record of
+ * the `jti` claims that must no longer be accepted. Entries expire with the
+ * token's remaining lifetime, so the denylist is self-pruning and never
+ * outlives `SEP10_JWT_TTL_SECONDS`.
+ */
+export interface SessionDenylistStore {
+  /** Marks `jti` as revoked, expiring the entry after `ttlSeconds`. */
+  revoke(jti: string, ttlSeconds: number): Promise<void>;
+  /** Returns true when `jti` has been revoked and has not yet expired. */
+  isRevoked(jti: string): Promise<boolean>;
+}
+
+/**
+ * Process-local denylist for dev/test and single-replica deployments without
+ * Redis. Expired entries are pruned opportunistically on writes.
+ */
+export class InMemorySessionDenylistStore implements SessionDenylistStore {
+  private readonly revoked = new Map<string, number>();
+
+  async revoke(jti: string, ttlSeconds: number): Promise<void> {
+    const now = Date.now();
+    this.prune(now);
+    this.revoked.set(jti, now + ttlSeconds * 1000);
+  }
+
+  async isRevoked(jti: string): Promise<boolean> {
+    const expiresAt = this.revoked.get(jti);
+    if (expiresAt === undefined) return false;
+    if (expiresAt <= Date.now()) {
+      this.revoked.delete(jti);
+      return false;
+    }
+    return true;
+  }
+
+  private prune(nowMs: number): void {
+    for (const [key, expiresAt] of this.revoked) {
+      if (expiresAt <= nowMs) this.revoked.delete(key);
+    }
+  }
+}
+
+/**
+ * Redis-backed denylist shared by every replica (issue #704).
+ *
+ * Every JWT verification reads the shared store, so a revocation is effective
+ * on all replicas without pub/sub. Keys carry an expiry so revoked tokens cost
+ * nothing once their natural lifetime has elapsed.
+ */
+export class RedisSessionDenylistStore implements SessionDenylistStore {
+  constructor(private readonly redis: Redis) {}
+
+  async revoke(jti: string, ttlSeconds: number): Promise<void> {
+    // A non-positive TTL means the token is already expired; nothing to store.
+    if (ttlSeconds <= 0) return;
+    await this.redis.setex(this.key(jti), ttlSeconds, "1");
+  }
+
+  async isRevoked(jti: string): Promise<boolean> {
+    const result: unknown = await this.redis.exists(this.key(jti));
+    return Number(result) === 1;
+  }
+
+  private key(jti: string): string {
+    return `sep10:denylist:${jti}`;
   }
 }

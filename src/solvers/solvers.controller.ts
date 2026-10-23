@@ -20,6 +20,8 @@ import {
 	ApiUnauthorizedResponse,
 } from "@nestjs/swagger";
 import { IntentsService } from "../intents/intents.service";
+import { RequireScope } from "../auth/solver-credentials/require-scope.decorator";
+import { ScopeGuard } from "../auth/solver-credentials/scope.guard";
 import {
 	buildDisputeMessage,
 	buildRegisterMessage,
@@ -159,6 +161,7 @@ export class SolversController {
 	}
 
 	@Patch(":address")
+	@RequireScope("solver:update")
 	@ApiOkResponse({ description: "Updated solver record" })
 	@ApiBadRequestResponse({ description: "Invalid update body" })
 	@ApiUnauthorizedResponse({ description: "Missing or invalid signature" })
@@ -253,6 +256,7 @@ export class SolversController {
 	}
 
 	@Post(":address/deregister")
+	@RequireScope("solver:deregister")
 	async deregisterSolver(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
 		verifyStellarSignature(address, buildSolverStatusMessage("deregister", address), dto.signature);
 		const solver = await this.solversService.deregister(address);

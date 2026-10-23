@@ -246,6 +246,9 @@ describe("JobsService cancellation", () => {
     (driver as unknown as { queue: unknown }).queue = { getJob };
 
     expect(await driver.cancel("test", "missing")).toBe(false);
+  });
+});
+
 describe("JobsService dead-letter retry", () => {
   let service: JobsService;
   let driver: MemoryJobQueueDriver;

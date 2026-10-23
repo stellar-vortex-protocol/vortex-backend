@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { BadRequestException, Inject, Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { StrKey, Transaction, WebAuth } from "@stellar/stellar-sdk";
@@ -7,6 +8,7 @@ import { SolversService } from "../../solvers/solvers.service";
 import { SEP10_ACCOUNT_INFO_LOADER, type Sep10AccountInfo, type Sep10AccountInfoLoader } from "./account-info";
 import { SEP10_KEYS, type Sep10KeyMaterial } from "./sep10-keys";
 import { SEP10_NONCE_STORE, type Sep10NonceStore } from "./nonce.store";
+import { SEP10_JWT_DENYLIST, type Sep10JwtDenylist } from "./jwt-denylist.store";
 
 /** SEP-10 challenge validity window (the protocol's default timeout). */
 export const SEP10_CHALLENGE_TIMEOUT_SECONDS = 300;
@@ -26,6 +28,19 @@ export const SEP10_NONCE_TTL_SECONDS = SEP10_CHALLENGE_TIMEOUT_SECONDS * 2;
 
 /** Claims carried by the session JWT (issue #442). */
 export type Sep10Role = "solver" | "user" | "admin";
+
+/**
+ * Claims carried by the session JWT: `sub` (the Stellar account), `role`,
+ * `iat`/`exp`, and `jti` — the unique token id used for early revocation
+ * (issue #704).
+ */
+export interface Sep10JwtClaims {
+  sub: string;
+  role: Sep10Role;
+  iat: number;
+  exp: number;
+  jti: string;
+}
 
 /** `GET /api/v1/auth/challenge` response — SEP-10 wire shape. */
 export interface Sep10ChallengeResponse {
@@ -56,6 +71,7 @@ export class Sep10Service {
   constructor(
     private readonly config: ConfigService<AppConfig, true>,
     @Inject(SEP10_NONCE_STORE) private readonly nonces: Sep10NonceStore,
+    @Inject(SEP10_JWT_DENYLIST) private readonly denylist: Sep10JwtDenylist,
     private readonly solvers: SolversService,
     @Inject(SEP10_KEYS) private readonly keys: Sep10KeyMaterial,
     @Inject(SEP10_ACCOUNT_INFO_LOADER) private readonly accountInfo: Sep10AccountInfoLoader,
@@ -122,11 +138,30 @@ export class Sep10Service {
 
     const role = await this.resolveRole(read.clientAccountID);
     const issuedAt = Math.floor(Date.now() / 1000);
-    const token = signEddsaJwt(
-      { sub: read.clientAccountID, role, iat: issuedAt, exp: issuedAt + SEP10_JWT_TTL_SECONDS },
-      this.keys.jwtPrivateKey,
-    );
+    const claims: Sep10JwtClaims = {
+      sub: read.clientAccountID,
+      role,
+      iat: issuedAt,
+      exp: issuedAt + SEP10_JWT_TTL_SECONDS,
+      jti: randomUUID(),
+    };
+    const token = signEddsaJwt(claims, this.keys.jwtPrivateKey);
     return { token, token_type: "Bearer", expires_in: SEP10_JWT_TTL_SECONDS };
+  }
+
+  /**
+   * Revokes a single session JWT (issue #704) by adding its `jti` to the
+   * denylist for the token's remaining lifetime — capped at
+   * `SEP10_JWT_TTL_SECONDS` so the denylist is self-pruning.
+   *
+   * The caller is responsible for having verified the token's signature and
+   * expiry; this method only records the revocation.
+   */
+  async revoke(claims: Sep10JwtClaims): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    const remaining = Math.min(claims.exp - now, SEP10_JWT_TTL_SECONDS);
+    if (remaining <= 0) return;
+    await this.denylist.revoke(claims.jti, remaining);
   }
 
   /** Runs the SDK's challenge reader, mapping every failure to a 400. */
