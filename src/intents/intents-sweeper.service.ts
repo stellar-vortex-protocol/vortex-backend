@@ -1,10 +1,10 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/common";
+import { Injectable, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/common";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { SolverGriefingService } from "../solvers/solver-griefing.service";
 import { SolverRegistryService } from "../soroban/solver-registry.service";
-import { logger } from "../common/logger";
+import { createLogger } from "../common/logger";
 import { MetricsService } from "../metrics/metrics.service";
 import { KillSwitchService } from "../killswitch/killswitch.service";
 import { Intent } from "./intents.types";
@@ -17,6 +17,7 @@ import {
 } from "../config/configuration";
 import { LeaderElectionService, Singleton } from "../common/leader-election";
 import { ConfigService } from "@nestjs/config";
+import { PartialFillService } from "./partial-fills/partial-fill.service";
 
 /** Low-frequency safety scan. Deadline jobs are the primary expiry path (issue #437). */
 const SAFETY_SWEEP_INTERVAL_MS = 300_000;
@@ -33,7 +34,7 @@ export interface SweepResult {
 @Singleton("sweeper")
 @Injectable()
 export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(IntentsSweeperService.name);
+  private readonly logger = createLogger(IntentsSweeperService.name);
   private interval?: NodeJS.Timeout;
 
   constructor(
@@ -47,6 +48,8 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     private readonly leaderElection: LeaderElectionService,
     @Optional() private readonly config?: ConfigService<AppConfig, true>,
     @Optional() private readonly jobs?: JobsService,
+    /** Partial-fill tranche slashing (issue #427). Optional for direct unit construction. */
+    @Optional() private readonly partialFills?: PartialFillService,
   ) {}
 
   onModuleInit() {
@@ -55,10 +58,10 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     this.jobs?.process(FILL_WINDOW_EXPIRED_JOB, (data) => this.handleFillWindowJob(data));
     this.leaderElection.registerWorker("sweeper", (isLeader, _token) => {
       if (isLeader) {
-        this.logger.log("[sweeper] became leader — starting interval");
+        this.logger.info("sweeper became leader; starting interval");
         this.startInterval();
       } else {
-        this.logger.log("[sweeper] lost leadership — stopping interval");
+        this.logger.info("sweeper lost leadership; stopping interval");
         this.stopInterval();
       }
     });
@@ -72,7 +75,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     if (this.interval) return; // already running
     this.interval = setInterval(() => {
       this.sweep({ safety: true }).catch((err) => {
-        logger.error(`[sweeper] sweep failed: ${err instanceof Error ? err.message : err}`);
+        this.logger.error("sweep failed", { err });
       });
     }, this.safetyIntervalMs());
   }
@@ -91,6 +94,16 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     let slashedCount = 0;
     let extendedDeadlines = 0;
 
+    // Issue #427: tranche reservations whose own window passed are slashed
+    // (that solver, that tranche) and returned to the pool, independently of
+    // the intent's deadline.
+    if (this.partialFills) {
+      slashedCount += await this.partialFills.slashExpiredReservations(now).catch((err) => {
+        this.logger.error("partial-fill tranche sweep failed", { err });
+        return 0;
+      });
+    }
+
     for (const intent of await this.intentsService.getByState("open")) {
       if (intent.deadline <= now && (await this.expireOpen(intent, now))) expiredCount++;
     }
@@ -101,10 +114,10 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     // This replaces the retired MetricsRegistry from src/common/metrics.ts.
     this.metricsService.recordSweep(expiredCount, durationMs);
 
-    this.logger.debug(`sweep complete: expired=${expiredCount} duration=${durationMs}ms`);
+    this.logger.debug("sweep complete", { expiredCount, durationMs });
 
     if (expiredCount > 0) {
-      this.logger.log(`[sweeper] Expired ${expiredCount} intent(s) in ${durationMs}ms`);
+      this.logger.info("expired intents", { expiredCount, durationMs });
     }
 
     const missedFills = (await this.intentsService.getByState("accepted")).filter(
@@ -182,6 +195,12 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async expireOpen(intent: Intent, now: number): Promise<boolean> {
+    // Issue #427: tranche deadlines are capped at the intent deadline, so any
+    // reservation still live here has missed its window — settle those first
+    // so the slash lands on the tranche's solver, not on nobody.
+    if (intent.allowPartialFill && this.partialFills) {
+      await this.partialFills.slashExpiredReservations(now, intent.intentId);
+    }
     const expired = await this.intentsService.expireIfOpen(intent.intentId);
     if (!expired) return false;
     this.intentsService.appendAuditEntry(
@@ -200,10 +219,12 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     if (deadline !== null) {
       const extended = await this.intentsService.extendDeadlineIfAccepted(intent.intentId, deadline);
       if (!extended) return "skipped";
-      this.logger.warn(
-        `[sweeper] intent ${intent.intentId} fill is paused by a kill-switch — ` +
-          `slashing suppressed and deadline extended to ${deadline}`,
-      );
+      this.logger.warn("fill paused by kill-switch; slash suppressed and deadline extended", {
+        intentId: intent.intentId,
+        solver: intent.solver,
+        chain: intent.srcChain,
+        deadline,
+      });
       return "extended";
     }
     const slashed = await this.slashMissedFill(intent.intentId, intent.solver, now);
@@ -220,22 +241,20 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
    */
   async triggerManualSweep(source: string): Promise<SweepResult> {
     const invokedAt = new Date().toISOString();
-    this.logger.warn(
-      `[sweeper] MANUAL SWEEP TRIGGERED (source=${source}, invokedAt=${invokedAt}) — running one sweep cycle`,
-    );
+    this.logger.warn("MANUAL SWEEP TRIGGERED", { source, invokedAt });
 
     try {
       const result = await this.sweep();
-      this.logger.warn(
-        `[sweeper] MANUAL SWEEP COMPLETE (source=${source}, invokedAt=${invokedAt}): ` +
-          `expired=${result.expiredCount} slashed=${result.slashedCount} duration=${result.durationMs}ms`,
-      );
+      this.logger.warn("MANUAL SWEEP COMPLETE", {
+        source,
+        invokedAt,
+        expiredCount: result.expiredCount,
+        slashedCount: result.slashedCount,
+        durationMs: result.durationMs,
+      });
       return result;
     } catch (err) {
-      this.logger.error(
-        `[sweeper] MANUAL SWEEP FAILED (source=${source}, invokedAt=${invokedAt}): ` +
-          `${err instanceof Error ? err.message : err}`,
-      );
+      this.logger.error("MANUAL SWEEP FAILED", { source, invokedAt, err });
       throw err;
     }
   }
@@ -263,7 +282,7 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
     if (!solver) {
       // Shouldn't happen in practice — an "accepted" intent always has a
       // solver — but don't let a bad record throw the whole sweep cycle.
-      logger.error(`[sweeper] intent ${intentId} was accepted with no solver on record`);
+      this.logger.error("accepted intent has no solver on record", { intentId });
       return true;
     }
 
@@ -281,9 +300,12 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
       intentId,
       reason,
     });
-    console.log(
-      `[sweeper] slashed solver=${solver} for intent=${intentId}: ${result.detail} slashId=${slashRecord?.slashId ?? "unknown"}`,
-    );
+    this.logger.info("slashed solver for missed fill", {
+      intentId,
+      solver,
+      detail: result.detail,
+      slashId: slashRecord?.slashId,
+    });
     return true;
   }
 }

@@ -319,7 +319,7 @@ describe("SlashingPipelineService (#397)", () => {
         attempts: MAX_ATTEMPTS,
       });
       expect(await fillsFailed()).toBe(0);
-      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("ALERT"));
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("ALERT"), expect.objectContaining({ intentId }));
     });
 
     it("an unexpected throw is retried, not fatal to the batch", async () => {
@@ -481,7 +481,7 @@ describe("SlashingPipelineService (#397)", () => {
         pipeline.onModuleInit();
         jest.advanceTimersByTime(15_000);
         expect(process).toHaveBeenCalledTimes(1);
-        return Promise.resolve().then(() => expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("tick failed")));
+        return Promise.resolve().then(() => expect(errorLog).toHaveBeenCalledWith("slashing processing failed", { err: expect.objectContaining({ message: "tick failed" }) }));
       } finally {
         jest.useRealTimers();
       }

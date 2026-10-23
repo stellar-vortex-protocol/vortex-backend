@@ -1,7 +1,6 @@
 import {
   Inject,
   Injectable,
-  Logger,
   Optional,
   ServiceUnavailableException,
 } from "@nestjs/common";
@@ -28,6 +27,8 @@ import { MetricsService } from "../metrics/metrics.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { ProtocolParamsService } from "../governance/params.service";
 import { FeatureFlagService } from "../flags/feature-flag.service";
+import { createLogger } from "../common/logger";
+import { LOG_EVENTS } from "../common/log-schema";
 
 const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slashed"];
 
@@ -159,7 +160,7 @@ export type NewIntentData = Omit<Intent, "intentId" | "createdAt" | "state">;
  */
 @Injectable()
 export class IntentsService {
-  private readonly logger = new Logger(IntentsService.name);
+  private readonly logger = createLogger(IntentsService.name);
 
   /**
    * Idempotency cache: maps caller-supplied keys → { intentId, expiresAt }.
@@ -254,7 +255,7 @@ export class IntentsService {
   async logStoreSize(): Promise<void> {
     const evicted = await this.evictTerminalIntents();
     const remaining = await this.repo.findAll();
-    this.logger.log(`[store-monitor] intents store size: ${remaining.length} (evicted=${evicted})`);
+    this.logger.info("intents store size", { storeSize: remaining.length, evicted });
   }
 
   private async evictTerminalIntents(): Promise<number> {
@@ -279,9 +280,11 @@ export class IntentsService {
     for (const intent of stale) {
       const removed = await this.repo.delete(intent.intentId);
       if (removed) evicted += 1;
-      this.logger.warn(
-        `[retention] evicted terminal intent ${intent.intentId} from in-memory store (state=${intent.state}, createdAt=${intent.createdAt})`,
-      );
+      this.logger.warn("evicted terminal intent from in-memory store", {
+        intentId: intent.intentId,
+        state: intent.state,
+        createdAt: intent.createdAt,
+      });
     }
 
     return evicted;
@@ -522,7 +525,7 @@ export class IntentsService {
     // poison row.
     buildOutboxInvocation(entry, contractId);
     await outbox.enqueue(entry);
-    this.logger.log(`Queued on-chain registration for intent ${intent.intentId}`);
+    this.logger.info("queued on-chain registration", { intentId: intent.intentId, chain: intent.srcChain });
   }
 
   /**
@@ -562,12 +565,10 @@ export class IntentsService {
         method: "create_intent",
         args: this.buildCreateIntentArgs(intent),
       });
-      this.logger.log(`Registered intent ${intent.intentId} on-chain (tx ${result.hash})`);
+      this.logger.info("registered intent on-chain", { intentId: intent.intentId, txHash: result.hash });
       return result.hash;
     } catch (err) {
-      this.logger.error(
-        `Failed to register intent ${intent.intentId} on-chain: ${(err as Error).message}`,
-      );
+      this.logger.error("on-chain intent registration failed", { intentId: intent.intentId, err });
       throw new ServiceUnavailableException(
         "Failed to register intent with the settlement contract",
       );
@@ -624,13 +625,13 @@ export class IntentsService {
       if (!isKnownShadowTransition(transition)) {
         // A mis-wired call site must be visible but must not throw into the
         // request path, and must not create an unbounded Prometheus label.
-        this.logger.error(`[shadow] dropping observation with unknown transition "${transition}"`);
+        this.logger.error("shadow observation dropped: unknown transition", { intentId, transition });
         return;
       }
       const request: ShadowObservationRequest = { transition, intentId, committed, method, args };
       this.shadowService.observe(request);
     } catch (err) {
-      this.logger.error(`[shadow] reportShadow failed, discarding: ${(err as Error).message}`);
+      this.logger.error("shadow report failed", { intentId, transition, err });
     }
   }
 
@@ -647,7 +648,7 @@ export class IntentsService {
     try {
       return this.shadowService?.shouldObserve() === true;
     } catch (err) {
-      this.logger.error(`[shadow] shouldObserve failed: ${(err as Error).message}`);
+      this.logger.error("shadow shouldObserve failed", { err });
       return false;
     }
   }
@@ -666,9 +667,7 @@ export class IntentsService {
     try {
       return build();
     } catch (err) {
-      this.logger.warn(
-        `[shadow] could not encode contract args for simulation: ${(err as Error).message}`,
-      );
+      this.logger.warn("shadow contract args could not be encoded", { err });
       return [];
     }
   }
@@ -687,7 +686,7 @@ export class IntentsService {
     try {
       this.metricsService?.incIntentStateTransition(from, to);
     } catch (err) {
-      this.logger.error(`[metrics] could not record transition ${from}->${to}: ${(err as Error).message}`);
+      this.logger.error("intent transition metric failed", { fromState: from, toState: to, err });
     }
   }
 
@@ -767,10 +766,10 @@ export class IntentsService {
     expectedVersion?: number,
   ): Promise<Intent | null> {
     if (patch.state !== undefined) {
-      this.logger.warn(
-        `[state-machine] update(${id}) carries a state patch ("${patch.state}"); ` +
-          `this bypasses the guarded transitions and their observers`,
-      );
+      this.logger.warn("unguarded state patch bypasses transition observers", {
+        intentId: id,
+        toState: patch.state,
+      });
     }
     return written(await this.repo.update(id, patch, expectedVersion));
   }
@@ -797,7 +796,7 @@ export class IntentsService {
       last = await pending;
       if (!isVersionConflict(last)) return last;
     }
-    this.logger.warn(`[occ] gave up on intent ${id} after ${maxAttempts} version conflicts`);
+    this.logger.warn("gave up after repeated version conflicts", { intentId: id, attempts: maxAttempts });
     return last;
   }
 
@@ -899,6 +898,47 @@ export class IntentsService {
       ]);
     }
     return updated;
+  }
+
+  /**
+   * Issue #427 — move a partial-fill intent to `filled` once its tranches
+   * cover `srcAmount`, or when the user cancels the unfilled remainder of a
+   * partially filled intent.
+   *
+   * Goes through the existing guarded edges — `acceptIfOpen` then
+   * `fillIfAccepted` on the repository — rather than a new `open → filled`
+   * edge, so the lifecycle table (and its TLA+ model) is unchanged and a
+   * concurrent cancel / expiry still wins the first conditional write. Two
+   * settlers racing (two final tranches confirming at once) resolve the same
+   * way: one `acceptIfOpen` wins, the other gets `null`.
+   *
+   * The settlement-contract broadcast is skipped: the contract has no
+   * partial-fill entrypoints (issue #427 keeps the on-chain path mocked
+   * behind `PARTIAL_FILLS_ONCHAIN_ENABLED`).
+   *
+   * @returns the filled intent, or null when it was no longer open.
+   */
+  async settlePartialFill(
+    id: string,
+    solver: string,
+    patch: Pick<Intent, "fillAmount" | "feeAmount" | "txHash" | "filledAt">,
+    now: number,
+  ): Promise<Intent | null> {
+    const intent = await this.repo.findById(id);
+    if (!intent) return null;
+    const fillWindow = CHAIN_FILL_WINDOW_DEFAULTS[intent.srcChain] ?? DEFAULT_FILL_WINDOW_SECONDS;
+    const accepted = written(await this.repo.acceptIfOpen(id, solver, now + fillWindow, now));
+    if (accepted === null) return null;
+    this.countTransition("open", "accepted");
+    const filled = written(await this.repo.fillIfAccepted(id, solver, patch, now));
+    if (filled === null) {
+      // Only reachable if something rewrote the row between the two guarded
+      // writes; leave it accepted for the sweeper rather than force a state.
+      this.logger.error("partial-fill settlement could not complete after accept", { intentId: id, solver });
+      return null;
+    }
+    this.countTransition("accepted", "filled");
+    return filled;
   }
 
   /** Shadow hook for `fill` — reported whether or not the conditional write won. */
@@ -1043,10 +1083,11 @@ export class IntentsService {
       });
       txHash = result.hash;
     } catch (err) {
-      this.logger.error(
-        `On-chain ${op} broadcast failed for intent ${intent.intentId}: ` +
-          `${(err as Error).message} — parked pending without a tx hash`,
-      );
+      this.logger.error("on-chain broadcast failed; parked pending without tx hash", {
+        intentId: intent.intentId,
+        op,
+        err,
+      });
     }
     return (await this.transitionToOnChainPending(intent.intentId, op, txHash)) ?? intent;
   }
@@ -1152,6 +1193,15 @@ export class IntentsService {
       ...(metadata ? { metadata } : {}),
     };
 
+    // Issue #488: one queryable record per audited transition.
+    this.logger.info("intent transition", {
+      event: LOG_EVENTS.INTENT_TRANSITION,
+      intentId,
+      toState,
+      actor,
+      reason,
+    });
+
     // 1. In-memory write (synchronous, always succeeds)
     const entries = this.auditLog.get(intentId) ?? [];
     entries.push(entry);
@@ -1187,11 +1237,7 @@ export class IntentsService {
         },
       })
       .catch((err: unknown) => {
-        this.logger.error(
-          `[audit] FAILED to persist audit entry for intent ${intentId} ` +
-            `(toState=${toState}, actor=${actor}): ${(err as Error).message}`,
-          (err as Error).stack,
-        );
+        this.logger.error("intent audit entry persist failed", { intentId, toState, actor, err });
       });
   }
 

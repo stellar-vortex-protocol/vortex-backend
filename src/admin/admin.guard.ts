@@ -19,6 +19,8 @@ import {
   hasRole,
   parseAdminApiKeys,
 } from "./admin-auth";
+import { LOG_EVENTS } from "../common/log-schema";
+import { createLogger } from "../common/logger";
 
 const ADMIN_ROLE_KEY = "vortex:admin-role";
 
@@ -74,13 +76,32 @@ export function adminAuthMiddleware(rawKeys: string, required: AdminRole = "admi
   };
 }
 
+const securityLog = createLogger("AdminGuard");
+
 function authorize(
   presented: string | undefined,
   keys: ReturnType<typeof parseAdminApiKeys>,
   required: AdminRole,
 ): AdminPrincipal {
   const principal = authenticateAdminKey(presented, keys);
-  if (!principal) throw new UnauthorizedException("Missing or invalid admin key");
-  if (!hasRole(principal, required)) throw new ForbiddenException(`Requires ${required} role`);
+  if (!principal) {
+    // Issue #488: feeds the `VortexAdminAuthFailures` log alert. The
+    // presented key is never logged — only whether one was sent at all.
+    securityLog.warn("admin authentication failed", {
+      event: LOG_EVENTS.ADMIN_AUTH_FAILURE,
+      reason: presented ? "invalid_key" : "missing_key",
+      requiredRole: required,
+    });
+    throw new UnauthorizedException("Missing or invalid admin key");
+  }
+  if (!hasRole(principal, required)) {
+    securityLog.warn("admin authorization failed", {
+      event: LOG_EVENTS.ADMIN_AUTH_FAILURE,
+      reason: "insufficient_role",
+      admin: principal.id,
+      requiredRole: required,
+    });
+    throw new ForbiddenException(`Requires ${required} role`);
+  }
   return principal;
 }

@@ -47,14 +47,19 @@ function makeIntentIndex(): IntentCapabilityIndex {
   } as unknown as IntentCapabilityIndex;
 }
 
-jest.mock("../common/logger", () => ({
-  logger: {
+jest.mock("../common/logger", () => {
+  // One shared spy object stands in for both the raw winston logger and every
+  // component logger created with createLogger().
+  const log: Record<string, jest.Mock> = {
     info: jest.fn(),
     debug: jest.fn(),
     warn: jest.fn(),
     error: jest.fn(),
-  },
-}));
+    verbose: jest.fn(),
+  };
+  log.child = jest.fn(() => log);
+  return { logger: log, createLogger: jest.fn(() => log) };
+});
 
 function makeIntentsService(): IntentsService {
   const configService = {
@@ -253,7 +258,7 @@ describe("IntentsGateway logging", () => {
     const client = createMockClient();
     gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
-    expect(logger.info).toHaveBeenCalledWith("ws client connected (subscribers=1)");
+    expect(logger.info).toHaveBeenCalledWith("ws client connected", { subscribers: 1 });
   });
 
   it("logs disconnection with subscriber count", () => {
@@ -261,7 +266,7 @@ describe("IntentsGateway logging", () => {
     gateway.handleConnection(client as unknown as import("ws").WebSocket);
     gateway.handleDisconnect(client as unknown as import("ws").WebSocket);
 
-    expect(logger.info).toHaveBeenCalledWith("ws client disconnected (subscribers=0)");
+    expect(logger.info).toHaveBeenCalledWith("ws client disconnected", { subscribers: 0 });
   });
 
   it("logs broadcast event type without payload", async () => {
@@ -270,9 +275,9 @@ describe("IntentsGateway logging", () => {
 
     await gateway.broadcast({ type: "intent_created", intent: { id: "123", secret: "data" } });
 
-    expect(logger.debug).toHaveBeenCalledWith(
-      expect.stringMatching(/ws broadcast type=intent_created/),
-    );
+    expect(logger.debug).toHaveBeenCalledWith("ws broadcast", expect.objectContaining({ eventType: "intent_created" }));
+    // The payload itself (including its "secret" field) never reaches the log.
+    expect(JSON.stringify((logger.debug as jest.Mock).mock.calls)).not.toContain("data");
   });
 
   it("logs heartbeat termination of dead client", () => {
@@ -281,9 +286,7 @@ describe("IntentsGateway logging", () => {
 
     jest.advanceTimersByTime(60_000);
 
-    expect(logger.debug).toHaveBeenCalledWith(
-      "ws heartbeat terminated dead client (subscribers=0)",
-    );
+    expect(logger.debug).toHaveBeenCalledWith("ws heartbeat terminated dead client", { subscribers: 0 });
   });
 });
 

@@ -1,10 +1,12 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from "@nestjs/common";
+import { Inject, Injectable, OnModuleDestroy, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { randomUUID } from "node:crypto";
 import { IntentsService } from "../intents.service";
 import { SolversService } from "../../solvers/solvers.service";
 import { MetricsService } from "../../metrics/metrics.service";
-import { logger } from "../../common/logger";
+import { createLogger } from "../../common/logger";
+
+const logger = createLogger("IntentFeedService");
 import { SUPPORTED_CHAINS, SupportedChain, IntentState } from "../intents.types";
 import { buildMatchPredicate, IntentCapabilityIndex, SolverMatchPredicate } from "../solver-intent-matcher";
 import configuration, { AppConfig } from "../../config/configuration";
@@ -45,7 +47,6 @@ const REPLAY_BUFFER_SIZE = 500;
  */
 @Injectable()
 export class IntentFeedService implements OnModuleDestroy {
-  private readonly logger = new Logger(IntentFeedService.name);
 
   /** Fan-out + global sequencing (issue #454): memory or Redis Streams. */
   private readonly backplane: Backplane;
@@ -78,9 +79,9 @@ export class IntentFeedService implements OnModuleDestroy {
     this.ringBuffer = new EventRingBuffer(REPLAY_BUFFER_SIZE);
     this.backplane = backplane ?? new MemoryBackplane();
     void this.backplane.start((event) => this.enqueueDelivery(event)).catch((err: Error) =>
-      logger.error(`feed backplane failed to start: ${err.message}`),
+      logger.error("feed backplane failed to start", { err }),
     );
-    logger.info(`intent feed started (backplane=${this.backplane.mode})`);
+    logger.info("intent feed started", { backplane: this.backplane.mode });
   }
 
   /**
@@ -279,7 +280,7 @@ export class IntentFeedService implements OnModuleDestroy {
   private enqueueDelivery(event: SequencedEvent): Promise<void> {
     const run = this.deliveryChain.then(() => this.deliver(event));
     this.deliveryChain = run.catch((err: Error) => {
-      logger.error(`feed delivery failed: ${err.message}`);
+      logger.error("feed delivery failed", { err });
     });
     return this.deliveryChain;
   }
@@ -304,7 +305,7 @@ export class IntentFeedService implements OnModuleDestroy {
     this.updateIndexForEvent(sequencedEvent);
     this.ringBuffer.push(sequencedEvent);
 
-    logger.debug(`feed broadcast type=${event.type} seq=${seq} clients=${this.clients.size}`);
+    logger.debug("feed broadcast", { eventType: event.type, seq, clients: this.clients.size });
 
     const eventChain = await this.getEventChain(sequencedEvent);
     const payload = JSON.stringify(sequencedEvent);
@@ -391,7 +392,7 @@ export class IntentFeedService implements OnModuleDestroy {
   /** Send to a single client, disconnecting it on backpressure overflow. */
   private sendToClient(client: FeedClient, payload: string, seq: number): void {
     if (!client.send(payload, seq)) {
-      this.logger.warn(`feed client ${client.ip} exceeded backpressure limit — disconnecting`);
+      logger.warn("feed client exceeded backpressure limit; disconnecting", { clientIp: client.ip });
       this.metricsService?.wsSlowConsumerDisconnects.inc();
       this.removeClient(client);
       client.close();
@@ -436,7 +437,7 @@ export class IntentFeedService implements OnModuleDestroy {
         this.clients.set(client, { ...filter, solver: predicate });
       }
     }
-    logger.debug(`feed solver predicate updated for ${solverAddress}`);
+    logger.debug("feed solver predicate updated", { solver: solverAddress });
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────

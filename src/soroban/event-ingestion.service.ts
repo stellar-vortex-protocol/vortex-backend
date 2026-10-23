@@ -2,7 +2,9 @@ import { Injectable, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/com
 import { ConfigService } from "@nestjs/config";
 import { scValToNative, SorobanRpc } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
-import { logger } from "../common/logger";
+import { createLogger } from "../common/logger";
+
+const logger = createLogger("EventIngestionService", { chain: "stellar" });
 import { IntentsService } from "../intents/intents.service";
 import { MetricsService } from "../metrics/metrics.service";
 import { SorobanService } from "./soroban.service";
@@ -80,10 +82,10 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
   onModuleInit() {
     this.leaderElection.registerWorker("event-ingestion", (isLeader, _token) => {
       if (isLeader) {
-        logger.info("[event-ingestion] became leader — starting polling intervals");
+        logger.info("became leader; starting polling intervals");
         this.startIntervals();
       } else {
-        logger.info("[event-ingestion] lost leadership — stopping polling intervals");
+        logger.info("lost leadership; stopping polling intervals");
         this.stopIntervals();
       }
     });
@@ -97,15 +99,13 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     if (this.interval) return; // already running
     this.interval = setInterval(() => {
       this.poll().catch((err) =>
-        logger.error(`[event-ingestion] poll failed: ${err instanceof Error ? err.message : String(err)}`),
+        logger.error("event poll failed", { err }),
       );
     }, POLL_INTERVAL_MS);
 
     this.reconcileInterval = setInterval(() => {
       this.reconcileStaleIntents().catch((err) => {
-        logger.error(
-          `[event-ingestion] stale-intent reconciliation failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        logger.error("stale-intent reconciliation failed", { err });
       });
     }, RECONCILE_INTERVAL_MS);
   }
@@ -164,19 +164,18 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
       const header = await this.sorobanService.getLedger(this.newestIngestedLedger);
       const closeTime = Number(header?.header?.closeTime);
       if (!Number.isFinite(closeTime) || closeTime <= 0) {
-        logger.debug(
-          `[event-ingestion] ledger ${this.newestIngestedLedger} reported no usable closeTime; leaving ingestion lag unchanged`,
-        );
+        logger.debug("ledger reported no usable closeTime; ingestion lag unchanged", {
+          ledger: this.newestIngestedLedger,
+        });
         return;
       }
       const lagSeconds = Math.max(0, Math.floor(Date.now() / 1000) - closeTime);
       this.metricsService.setIngestionLag(lagSeconds);
     } catch (err) {
-      logger.debug(
-        `[event-ingestion] could not read ledger ${this.newestIngestedLedger} for the ingestion-lag gauge: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+      logger.debug("could not read ledger for the ingestion-lag gauge", {
+        ledger: this.newestIngestedLedger,
+        err,
+      });
     }
   }
 
@@ -225,20 +224,14 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
       // confirmation must never stall the poll loop, and a lookup failure is
       // logged rather than propagated.
       this.handleIntentFilled(event, topic).catch((err) =>
-        logger.error(
-          `[event-ingestion] intent_filled confirmation timing failed at ledger=${event.ledger}: ${
-            (err as Error).message
-          }`,
-        ),
+        logger.error("intent_filled confirmation timing failed", { ledger: event.ledger, err }),
       );
     } else if (eventName === "solver_slashed") {
       // Fire-and-forget: penalty confirmation is non-blocking relative to
       // ingestion — a reconciliation failure is logged but never stalls the
       // poll loop.
       this.handleSolverSlashed(event, topic).catch((err) =>
-        console.error(
-          `[event-ingestion] solver_slashed reconciliation failed at ledger=${event.ledger}: ${(err as Error).message}`,
-        ),
+        logger.error("solver_slashed reconciliation failed", { ledger: event.ledger, err }),
       );
     }
 
@@ -262,9 +255,7 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     event: SorobanRpc.Api.EventResponse,
     topic: unknown[],
   ): Promise<void> {
-    logger.info(
-      `[event-ingestion] intent_filled event at ledger=${event.ledger} txHash=${event.txHash} topic=${JSON.stringify(topic)}`,
-    );
+    logger.info("intent_filled event ingested", { ledger: event.ledger, txHash: event.txHash, topic });
 
     const intentId = typeof topic[1] === "string" ? topic[1] : undefined;
     if (!intentId || !this.metricsService || !this.intentsService) return;
@@ -272,9 +263,7 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     const intent = await this.intentsService.get(intentId);
     const filledAt = intent?.filledAt;
     if (typeof filledAt !== "number" || filledAt <= 0) {
-      logger.debug(
-        `[event-ingestion] intent_filled for ${intentId} has no off-chain fill timestamp yet; not observing confirmation latency`,
-      );
+      logger.debug("intent_filled has no off-chain fill timestamp; latency not observed", { intentId });
       return;
     }
 
@@ -287,9 +276,10 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     for (const [intentId, lastUpdated] of this.lastIntentUpdateById.entries()) {
       if (now - lastUpdated <= STALE_INTENT_THRESHOLD_SECONDS) continue;
 
-      logger.warn(
-        `[event-ingestion] stale intent state detected for intent=${intentId} lastUpdatedSecondsAgo=${now - lastUpdated}; polling chain for reconciliation`,
-      );
+      logger.warn("stale intent state detected; polling chain for reconciliation", {
+        intentId,
+        lastUpdatedSecondsAgo: now - lastUpdated,
+      });
 
       const settlementContractId = this.configService.get("stellar.settlementContractId", { infer: true });
       if (!settlementContractId) continue;
@@ -335,16 +325,17 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
           : undefined;
 
     if (!solverAddress || !intentId || !slashAmount) {
-      console.warn(
-        `[event-ingestion] solver_slashed event at ledger=${event.ledger} has unexpected topic shape; skipping reconciliation`,
-        { solverAddress, intentId, slashAmount, rawTopic: topic },
-      );
+      logger.warn("solver_slashed event has unexpected topic shape; skipping reconciliation", {
+        ledger: event.ledger,
+        solver: solverAddress,
+        intentId,
+        slashAmount,
+        rawTopic: topic,
+      });
       return;
     }
 
-    console.log(
-      `[event-ingestion] solver_slashed confirmed: solver=${solverAddress} intentId=${intentId} slashAmount=${slashAmount} ledger=${event.ledger}`,
-    );
+    logger.info("solver_slashed confirmed", { solver: solverAddress, intentId, slashAmount, ledger: event.ledger });
 
     await this.solversService.confirmPenalty(intentId, slashAmount);
   }

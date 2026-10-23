@@ -1,0 +1,127 @@
+# OpenTelemetry Collector for the local observability profile (issue #488).
+#
+#   docker compose --profile observability up -d
+#
+# Logs reach the collector two ways, and both end up in Loki as the same
+# schema record (docs/observability/logging.md):
+#
+#   1. stdout — the app writes one JSON record per line when LOG_FORMAT=json;
+#      the `filelog` receiver tails the Docker json-file logs and keeps only
+#      lines that carry our schema (`schemaVersion`).
+#   2. LOG_SHIPPING — the existing winston HTTP transport (src/common/logger.ts)
+#      can POST records straight to the `webhookevent` receiver:
+#        LOG_SHIPPING_ENABLED=true LOG_SHIPPING_HOST=otel-collector
+#        LOG_SHIPPING_PORT=8088    LOG_SHIPPING_PATH=/v1/logs/winston
+#
+# Use one or the other, not both, or every record is ingested twice.
+#
+# Traces from the app's OTLP exporter (src/tracing.ts) are forwarded to Tempo.
+#
+# Vendor SIEM export is out of scope; an OpenSearch exporter is defined below
+# but left out of the pipeline — add it to `exporters:` of the logs pipeline
+# to dual-write.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  filelog/containers:
+    include:
+      - /var/lib/docker/containers/*/*-json.log
+    start_at: end
+    include_file_path: false
+    operators:
+      # Unwrap Docker's {"log": "...", "stream": "...", "time": "..."} envelope.
+      - type: container
+        format: docker
+        add_metadata_from_filepath: false
+
+  webhookevent/winston:
+    endpoint: 0.0.0.0:8088
+    path: /v1/logs/winston
+    health_path: /v1/logs/winston/health
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+
+  # Drop every container line that is not one of our schema records (other
+  # services, the pretty format, stack-trace continuation lines).
+  filter/schema-only:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'not IsMatch(body, "\"schemaVersion\":")'
+
+  # Lift the schema fields into OTel's log data model so Loki / Tempo can
+  # correlate on them. The JSON line itself stays the body, so LogQL's `| json`
+  # sees exactly the documented record.
+  transform/schema:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - merge_maps(attributes, ParseJSON(body), "upsert") where IsMatch(body, "^\\s*\\{")
+          - set(severity_text, attributes["level"]) where attributes["level"] != nil
+          - set(severity_number, SEVERITY_NUMBER_ERROR) where attributes["level"] == "error"
+          - set(severity_number, SEVERITY_NUMBER_WARN) where attributes["level"] == "warn"
+          - set(severity_number, SEVERITY_NUMBER_INFO) where attributes["level"] == "info"
+          - set(severity_number, SEVERITY_NUMBER_DEBUG) where attributes["level"] == "debug"
+          - set(trace_id.string, attributes["traceId"]) where attributes["traceId"] != nil
+          - set(span_id.string, attributes["spanId"]) where attributes["spanId"] != nil
+          - set(resource.attributes["service.name"], attributes["service"]) where attributes["service"] != nil
+          # Keep high-cardinality ids out of the attribute set Loki may index;
+          # they remain queryable through `| json` on the body.
+          - delete_key(attributes, "stack")
+
+  batch:
+    send_batch_size: 1024
+    timeout: 2s
+
+exporters:
+  # Loki 3.x native OTLP ingestion. `service.name` becomes the `service_name`
+  # stream label the alert rules in ops/observability/loki-rules/ select on.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Optional second sink — see the header comment.
+  opensearch/logs:
+    http:
+      endpoint: http://opensearch:9200
+    logs_index: vortex-logs
+
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    logs/containers:
+      receivers: [filelog/containers]
+      processors: [memory_limiter, filter/schema-only, transform/schema, batch]
+      exporters: [otlphttp/loki]
+    logs/shipping:
+      receivers: [webhookevent/winston]
+      processors: [memory_limiter, transform/schema, batch]
+      exporters: [otlphttp/loki]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]

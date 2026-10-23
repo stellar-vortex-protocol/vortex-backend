@@ -1,9 +1,11 @@
 # Minimal Loki for the local observability profile (issue #481).
 #
 # Single binary, filesystem storage, no replication or object store: this is a
-# developer-local stack, not a production log pipeline. The dashboards use Loki
-# for exactly one panel today (event-loop utilisation on the API RED
-# dashboard), so the config is kept deliberately small.
+# developer-local stack, not a production log pipeline.
+#
+# Issue #488: structured logs arrive from the OTel collector
+# (ops/otel-collector/config.yaml) over Loki's native OTLP endpoint, and the
+# ruler evaluates the log-based security alerts in ops/observability/loki-rules/.
 
 auth_enabled: false
 
@@ -41,12 +43,29 @@ limits_config:
   max_query_series: 10000
   reject_old_samples: true
   reject_old_samples_max_age: 168h
+  # Required for OTLP ingestion: log attributes land as structured metadata.
+  allow_structured_metadata: true
 
 compactor:
   working_directory: /loki/compactor
   compaction_interval: 10m
   retention_enabled: true
   delete_request_store: filesystem
+
+# Log-based alerting (issue #488). Rules are read from the mounted
+# ops/observability/loki-rules/<tenant>/ directory. Notifications go to the
+# Alertmanager at ALERTMANAGER_URL when one is running; without it the alerts
+# are still evaluated and visible at /prometheus/api/v1/alerts and in Grafana.
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /etc/loki/rules
+  rule_path: /loki/rules-temp
+  evaluation_interval: 1m
+  enable_api: true
+  enable_alertmanager_v2: true
+  alertmanager_url: ${ALERTMANAGER_URL:-http://alertmanager:9093}
 
 analytics:
   reporting_enabled: false

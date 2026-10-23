@@ -438,6 +438,44 @@ export interface AppConfig {
     partitionPrefix: string;
     maxRowsPerFile: number;
   };
+
+  /** Issue #439 — destination account / trustline preflight for Stellar deliveries. */
+  destinationPreflight: {
+    enabled: boolean;
+    /** Allow the request through when Horizon / Soroban RPC is unreachable. */
+    failOpen: boolean;
+    /** TTL of the per-(account, asset) snapshot cache. */
+    cacheTtlMs: number;
+  };
+
+  /** Issue #432 — signed webhook delivery. */
+  webhooks: {
+    persistence: "memory" | "prisma";
+    /** Per-attempt HTTP timeout. */
+    timeoutMs: number;
+    /** Retries after the first attempt (total attempts = retries + 1). */
+    maxRetries: number;
+    /** Base for exponential backoff: delay = base * 2^(attempt - 1). */
+    backoffBaseMs: number;
+    /** Consecutive failed deliveries after which a subscription is auto-disabled. */
+    disableAfterFailures: number;
+    /** Deliveries in flight per worker — slow endpoints only hold their own slot. */
+    concurrency: number;
+    /** Permit http:// and private-network targets. Local development only. */
+    allowInsecureUrls: boolean;
+  };
+
+  /** Issue #427 — partial fills. */
+  partialFills: {
+    /** Accept `allowPartialFill` on create. */
+    enabled: boolean;
+    /**
+     * Broadcast tranche writes to the settlement contract. The contract has no
+     * partial-fill entrypoints yet, so this stays off and the off-chain
+     * reservation ledger is authoritative (the on-chain path is mocked).
+     */
+    onchainEnabled: boolean;
+  };
 }
 
 export default (): AppConfig => ({
@@ -632,6 +670,27 @@ export default (): AppConfig => ({
     retentionDays: parseInt(process.env.ARCHIVAL_RETENTION_DAYS ?? "30", 10),
     partitionPrefix: process.env.ARCHIVAL_PARTITION_PREFIX ?? "date=",
     maxRowsPerFile: parseInt(process.env.ARCHIVAL_MAX_ROWS_PER_FILE ?? "100000", 10),
+  },
+
+  destinationPreflight: {
+    enabled: process.env.DST_PREFLIGHT_ENABLED === "true",
+    failOpen: (process.env.DST_PREFLIGHT_FAIL_OPEN ?? "true") === "true",
+    cacheTtlMs: parseInt(process.env.DST_PREFLIGHT_CACHE_TTL_MS ?? "30000", 10),
+  },
+
+  webhooks: {
+    persistence: process.env.WEBHOOKS_PERSISTENCE === "prisma" ? "prisma" : "memory",
+    timeoutMs: parseInt(process.env.WEBHOOK_TIMEOUT_MS ?? "5000", 10),
+    maxRetries: parseInt(process.env.WEBHOOK_MAX_RETRIES ?? "5", 10),
+    backoffBaseMs: parseInt(process.env.WEBHOOK_BACKOFF_BASE_MS ?? "30000", 10),
+    disableAfterFailures: parseInt(process.env.WEBHOOK_DISABLE_AFTER_FAILURES ?? "10", 10),
+    concurrency: parseInt(process.env.WEBHOOK_CONCURRENCY ?? "16", 10),
+    allowInsecureUrls: process.env.WEBHOOK_ALLOW_INSECURE_URLS === "true",
+  },
+
+  partialFills: {
+    enabled: (process.env.PARTIAL_FILLS_ENABLED ?? "true") === "true",
+    onchainEnabled: process.env.PARTIAL_FILLS_ONCHAIN_ENABLED === "true",
   },
 });
 

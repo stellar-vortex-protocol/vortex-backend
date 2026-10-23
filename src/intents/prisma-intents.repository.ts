@@ -558,6 +558,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       srcVerification: (intent.srcVerification ?? null) as unknown as Prisma.InputJsonValue,
       ...(intent.slashedAt !== undefined ? { slashedAt: intent.slashedAt } : {}),
       ...(intent.slashReason !== undefined ? { slashReason: intent.slashReason } : {}),
+      // Issue #427 — partial-fill terms are fixed at creation.
+      allowPartialFill: intent.allowPartialFill ?? false,
+      minFillAmount: intent.minFillAmount ?? null,
     };
 
     if (intent.feeAmount !== undefined) {
@@ -634,6 +637,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     srcVerification: Prisma.JsonValue | null;
     slashedAt?: number | null;
     slashReason?: string | null;
+    allowPartialFill?: boolean;
+    minFillAmount?: string | null;
   }): Intent {
     return {
       intentId: row.intentId,
@@ -673,6 +678,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
         : {}),
       ...(row.slashedAt !== null && row.slashedAt !== undefined ? { slashedAt: row.slashedAt } : {}),
       ...(row.slashReason !== null && row.slashReason !== undefined ? { slashReason: row.slashReason } : {}),
+      ...(row.allowPartialFill ? { allowPartialFill: true } : {}),
+      ...(row.minFillAmount !== null && row.minFillAmount !== undefined ? { minFillAmount: row.minFillAmount } : {}),
     };
   }
 

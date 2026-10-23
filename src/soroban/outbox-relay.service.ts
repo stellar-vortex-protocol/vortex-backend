@@ -1,4 +1,5 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { createLogger } from "../common/logger";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
 import { KillSwitchActiveException } from "../killswitch/killswitch.guard";
@@ -59,7 +60,7 @@ export interface RelayTickResult {
  */
 @Injectable()
 export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(OutboxRelayService.name);
+  private readonly logger = createLogger(OutboxRelayService.name);
   private readonly settings: AppConfig["outbox"];
   private readonly settlementContractId: string;
   private interval?: NodeJS.Timeout;
@@ -78,12 +79,12 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit() {
     if (!this.settings.relayEnabled) {
-      this.logger.warn("[outbox] relay disabled (OUTBOX_RELAY_ENABLED=false) — rows will accumulate");
+      this.logger.warn("outbox relay disabled (OUTBOX_RELAY_ENABLED=false); rows will accumulate");
       return;
     }
     this.interval = setInterval(() => {
       this.tick().catch((err) =>
-        this.logger.error(`[outbox] relay tick failed: ${errorMessage(err)}`),
+        this.logger.error("outbox relay tick failed", { err }),
       );
     }, this.settings.relayIntervalMs);
     this.interval.unref?.();
@@ -125,7 +126,7 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
         status = (await this.confirmation.check(entry.txHash)).status;
       } catch (err) {
         // RPC outage is not evidence either way — look again next tick.
-        this.logger.warn(`[outbox] confirmation lookup failed for row ${entry.id}: ${errorMessage(err)}`);
+        this.logger.warn("outbox confirmation lookup failed", { outboxId: String(entry.id), intentId: entry.intentId, err });
         continue;
       }
 
@@ -158,10 +159,12 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
       if (entry.envelopeHash) {
         const previous = await this.confirmation.check(entry.envelopeHash);
         if (previous.status === "success") {
-          this.logger.warn(
-            `[outbox] row ${entry.id} (${entry.operation} intent=${entry.intentId}) was already ` +
-              `submitted before a crash (tx ${entry.envelopeHash}); confirming without resubmitting`,
-          );
+          this.logger.warn("outbox row already submitted before a crash; confirming without resubmitting", {
+            outboxId: String(entry.id),
+            operation: entry.operation,
+            intentId: entry.intentId,
+            txHash: entry.envelopeHash,
+          });
           if (await this.outbox.markConfirmed(entry, entry.envelopeHash)) {
             result.confirmed++;
             this.metrics.recordOutboxOutcome("confirmed");
@@ -231,11 +234,15 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
       if (await this.outbox.markDead(entry, error)) {
         result.dead++;
         this.metrics.recordOutboxOutcome("dead");
-        this.logger.error(
-          `[outbox] ALERT row ${entry.id} (${entry.operation} intent=${entry.intentId}) moved to dead ` +
-            `after ${entry.attempts} attempts: ${error}. Later operations for this intent are blocked ` +
-            `until it is requeued — see docs/runbooks/on-call.md`,
-        );
+        this.logger.error("ALERT outbox row dead-lettered; later operations for this intent are blocked until requeued", {
+          event: "outbox.dead_letter",
+          outboxId: String(entry.id),
+          operation: entry.operation,
+          intentId: entry.intentId,
+          attempts: entry.attempts,
+          lastError: error,
+          runbook: "docs/runbooks/on-call.md",
+        });
       }
       return;
     }
@@ -244,10 +251,15 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
     if (await this.outbox.scheduleRetry(entry, error, new Date(now.getTime() + delay))) {
       result.retried++;
       this.metrics.recordOutboxOutcome("retry");
-      this.logger.warn(
-        `[outbox] row ${entry.id} (${entry.operation} intent=${entry.intentId}) attempt ` +
-          `${entry.attempts}/${this.settings.maxAttempts} failed: ${error}; retrying in ${delay}ms`,
-      );
+      this.logger.warn("outbox row attempt failed; retrying", {
+        outboxId: String(entry.id),
+        operation: entry.operation,
+        intentId: entry.intentId,
+        attempts: entry.attempts,
+        maxAttempts: this.settings.maxAttempts,
+        lastError: error,
+        retryInMs: delay,
+      });
     }
   }
 
@@ -255,7 +267,7 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
     try {
       this.metrics.setOutboxBacklog(await this.outbox.countByStatus());
     } catch (err) {
-      this.logger.warn(`[outbox] backlog gauge refresh failed: ${errorMessage(err)}`);
+      this.logger.warn("outbox backlog gauge refresh failed", { err });
     }
   }
 }

@@ -125,6 +125,9 @@ services:
       FLAGS_PUBSUB: redis
       ADMIN_API_KEYS: ${ADMIN_API_KEYS:-}
       CANARY_ADDRESSES: ${CANARY_ADDRESSES:-}
+      # Issue #488 — JSON lines so the observability profile's collector can
+      # parse them; set LOG_FORMAT=pretty for human-readable local output.
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     ports:
       - "4000:4000"
     volumes:
@@ -186,10 +189,35 @@ services:
     container_name: vortex-loki
     restart: unless-stopped
     profiles: ["observability"]
-    command: -config.file=/etc/loki/loki.yml
+    # -config.expand-env lets the ruler read ALERTMANAGER_URL (issue #488).
+    command: -config.file=/etc/loki/loki.yml -config.expand-env=true
     volumes:
       - ./ops/observability/loki.yml:/etc/loki/loki.yml:ro
+      - ./ops/observability/loki-rules:/etc/loki/rules:ro
       - loki-data:/loki
+
+  # Issue #488 — log shipping. Tails the app's JSON stdout (LOG_FORMAT=json)
+  # from the Docker log files, and accepts the winston HTTP transport on :8088.
+  # Forwards logs to Loki (OTLP) and traces to Tempo. See
+  # ops/otel-collector/config.yaml and docs/observability/logging.md.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: vortex-otel-collector
+    restart: unless-stopped
+    profiles: ["observability"]
+    command: ["--config=/etc/otelcol/config.yaml"]
+    # Root is needed to read other containers' log files.
+    user: "0:0"
+    depends_on:
+      - loki
+      - tempo
+    ports:
+      - "4317:4317"   # OTLP gRPC (traces)
+      - "4318:4318"   # OTLP HTTP (traces)
+      - "8088:8088"   # winston HTTP transport (LOG_SHIPPING_*)
+    volumes:
+      - ./ops/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
 
   tempo:
     image: grafana/tempo:2.5.0

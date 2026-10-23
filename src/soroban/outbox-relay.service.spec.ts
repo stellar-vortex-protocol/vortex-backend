@@ -309,7 +309,7 @@ describe("OutboxRelayService (#396)", () => {
     [row] = await outbox.findByIntent("i1");
     expect(row).toMatchObject({ status: "dead", attempts: MAX_ATTEMPTS, lastError: "RPC 503" });
     expect(metrics.recordOutboxOutcome).toHaveBeenCalledWith("dead");
-    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("ALERT"));
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("ALERT"), expect.objectContaining({ intentId: "i1", lastError: "RPC 503" }));
 
     // The dead row blocks the intent's later operations.
     expect(await relay.tick(later(3600))).toMatchObject({ claimed: 0 });
@@ -416,7 +416,7 @@ describe("OutboxRelayService (#396)", () => {
       relay.onModuleInit();
       jest.advanceTimersByTime(1000);
       return Promise.resolve().then(() => {
-        expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("boom"));
+        expect(errorLog).toHaveBeenCalledWith("outbox relay tick failed", { err: expect.objectContaining({ message: "boom" }) });
       });
     } finally {
       jest.useRealTimers();

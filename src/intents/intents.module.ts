@@ -19,6 +19,10 @@ import { GovernanceModule } from "../governance/governance.module";
 import { REPLAY_STORE } from "./backplane/replay-store.token";
 import { MemoryReplayStore } from "./backplane/memory-replay.store";
 import { RedisReplayStore } from "./backplane/redis-replay.store";
+import { INTENT_FILLS_REPOSITORY, InMemoryIntentFillsRepository } from "./partial-fills/intent-fills.repository";
+import { PrismaIntentFillsRepository } from "./partial-fills/prisma-intent-fills.repository";
+import { PartialFillService } from "./partial-fills/partial-fill.service";
+import { IntentFillsController } from "./partial-fills/intent-fills.controller";
 
 @Module({
   // Both SolversModule and SorobanModule import IntentsModule back, so both
@@ -34,7 +38,7 @@ import { RedisReplayStore } from "./backplane/redis-replay.store";
     forwardRef(() => SorobanModule),
     GovernanceModule,
   ],
-  controllers: [IntentsController, WsDocsController],
+  controllers: [IntentsController, IntentFillsController, WsDocsController],
   providers: [
     // Select the persistence adapter based on INTENTS_PERSISTENCE env var.
     // INTENTS_PERSISTENCE=prisma  → PrismaIntentsRepository (production/staging)
@@ -71,6 +75,18 @@ import { RedisReplayStore } from "./backplane/redis-replay.store";
         return new MemoryReplayStore({ maxCount, maxAgeMs });
       },
     },
+    // Issue #427 — partial-fill tranches live next to the intents they split,
+    // so they follow INTENTS_PERSISTENCE (the Prisma adapter row-locks the
+    // parent intents row while reserving).
+    {
+      provide: INTENT_FILLS_REPOSITORY,
+      inject: [PrismaService],
+      useFactory: (prisma: PrismaService) =>
+        (process.env.INTENTS_PERSISTENCE ?? "memory") === "prisma"
+          ? new PrismaIntentFillsRepository(prisma)
+          : new InMemoryIntentFillsRepository(),
+    },
+    PartialFillService,
     IntentsService,
     IntentCapabilityIndex,
     IntentsGateway,
@@ -79,6 +95,6 @@ import { RedisReplayStore } from "./backplane/redis-replay.store";
     // Note: EventIngestionService is provided by SorobanModule (imported above)
     // and exported from there — no re-declaration needed here.
   ],
-  exports: [IntentsService, IntentsGateway, IntentCapabilityIndex, REPLAY_STORE],
+  exports: [IntentsService, IntentsGateway, IntentCapabilityIndex, REPLAY_STORE, PartialFillService],
 })
 export class IntentsModule {}

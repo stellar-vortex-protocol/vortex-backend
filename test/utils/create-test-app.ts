@@ -1,5 +1,5 @@
 import { INestApplication, ValidationPipe } from "@nestjs/common";
-import { Test } from "@nestjs/testing";
+import { Test, TestingModuleBuilder } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
@@ -36,13 +36,23 @@ export class MockPrismaService {
   };
 }
 
-export async function createTestApp(): Promise<INestApplication> {
-  const moduleRef = await Test.createTestingModule({
-    imports: [AppModule],
-  })
-    .overrideProvider(PrismaService)
-    .useClass(MockPrismaService)
-    .compile();
+/**
+ * Boot the full AppModule for an e2e suite.
+ *
+ * `customize` may add further provider overrides — e.g. a fake Horizon-backed
+ * reader for the destination preflight (issue #439) — on top of the default
+ * PrismaService stand-in.
+ */
+export async function createTestApp(
+  customize: (builder: TestingModuleBuilder) => TestingModuleBuilder = (b) => b,
+): Promise<INestApplication> {
+  const moduleRef = await customize(
+    Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(PrismaService)
+      .useClass(MockPrismaService),
+  ).compile();
 
   const app = moduleRef.createNestApplication();
   enableApiVersioning(app);

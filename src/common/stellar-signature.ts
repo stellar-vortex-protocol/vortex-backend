@@ -12,6 +12,10 @@
 import { Keypair } from "@stellar/stellar-sdk";
 import { UnauthorizedException } from "@nestjs/common";
 import { createHash } from "node:crypto";
+import { LOG_EVENTS } from "./log-schema";
+import { createLogger } from "./logger";
+
+const securityLog = createLogger("stellar-signature");
 
 export const INTENT_SIGNATURE_CLOCK_SKEW_SECONDS = 30;
 export const MAX_INTENT_SIGNATURE_TTL_SECONDS = 900;
@@ -59,6 +63,18 @@ export function verifyStellarSignature(
       throw new UnauthorizedException("Signature verification failed");
     }
   } catch (err) {
+    // Issue #488: every rejection is a security event — the
+    // `VortexSignatureFailureSpike` log alert counts these records. The
+    // message kind (first `:`-segment, e.g. "vortex-accept") is logged, never
+    // the signature or the full signed payload.
+    const reason = err instanceof UnauthorizedException ? "mismatch" : "malformed";
+    securityLog.warn("signature verification failed", {
+      event: LOG_EVENTS.SIGNATURE_FAILURE,
+      scheme: "stellar-ed25519",
+      signer: publicKey,
+      messageKind: message.split(":")[0]?.slice(0, 32),
+      reason,
+    });
     if (err instanceof UnauthorizedException) throw err;
     // Invalid public key, bad base64, etc.
     throw new UnauthorizedException("Invalid signature or public key");
@@ -119,6 +135,23 @@ export function buildFillMessage(
     });
   }
   return `fill:${intentId}:${solver}`;
+}
+
+/**
+ * Canonical message a solver signs to reserve a partial-fill tranche
+ * (issue #427). The amount is covered so a reservation cannot be replayed
+ * for a different size.
+ */
+export function buildReserveMessage(intentId: string, solver: string, amount: string): string {
+  return `reserve:${intentId}:${solver}:${amount}`;
+}
+
+/**
+ * Canonical message a solver signs to fill one reserved tranche (issue #427).
+ * Covers the tranche id and the delivered amount.
+ */
+export function buildTrancheFillMessage(intentId: string, fillId: string, solver: string, dstAmount: string): string {
+  return `fill-tranche:${intentId}:${fillId}:${solver}:${dstAmount}`;
 }
 
 /**

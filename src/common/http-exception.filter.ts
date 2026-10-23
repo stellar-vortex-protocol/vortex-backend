@@ -1,6 +1,8 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException } from "@nestjs/common";
 import { captureException } from "./sentry";
-import { logger } from "./logger";
+import { createLogger } from "./logger";
+
+const logger = createLogger("HttpExceptionFilter");
 
 interface JsonResponse {
   status: (code: number) => { json: (body: unknown) => void };
@@ -82,7 +84,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
       return;
     }
 
-    logger.error(err.stack ?? err.message);
+    logger.error("unhandled exception", { err, requestId: request.requestId });
     // Alert on-call engineers — only fires for unexpected exceptions, not
     // routine HttpExceptions, so alert fatigue on 404 / 400 is avoided.
     captureException(err);
