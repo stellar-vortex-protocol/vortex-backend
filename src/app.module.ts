@@ -22,6 +22,7 @@ import { FlagsModule } from "./flags/flags.module";
 import { GuardianStateModule } from "./governance/guardian-state.service";
 import { DatasetsModule } from "./datasets/datasets.module";
 import { AbuseModule } from "./abuse/abuse.module";
+import { AnalyticsModule } from "./analytics/analytics.module";
 import { ApiKeysModule } from "./auth/api-keys/api-keys.module";
 import { Sep10Module } from "./auth/sep10/sep10.module";
 import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
@@ -72,6 +73,9 @@ import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
     IntentsModule,
     SolversModule,
     StatsModule,
+    // Serves GET /api/v1/analytics/* (ADR 0001). Defaults to the in-memory
+    // store; ANALYTICS_STORE=timescale selects TimescaleDB.
+    AnalyticsModule,
     SorobanModule,
     RoutingModule,
     TreasuryModule,

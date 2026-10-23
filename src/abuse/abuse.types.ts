@@ -143,7 +143,11 @@ export interface AbuseContext {
   srcTokenDecimals?: number;
   /** Deterministic fingerprint of the intent's parameters (excluding deadline). */
   intentFingerprint: string;
-  /** Unix timestamp (seconds) of the earliest account activity (from Horizon); undefined if not yet fetched. */
+  /**
+   * Seconds since the Stellar account was created (from Horizon, via
+   * AccountAgeService); 0 if it does not exist on-chain yet; undefined when
+   * unknown (lookup failed, timed out, or the user is not a Stellar address).
+   */
   accountAgeSeconds?: number;
   /** Operation being performed: intent creation, cancellation, solver accept. */
   operation: "create" | "cancel" | "accept" | "fill";

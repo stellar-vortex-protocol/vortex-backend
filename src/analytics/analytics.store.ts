@@ -5,7 +5,9 @@ import {
   AnalyticsQuery,
   FeesPoint,
   LatencyPoint,
+  PerSolverPoint,
   SolverSharePoint,
+  TokenPairPoint,
   VolumePoint,
 } from "./analytics.types";
 
@@ -18,6 +20,10 @@ export interface IAnalyticsStore {
   queryFees(query: AnalyticsQuery): Promise<FeesPoint[]>;
   queryLatency(query: AnalyticsQuery): Promise<LatencyPoint[]>;
   querySolverShare(query: AnalyticsQuery): Promise<SolverSharePoint[]>;
+  /** Volume/fees per exact `(srcToken, dstToken)` pair per bucket. */
+  queryTokenPair(query: AnalyticsQuery): Promise<TokenPairPoint[]>;
+  /** Mean latency, volume and fill count per solver per bucket. */
+  queryPerSolver(query: AnalyticsQuery): Promise<PerSolverPoint[]>;
 }
 
 /** Nearest-rank percentile (the p-th smallest value when sorted). */
@@ -26,6 +32,33 @@ export function percentile(values: number[], p: number): number {
   const sorted = [...values].sort((a, b) => a - b);
   const index = Math.ceil(p * sorted.length) - 1;
   return sorted[Math.max(0, Math.min(sorted.length - 1, index))];
+}
+
+/**
+ * True median: the middle value for an odd count, the mean of the two middle
+ * values for an even count. Deliberately not `percentile(values, 0.5)`, whose
+ * nearest-rank rule returns the lower middle value for an even count.
+ */
+export function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** {@link median} for bigint base units; an even-count midpoint is floored. */
+export function medianBigInt(values: bigint[]): bigint {
+  if (values.length === 0) return 0n;
+  const sorted = [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2n;
+}
+
+/** Descending comparison of base-unit strings (larger volume first). */
+function compareVolumeDesc(a: string, b: string): number {
+  const x = BigInt(a);
+  const y = BigInt(b);
+  return x > y ? -1 : x < y ? 1 : 0;
 }
 
 /** Bucket start (epoch ms) for a timestamp and interval. */
@@ -37,6 +70,7 @@ function matches(event: AnalyticsFillEvent, query: AnalyticsQuery): boolean {
   if (event.timestamp < query.from || event.timestamp >= query.to) return false;
   if (query.chain && event.chain !== query.chain) return false;
   if (query.token && event.srcToken !== query.token && event.dstToken !== query.token) return false;
+  if (query.solver && event.solver !== query.solver) return false;
   return true;
 }
 
@@ -126,6 +160,62 @@ export class InMemoryAnalyticsStore implements IAnalyticsStore {
     }
     return points.sort((a, b) => a.start.localeCompare(b.start) || b.share - a.share);
   }
+
+  async queryTokenPair(query: AnalyticsQuery): Promise<TokenPairPoint[]> {
+    const points: TokenPairPoint[] = [];
+    for (const [start, events] of this.bucketEvents(query)) {
+      // Keyed by `${srcToken}:${dstToken}` so USDC→XLM and XLM→USDC stay apart.
+      const byPair = new Map<string, { srcToken: string; dstToken: string; volume: bigint; fees: bigint }>();
+      for (const event of events) {
+        const key = `${event.srcToken}:${event.dstToken}`;
+        const acc = byPair.get(key) ?? { srcToken: event.srcToken, dstToken: event.dstToken, volume: 0n, fees: 0n };
+        acc.volume += event.volume;
+        acc.fees += event.fees;
+        byPair.set(key, acc);
+      }
+      const iso = new Date(start).toISOString();
+      for (const pair of byPair.values()) {
+        points.push({
+          start: iso,
+          srcToken: pair.srcToken,
+          dstToken: pair.dstToken,
+          volume: pair.volume.toString(),
+          fees: pair.fees.toString(),
+        });
+      }
+    }
+    return points.sort(
+      (a, b) =>
+        a.start.localeCompare(b.start) ||
+        compareVolumeDesc(a.volume, b.volume) ||
+        `${a.srcToken}:${a.dstToken}`.localeCompare(`${b.srcToken}:${b.dstToken}`),
+    );
+  }
+
+  async queryPerSolver(query: AnalyticsQuery): Promise<PerSolverPoint[]> {
+    const points: PerSolverPoint[] = [];
+    for (const [start, events] of this.bucketEvents(query)) {
+      const bySolver = new Map<string, { durationSum: number; volume: bigint; count: number }>();
+      for (const event of events) {
+        const acc = bySolver.get(event.solver) ?? { durationSum: 0, volume: 0n, count: 0 };
+        acc.durationSum += event.durationMs;
+        acc.volume += event.volume;
+        acc.count += 1;
+        bySolver.set(event.solver, acc);
+      }
+      const iso = new Date(start).toISOString();
+      for (const [solver, acc] of bySolver) {
+        points.push({
+          start: iso,
+          solver,
+          avgMs: Math.round(acc.durationSum / acc.count),
+          volume: acc.volume.toString(),
+          count: acc.count,
+        });
+      }
+    }
+    return points.sort((a, b) => a.start.localeCompare(b.start) || a.solver.localeCompare(b.solver));
+  }
 }
 
 /**
@@ -165,6 +255,7 @@ export class TimescaleAnalyticsStore implements IAnalyticsStore {
     ];
     if (query.chain) parts.push(`chain = ${this.lit(query.chain)}`);
     if (query.token) parts.push(`(src_token = ${this.lit(query.token)} OR dst_token = ${this.lit(query.token)})`);
+    if (query.solver) parts.push(`solver = ${this.lit(query.solver)}`);
     return parts.join(" AND ");
   }
 
@@ -229,6 +320,48 @@ export class TimescaleAnalyticsStore implements IAnalyticsStore {
       solver: r.solver,
       volume: String(r.volume),
       share: Number(r.total) === 0 ? 0 : Number(r.volume) / Number(r.total),
+    }));
+  }
+
+  async queryTokenPair(query: AnalyticsQuery): Promise<TokenPairPoint[]> {
+    const rows = await this.prisma.$queryRawUnsafe<
+      { bucket: Date; src_token: string; dst_token: string; volume: string; fees: string }[]
+    >(
+      `SELECT time_bucket('1 ${unit(query.interval)}', bucket) AS bucket, src_token, dst_token,
+              sum(volume) AS volume, sum(fees) AS fees
+       FROM ${this.view(query)}
+       WHERE ${this.where(query)}
+       GROUP BY 1, src_token, dst_token
+       ORDER BY 1, volume DESC, src_token, dst_token`,
+    );
+    return rows.map((r) => ({
+      start: r.bucket.toISOString(),
+      srcToken: r.src_token,
+      dstToken: r.dst_token,
+      volume: String(r.volume),
+      fees: String(r.fees),
+    }));
+  }
+
+  async queryPerSolver(query: AnalyticsQuery): Promise<PerSolverPoint[]> {
+    const rows = await this.prisma.$queryRawUnsafe<
+      { bucket: Date; solver: string; avg_ms: number; volume: string; fills: number }[]
+    >(
+      `SELECT time_bucket('1 ${unit(query.interval)}', bucket) AS bucket, solver,
+              (sum(duration_sum) / sum(fills)) AS avg_ms,
+              sum(volume) AS volume,
+              sum(fills) AS fills
+       FROM ${this.view(query)}
+       WHERE ${this.where(query)}
+       GROUP BY 1, solver
+       ORDER BY 1, solver`,
+    );
+    return rows.map((r) => ({
+      start: r.bucket.toISOString(),
+      solver: r.solver,
+      avgMs: Math.round(Number(r.avg_ms)),
+      volume: String(r.volume),
+      count: Number(r.fills),
     }));
   }
 

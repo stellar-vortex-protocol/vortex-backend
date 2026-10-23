@@ -27,10 +27,12 @@ import {
   HttpException,
   Injectable,
   Logger,
+  Optional,
 } from "@nestjs/common";
 import { Request } from "express";
 import { AbuseScoreService } from "./abuse-score.service";
 import { AllowlistService } from "./allowlist.service";
+import { AccountAgeService } from "./account-age.service";
 import { AbuseContext } from "./abuse.types";
 import { logger as winstonLogger } from "../common/logger";
 import { createHash } from "crypto";
@@ -64,6 +66,7 @@ export class AbuseDetectorGuard implements CanActivate {
   constructor(
     private readonly scorer: AbuseScoreService,
     private readonly allowlist: AllowlistService,
+    @Optional() private readonly accountAge?: AccountAgeService,
   ) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
@@ -80,6 +83,7 @@ export class AbuseDetectorGuard implements CanActivate {
     const intentFingerprint = this.fingerprint(req.body ?? {});
 
     const allowlisted = this.allowlist.isAllowlisted({ userAddress, clientIp, apiKey });
+    const accountAgeSeconds = await this.resolveAccountAge(req, operation);
 
     const abuseCtx: AbuseContext = {
       userAddress,
@@ -90,7 +94,7 @@ export class AbuseDetectorGuard implements CanActivate {
       srcTokenPriceUsd,
       srcTokenDecimals,
       intentFingerprint,
-      accountAgeSeconds: undefined, // future: async Horizon fetch
+      accountAgeSeconds,
       operation,
     };
 
@@ -149,6 +153,24 @@ export class AbuseDetectorGuard implements CanActivate {
     const actor: unknown = req.body?.actor;
     if (typeof actor === "string" && actor.length > 0) return actor.toLowerCase();
     return `ip:${req.ip ?? "unknown"}`;
+  }
+
+  /**
+   * Account age for the `new_address` rule, from a cached Horizon lookup.
+   * Only fetched for intent creation while the rule is enabled. Uses the raw
+   * `user` field because Stellar strkeys are case-sensitive and
+   * `resolveUserAddress` lower-cases. `undefined` (rule stays silent) when the
+   * lookup is unavailable or the user is not a Stellar address.
+   */
+  private async resolveAccountAge(
+    req: Request,
+    operation: AbuseContext["operation"],
+  ): Promise<number | undefined> {
+    if (!this.accountAge || operation !== "create") return undefined;
+    if (!this.scorer.isRuleEnabled("new_address")) return undefined;
+    const user: unknown = req.body?.user;
+    if (typeof user !== "string" || user.length === 0) return undefined;
+    return this.accountAge.getAccountAgeSeconds(user);
   }
 
   private resolveSolverAddress(req: Request): string | undefined {
