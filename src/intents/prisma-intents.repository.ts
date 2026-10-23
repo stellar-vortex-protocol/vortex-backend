@@ -7,6 +7,7 @@ import {
   IntentSearchQuery,
   IntentSearchResult,
   MutationResult,
+  TransitionWriteOptions,
   VersionConflict,
 } from "./intents.repository";
 import { Intent, IntentState, StellarToken, TokenInfo } from "./intents.types";
@@ -48,16 +49,25 @@ export class PrismaIntentsRepository implements IIntentsRepository {
    * older version is dropped silently.
    */
   async saveIfNewer(intent: Intent): Promise<void> {
+    // The mirror replicates decisions the primary store already validated
+    // through the state machine. A previously failed mirror write can leave
+    // the row more than one edge behind, so the catch-up write runs with the
+    // transition trigger's override (issue #406) — it is replication, not a
+    // new transition.
+    await this.withStateOverride((client) => this.saveIfNewerWith(client, intent));
+  }
+
+  private async saveIfNewerWith(client: IntentsPrismaClient, intent: Intent): Promise<void> {
     const data = this.toDbData(intent);
-    const updated = await this.prisma.intent.updateMany({
+    const updated = await client.intent.updateMany({
       where: { intentId: intent.intentId, version: { lt: intent.version ?? 0 } },
       data,
     });
     if (updated.count > 0) return;
-    const existing = await this.prisma.intent.findUnique({ where: { intentId: intent.intentId } });
+    const existing = await client.intent.findUnique({ where: { intentId: intent.intentId } });
     if (existing) return; // stored version is equal or newer — keep it.
     try {
-      await this.prisma.intent.create({ data: { ...data, intentId: intent.intentId } });
+      await client.intent.create({ data: { ...data, intentId: intent.intentId } });
     } catch (err) {
       // P2002 = a concurrent writer created the row first; their version wins.
       if ((err as Prisma.PrismaClientKnownRequestError).code !== "P2002") throw err;
@@ -507,7 +517,60 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     return row ? this.fromRow(row) : null;
   }
 
+  /**
+   * Guarded state change for edges without a dedicated method (issue #406):
+   * park, confirm and — with `options.override` — compensation edges. The
+   * `state = from` predicate makes it race-free; the database trigger then
+   * re-checks the edge against `intent_state_transitions`.
+   */
+  async transitionIf(
+    id: string,
+    from: IntentState,
+    patch: IntentPatch & { state: IntentState },
+    options?: TransitionWriteOptions,
+  ): Promise<MutationResult> {
+    const write = async (client: IntentsPrismaClient) => {
+      const result = await client.intent.updateMany({
+        where: { intentId: id, state: this.toPrismaState(from) },
+        data: { ...this.toDbPatch(patch), version: { increment: 1 } },
+      });
+      if (result.count === 0) return null;
+      const row = await client.intent.findUnique({ where: { intentId: id } });
+      return row ? this.fromRow(row) : null;
+    };
+    return options?.override ? this.withStateOverride(write) : write(this.prisma);
+  }
+
   // ── Private helpers ────────────────────────────────────────────────────────
+
+  /**
+   * Run `fn` with the transaction-local `vortex.intent_state_override` flag
+   * set, so the `intents_enforce_state_transition` trigger accepts the write
+   * (issue #406). Opens a transaction when given the root client; inside a
+   * caller's transaction it sets the flag, runs `fn` and clears it again so the
+   * rest of that transaction stays guarded. Clients without raw SQL (unit-test
+   * fakes) just run `fn`.
+   */
+  private async withStateOverride<T>(fn: (client: IntentsPrismaClient) => Promise<T>): Promise<T> {
+    const root = this.prisma as unknown as {
+      $transaction?: (cb: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T>;
+      $executeRaw?: (q: TemplateStringsArray, ...v: unknown[]) => Promise<unknown>;
+    };
+    if (typeof root.$transaction === "function") {
+      return root.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('vortex.intent_state_override', 'on', true)`;
+        return fn(tx);
+      });
+    }
+    if (typeof root.$executeRaw !== "function") return fn(this.prisma);
+    await root.$executeRaw`SELECT set_config('vortex.intent_state_override', 'on', true)`;
+    try {
+      return await fn(this.prisma);
+    } finally {
+      await root.$executeRaw`SELECT set_config('vortex.intent_state_override', 'off', true)`;
+    }
+  }
+
 
   /**
    * Classify a zero-row conditional update (issue #405): a stale

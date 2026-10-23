@@ -110,6 +110,9 @@ Four stages, each with a distinct failure mode to design against:
 
 ## `IntentState` → contract call mapping
 
+> The full transition table, and how it is enforced in TypeScript and in
+> Postgres, is in [intent-state-machine.md](intent-state-machine.md) (issue #406).
+
 | `IntentState` transition | Trigger | Contract call |
 |---|---|---|
 | *(none)* → `open` | `POST /api/v1/intents` | Settlement contract: register intent |

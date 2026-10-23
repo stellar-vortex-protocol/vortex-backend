@@ -134,6 +134,9 @@ describe("ReconcilerService", () => {
         BASE_INTENT.intentId,
         expect.any(String),
         expect.objectContaining({ fillAmount: "995000000" }),
+        undefined,
+        // Issue #406: the repair is audited by the state machine itself.
+        expect.objectContaining({ actor: "reconciler", reason: "reconciler: state_mismatch repair" }),
       );
     });
 

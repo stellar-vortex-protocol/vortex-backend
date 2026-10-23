@@ -476,9 +476,6 @@ export class IntentsController {
       throw new ConflictException(`Intent is ${current?.state ?? "unknown"}, cannot accept`);
     }
 
-    this.intentsService.appendAuditEntry(id, "accepted", dto.solver, "solver accepted", {
-      deadline: updated.deadline,
-    });
     this.intentsGateway.broadcast({
       type: "intent_accepted",
       intentId: id,
@@ -553,10 +550,6 @@ export class IntentsController {
     // pass the amount so `totalVolume` tracks the fill ledger.
     await this.solversService.recordSuccessfulFill(dto.solver, dto.fillAmount);
 
-    this.intentsService.appendAuditEntry(id, "filled", dto.solver, "solver filled", {
-      fillAmount: dto.fillAmount,
-      txHash: dto.txHash,
-    });
     this.intentsGateway.broadcast({
       type: "intent_filled",
       intentId: id,
@@ -583,14 +576,12 @@ export class IntentsController {
     // Verify the user controls the claimed address
     verifyStellarSignature(dto.user, buildCancelMessage(id), dto.signature);
 
-    const updated = await this.intentsService.cancelIfOpen(id);
+    // Audit trail (issue #217 / #406): the service records who cancelled.
+    const updated = await this.intentsService.cancelIfOpen(id, { actor: dto.user, reason: "user cancelled" });
     if (!updated) {
       const current = await this.intentsService.get(id);
       throw new ConflictException(`Cannot cancel intent in state: ${current?.state ?? "unknown"}`);
     }
-
-    // Audit trail (issue #217 / #62): record who cancelled and when.
-    this.intentsService.appendAuditEntry(id, "cancelled", dto.user, "user cancelled");
 
     this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
     return updated;

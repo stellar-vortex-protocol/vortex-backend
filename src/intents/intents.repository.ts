@@ -258,6 +258,31 @@ export interface IIntentsRepository {
     patch: { slashedAt: number; slashReason: string },
     expectedVersion?: number,
   ): MaybePromise<MutationResult>;
+
+  /**
+   * Generic guarded state change used by the state machine (issue #406) for
+   * edges without a dedicated method (park, confirm, compensation):
+   *   UPDATE intents SET …patch, version = version + 1
+   *   WHERE intent_id = $1 AND state = $from RETURNING *
+   * Returns `null` when the intent is absent or no longer in `from`.
+   *
+   * `options.override` marks a compensation edge: the Prisma adapter sets the
+   * transaction-local `vortex.intent_state_override` flag so the database
+   * trigger lets it through. Callers must have validated the edge with
+   * `transition()` first — this method does not consult the table.
+   */
+  transitionIf(
+    id: string,
+    from: IntentState,
+    patch: IntentPatch & { state: IntentState },
+    options?: TransitionWriteOptions,
+  ): MaybePromise<MutationResult>;
+}
+
+/** Options for {@link IIntentsRepository.transitionIf}. */
+export interface TransitionWriteOptions {
+  /** Bypass the database transition trigger for this write (compensations only). */
+  override?: boolean;
 }
 
 /** Options for {@link InMemoryIntentsRepository}. */
@@ -493,6 +518,15 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
       (i) => i.state === "accepted",
       (i) => ({ ...i, ...patch, state: "slashed" }),
     );
+  }
+
+  transitionIf(
+    id: string,
+    from: IntentState,
+    patch: IntentPatch & { state: IntentState },
+    _options?: TransitionWriteOptions,
+  ): MutationResult {
+    return this.mutate(id, undefined, (i) => i.state === from, (i) => ({ ...i, ...patch }));
   }
 
   /**

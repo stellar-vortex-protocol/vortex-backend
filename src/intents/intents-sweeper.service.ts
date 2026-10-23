@@ -182,15 +182,12 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async expireOpen(intent: Intent, now: number): Promise<boolean> {
-    const expired = await this.intentsService.expireIfOpen(intent.intentId);
+    const expired = await this.intentsService.expireIfOpen(intent.intentId, {
+      actor: "system",
+      reason: "deadline passed",
+      metadata: { deadline: intent.deadline, sweepedAt: now },
+    });
     if (!expired) return false;
-    this.intentsService.appendAuditEntry(
-      intent.intentId,
-      "expired",
-      "system",
-      "deadline passed",
-      { deadline: intent.deadline, sweepedAt: now },
-    );
     await this.intentsGateway.broadcast({ type: "intent_expired", intentId: intent.intentId });
     return true;
   }
@@ -249,15 +246,12 @@ export class IntentsSweeperService implements OnModuleInit, OnModuleDestroy {
 
     // Atomic guard: a concurrent solver fill() may have already transitioned
     // this intent out of "accepted" — skip slashing if so (fill wins).
-    const slashed = await this.intentsService.slashIfAccepted(intentId, {
-      slashedAt: now,
-      slashReason: reason,
-    });
+    const slashed = await this.intentsService.slashIfAccepted(
+      intentId,
+      { slashedAt: now, slashReason: reason },
+      { actor: "system", reason, metadata: { solver, slashedAt: now } },
+    );
     if (!slashed) return false;
-    this.intentsService.appendAuditEntry(intentId, "slashed", "system", reason, {
-      solver,
-      slashedAt: now,
-    });
     await this.intentsGateway.broadcast({ type: "intent_slashed", intentId, solver, reason });
 
     if (!solver) {

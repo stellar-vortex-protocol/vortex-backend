@@ -16,6 +16,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:scripts": "jest --config scripts/jest.config.js",
     "check:migrations": "tsx scripts/check-migrations.ts",
+    "check:state-machine": "tsx scripts/check-state-machine.ts",
     "test:ci": "node scripts/ci/run-tests.mjs --suite=unit",
     "test:e2e:ci": "node scripts/ci/run-tests.mjs --suite=e2e",
     "coverage:merge": "node scripts/ci/coverage-merge.mjs",

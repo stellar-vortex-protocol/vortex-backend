@@ -28,6 +28,7 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
 ## [Unreleased]
 
 ### Added
+- Intent state machine is now one declarative table (`TRANSITION_TABLE` in `src/intents/state-machine.ts`) with a pure `transition()` planner. Every state change made by `IntentsService` is planned through it and audited by it, and a Postgres `BEFORE UPDATE` trigger rejects any `intents.state` change not in the generated `intent_state_transitions` table. Slash rollbacks use an explicit override. `npm run check:state-machine` guards TS/SQL drift (Closes #406).
 - Protocol fee engine with pair > chain > default rules, volume tiers, integrator referral share, and a double-entry fee ledger. Quotes include the fee split and rule version. Treasury stats read the ledger once it has postings (Closes #438).
 - Deadline jobs `expire-intent` and `fill-window-expired` replace the 30s sweeper poll. A safety sweep (`SAFETY_SWEEP_INTERVAL_MS`, default 5 min) catches lost jobs and increments `vortex_sweeper_safety_caught_total` (Closes #437).
 - `scripts/generate-client.ts` — generates a typed TypeScript API client from the live

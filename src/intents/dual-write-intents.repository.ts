@@ -6,6 +6,7 @@ import {
   IntentPatch,
   isVersionConflict,
   MutationResult,
+  TransitionWriteOptions,
 } from "./intents.repository";
 import { PrismaIntentsRepository } from "./prisma-intents.repository";
 import { Intent, IntentState } from "./intents.types";
@@ -179,6 +180,15 @@ export class DualWriteIntentsRepository implements IIntentsRepository {
     expectedVersion?: number,
   ): Promise<MutationResult> {
     return this.mirrored("slashIfAccepted", this.primary.slashIfAccepted(id, patch, expectedVersion));
+  }
+
+  transitionIf(
+    id: string,
+    from: IntentState,
+    patch: IntentPatch & { state: IntentState },
+    options?: TransitionWriteOptions,
+  ): Promise<MutationResult> {
+    return this.mirrored("transitionIf", this.primary.transitionIf(id, from, patch, options));
   }
 
   private async mirrored(operation: string, result: MutationResult): Promise<MutationResult> {

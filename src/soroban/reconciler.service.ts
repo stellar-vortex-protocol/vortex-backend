@@ -285,25 +285,22 @@ export class ReconcilerService {
                 fillAmount: onChain.fillAmount?.toString() ?? "0",
                 filledAt: Math.floor(Date.now() / 1000),
               },
+              undefined,
+              {
+                actor,
+                reason: "reconciler: state_mismatch repair",
+                metadata: { onChainState: onChain.state, onChainSolver: onChain.solver },
+              },
             );
-            if (result) {
-              this.intentsService.appendAuditEntry(intentId, "filled", actor, "reconciler: state_mismatch repair", {
-                onChainState: onChain.state,
-                onChainSolver: onChain.solver,
-              });
-              return true;
-            }
-            return false;
+            return result !== null;
           }
           case "cancelled": {
-            const result = await this.intentsService.cancelIfOpen(intentId);
-            if (result) {
-              this.intentsService.appendAuditEntry(intentId, "cancelled", actor, "reconciler: state_mismatch repair", {
-                onChainState: onChain.state,
-              });
-              return true;
-            }
-            return false;
+            const result = await this.intentsService.cancelIfOpen(intentId, {
+              actor,
+              reason: "reconciler: state_mismatch repair",
+              metadata: { onChainState: onChain.state },
+            });
+            return result !== null;
           }
           default:
             this.logger.warn(
@@ -315,14 +312,12 @@ export class ReconcilerService {
 
       case "solver_mismatch": {
         // Accept with the correct solver if currently open
-        const result = await this.intentsService.acceptIfOpen(intentId, onChain.solver ?? "");
-        if (result) {
-          this.intentsService.appendAuditEntry(intentId, "accepted", actor, "reconciler: solver_mismatch repair", {
-            onChainSolver: onChain.solver,
-          });
-          return true;
-        }
-        return false;
+        const result = await this.intentsService.acceptIfOpen(intentId, onChain.solver ?? "", undefined, {
+          actor,
+          reason: "reconciler: solver_mismatch repair",
+          metadata: { onChainSolver: onChain.solver },
+        });
+        return result !== null;
       }
 
       case "missing_locally":
