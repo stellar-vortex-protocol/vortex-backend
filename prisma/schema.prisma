@@ -847,6 +847,22 @@ model SignatureNonce {
   @@map("signature_nonces")
 }
 
+// ─── CanaryAddress (issue #710) ──────────────────────────────────────────────
+// Runtime-manageable registry of synthetic canary addresses. Seeded once from
+// the CANARY_ADDRESSES env var on first boot when the table is empty; managed
+// afterwards via /api/v1/admin/canary-addresses. Read through a short-TTL
+// in-memory cache so stats requests do not hit Postgres on every call.
+
+model CanaryAddress {
+  /// Canary account address (Stellar / EVM), used as the natural primary key.
+  address String   @id @map("address")
+  addedAt DateTime @default(now()) @map("added_at") @db.Timestamptz
+  /// Admin principal id that added the address, or "system" for the env seed.
+  addedBy String   @map("added_by")
+
+  @@map("canary_addresses")
+}
+
 // ─── Price history (price-feed worker, issue #566) ────────────────────────────
 // Append-only series backing the extreme-move circuit breaker; `tokens.price_usd`
 // holds the latest value, this table keeps the trail.

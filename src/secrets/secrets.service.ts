@@ -68,6 +68,8 @@ export class SecretsService implements OnModuleInit, OnModuleDestroy {
   private watchHandle: SecretsWatchHandle | null = null;
   private secretCache = new Map<string, SecretVersion>();
   private previousVersions = new Map<string, SecretVersion>();
+  /** Epoch ms when each secret was last loaded or rotated. */
+  private loadedAt = new Map<string, number>();
   private readonly secretConfigs: SecretConfig[];
   private readonly mappings: SecretMapping[];
   private readonly eventEmitter = new SimpleEventEmitter();
@@ -203,6 +205,7 @@ export class SecretsService implements OnModuleInit, OnModuleDestroy {
 
     // Update cache with new version
     this.secretCache.set(event.name, event.newVersion);
+    this.loadedAt.set(event.name, Date.now());
 
     // Emit event for consumers (JWT, DB pool, etc.)
     this.eventEmitter.emit(SECRET_ROTATED_EVENT, event);
@@ -213,8 +216,10 @@ export class SecretsService implements OnModuleInit, OnModuleDestroy {
     const names = this.secretConfigs.map((c) => c.name);
     const results = await this.provider.getSecrets(names);
 
+    const now = Date.now();
     for (const [name, version] of results) {
       this.secretCache.set(name, version);
+      this.loadedAt.set(name, now);
     }
 
     // Check for missing required secrets
@@ -258,6 +263,33 @@ export class SecretsService implements OnModuleInit, OnModuleDestroy {
   /** Check if a secret exists in the cache. */
   hasSecret(name: string): boolean {
     return this.secretCache.has(name);
+  }
+
+  /**
+   * Build a redacted status snapshot for operators (issue #709).
+   *
+   * Never includes secret values or raw version identifiers — only the
+   * logical name, whether it is required, when it was last loaded/rotated,
+   * and whether a previous version is still held for the rotation overlap.
+   */
+  getStatusSnapshot(): {
+    provider: string;
+    secrets: Array<{
+      name: string;
+      required: boolean;
+      loadedAt: number | null;
+      hasPreviousVersion: boolean;
+    }>;
+  } {
+    return {
+      provider: this.getProviderName(),
+      secrets: this.secretConfigs.map((cfg) => ({
+        name: cfg.name,
+        required: cfg.required,
+        loadedAt: this.loadedAt.get(cfg.name) ?? null,
+        hasPreviousVersion: this.previousVersions.has(cfg.name),
+      })),
+    };
   }
 
   /** Subscribe to secret rotation events. */
