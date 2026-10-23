@@ -1,4 +1,5 @@
-import { BadRequestException, Inject, Injectable } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
+import { CacheService } from "../cache/cache.service";
 import { SUPPORTED_TOKENS, StellarToken } from "./tokens.data";
 import { SupportedChain } from "../intents/intents.types";
 import { ITokensRepository, TOKENS_REPOSITORY, TokenRecord, TokenStatus } from "./tokens.repository";
@@ -46,12 +47,42 @@ export interface TokensByChainResponse {
   stellarTokens?: ApiToken[];
 }
 
+/**
+ * Token registry reads are near-static, so they are cached for minutes and
+ * dropped on every registry write or price refresh (issue #414).
+ */
+const TOKENS_CACHE_TTL_SECONDS = 300;
+
 @Injectable()
 export class TokensService {
   constructor(
     @Inject(TOKENS_REPOSITORY)
     private readonly repo: ITokensRepository,
+    /** Read cache (issue #414). Optional so unit harnesses can omit it. */
+    @Optional() private readonly cache?: CacheService,
   ) {}
+
+  /** Cache-aside wrapper over the registry; falls through when no cache is wired. */
+  private cached<T>(key: string, load: () => Promise<T> | T): Promise<T> {
+    if (!this.cache) return Promise.resolve(load());
+    return this.cache.getOrLoad("tokens", key, TOKENS_CACHE_TTL_SECONDS, async () => load());
+  }
+
+  private findRecord(address: string, chain: string): Promise<TokenRecord | undefined> {
+    // Key on the exact address: the repository decides case sensitivity, and
+    // folding case here could serve one spelling's miss for another's hit.
+    return this.cached(`record:${chain}:${address}`, () =>
+      this.repo.findByAddressAndChain(address, chain),
+    );
+  }
+
+  private findByChain(chain: string): Promise<TokenRecord[]> {
+    return this.cached(`chain:${chain}`, () => this.repo.findByChain(chain));
+  }
+
+  private findAll(): Promise<TokenRecord[]> {
+    return this.cached("all", () => this.repo.findAll());
+  }
 
   /**
    * Look up a source token by chain + address/contract.
@@ -66,7 +97,7 @@ export class TokensService {
    * @param address Token contract/address string
    */
   async resolveSrcToken(chain: SupportedChain, address: string): Promise<ResolvedSrcToken | undefined> {
-    const token = await this.repo.findByAddressAndChain(address, chain);
+    const token = await this.findRecord(address, chain);
     if (!token) return undefined;
     return this.toResolvedSrcToken(token, chain);
   }
@@ -77,7 +108,7 @@ export class TokensService {
    * Returns `undefined` when no match is found.
    */
   async resolveDstToken(contract: string): Promise<ResolvedDstToken | undefined> {
-    const token = await this.repo.findByAddressAndChain(contract, "stellar");
+    const token = await this.findRecord(contract, "stellar");
     if (!token) return undefined;
     return {
       kind: "dst",
@@ -104,7 +135,7 @@ export class TokensService {
     chain: SupportedChain,
     address: string,
   ): Promise<ResolvedSrcToken> {
-    const record = await this.repo.findByAddressAndChain(address, chain);
+    const record = await this.findRecord(address, chain);
     if (!record) {
       throw new BadRequestException(
         `Unknown source token '${address}' for chain '${chain}' in the configured token registry`,
@@ -191,7 +222,7 @@ export class TokensService {
     const requested = chain?.toLowerCase();
 
     if (requested === "stellar") {
-      const records = this.hideDelisted(await this.repo.findByChain("stellar"));
+      const records = this.hideDelisted(await this.findByChain("stellar"));
       return {
         tokens: records.map((record) => this.toApiToken(record)),
         chain: "stellar",
@@ -199,7 +230,7 @@ export class TokensService {
     }
 
     if (requested && requested in SUPPORTED_TOKENS) {
-      const records = this.hideDelisted(await this.repo.findByChain(requested));
+      const records = this.hideDelisted(await this.findByChain(requested));
       return {
         tokens: records
           .filter((record) => record.chain === requested)
@@ -208,7 +239,7 @@ export class TokensService {
       };
     }
 
-    const all = this.hideDelisted(await this.repo.findAll());
+    const all = this.hideDelisted(await this.findAll());
 
     // Bucket by chain, pre-seeding a key for every chain the static registry
     // declares so a chain with no rows still appears as an empty array rather
@@ -231,7 +262,7 @@ export class TokensService {
   }
 
   async getStellarTokens(): Promise<{ tokens: StellarToken[] }> {
-    const records = await this.repo.findByChain("stellar");
+    const records = await this.findByChain("stellar");
     return {
       tokens: records.map((record) => ({
         contract: record.address,

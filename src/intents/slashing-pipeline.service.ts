@@ -417,14 +417,13 @@ export class SlashingPipelineService implements OnModuleInit, OnModuleDestroy {
 
     await this.solversService.rollbackPenalty(slash.intentId, slash.solverAddress);
 
-    const intent = await this.intentsService.get(slash.intentId);
-    if (intent?.state === "slashed") {
-      if (reason === "fill_landed") {
-        await this.intentsService.update(slash.intentId, { state: "filled", txHash: extra.fillTxHash });
-      } else {
-        await this.intentsService.update(slash.intentId, { state: "expired" });
-      }
-    }
+    // Issue #417: the state change and the compensating `reversed` fill row
+    // (plus a `filled` row when the fill landed) commit together.
+    await this.intentsService.settleCancelledSlash(
+      slash.intentId,
+      reason === "fill_landed" ? "filled" : "expired",
+      extra.fillTxHash,
+    );
     const toState = reason === "fill_landed" ? "filled" : "expired";
     this.intentsService.appendAuditEntry(slash.intentId, toState, actor, `slash cancelled: ${reason}`, {
       solver: slash.solverAddress,

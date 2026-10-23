@@ -4,8 +4,10 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { CacheService } from "../cache/cache.service";
 import { LeaderElectionService, Singleton } from "../common/leader-election";
 import { KillSwitchService } from "../killswitch/killswitch.service";
 import { PrismaService } from "../prisma/prisma.service";
@@ -27,6 +29,8 @@ export class PriceFeedWorker implements OnModuleInit, OnModuleDestroy {
     private readonly killSwitch: KillSwitchService,
     private readonly leaderElection: LeaderElectionService,
     private readonly config: ConfigService,
+    /** Read cache (issue #414): token lists and quote inputs carry prices. */
+    @Optional() private readonly cache?: CacheService,
   ) {}
 
   onModuleInit(): void {
@@ -107,6 +111,8 @@ export class PriceFeedWorker implements OnModuleInit, OnModuleDestroy {
         );
       }
     }
+
+    if (updated > 0) await this.cache?.invalidate("tokens");
 
     if (extremeMoves.length > 0) {
       const move = extremeMoves[0];

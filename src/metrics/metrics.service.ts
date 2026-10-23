@@ -177,6 +177,20 @@ export class MetricsService implements OnModuleInit {
   /** Refusals to escalate past `maxFeeStroops` (page on any increase). */
   public readonly txFeeBumpCeilingHits: client.Counter<string>;
 
+  // ── Read-path cache (issue #414) ──────────────────────────────────────────
+  /** `vortex_cache_requests_total{keyspace,result}` — hit / miss / coalesced / error / bypass. */
+  public readonly cacheRequests: client.Counter<string>;
+  /** `vortex_cache_invalidations_total{keyspace,source}` — local vs. received over pub/sub. */
+  public readonly cacheInvalidations: client.Counter<string>;
+
+  // ── Materialised stats views (issue #416) ─────────────────────────────────
+  /** `vortex_stats_view_refresh_duration_seconds{view,outcome}`. */
+  public readonly statsViewRefreshDuration: client.Histogram<string>;
+
+  // ── Durable idempotency keys (issue #418) ─────────────────────────────────
+  /** `vortex_idempotency_requests_total{route,outcome}` — created / replayed / conflict / mismatch / released. */
+  public readonly idempotencyRequests: client.Counter<string>;
+
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.register = new client.Registry();
     const prefix = "vortex_";
@@ -647,6 +661,35 @@ export class MetricsService implements OnModuleInit {
     this.txFeeBumpCeilingHits = new client.Counter({
       name: `${prefix}tx_fee_bump_ceiling_hits_total`,
       help: "Refusals to escalate past the configured max fee (stroops/op)",
+      registers: [this.register],
+    });
+
+    this.cacheRequests = new client.Counter({
+      name: `${prefix}cache_requests_total`,
+      help: "Read-cache lookups by keyspace and result (hit, miss, coalesced, error, bypass)",
+      labelNames: ["keyspace", "result"],
+      registers: [this.register],
+    });
+
+    this.cacheInvalidations = new client.Counter({
+      name: `${prefix}cache_invalidations_total`,
+      help: "Cache keyspace invalidations, local or received from another replica",
+      labelNames: ["keyspace", "source"],
+      registers: [this.register],
+    });
+
+    this.statsViewRefreshDuration = new client.Histogram({
+      name: `${prefix}stats_view_refresh_duration_seconds`,
+      help: "Duration of REFRESH MATERIALIZED VIEW CONCURRENTLY for the stats read models",
+      labelNames: ["view", "outcome"],
+      buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60],
+      registers: [this.register],
+    });
+
+    this.idempotencyRequests = new client.Counter({
+      name: `${prefix}idempotency_requests_total`,
+      help: "Requests carrying an Idempotency-Key, by route and outcome",
+      labelNames: ["route", "outcome"],
       registers: [this.register],
     });
   }

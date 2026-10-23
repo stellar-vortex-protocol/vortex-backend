@@ -866,3 +866,79 @@ model AbuseAllowlistEntry {
   @@unique([type, value])
   @@map("abuse_allowlist_entries")
 }
+
+// ─── SolverFill (issue #417) ─────────────────────────────────────────────────
+// Immutable per-outcome row written in the same transaction as the
+// accepted → filled / accepted → slashed transition. Solver stats (windows,
+// p50/p95 fill times, USD volume) are derived from this table; the mutable
+// counters on `solvers` remain as a compatibility projection only.
+// DDL + one-time backfill: 20261020000000_solver_fills.
+
+enum SolverFillOutcome {
+  filled
+  failed
+  /// Compensating row: the slashing saga cancelled an earlier `failed` row.
+  /// Written with the failed row's timestamp so both land in the same window.
+  reversed
+
+  @@map("solver_fill_outcome")
+}
+
+model SolverFill {
+  id          BigInt            @id @default(autoincrement()) @map("id")
+  intentId    String            @map("intent_id")
+  solver      String            @map("solver")
+  /// Source chain of the intent.
+  chain       SupportedChain    @map("chain")
+  srcAmount   Decimal           @map("src_amount") @db.Decimal(78, 0)
+  /// Delivered destination amount; NULL for a failed fill.
+  dstAmount   Decimal?          @map("dst_amount") @db.Decimal(78, 0)
+  /// USD value snapshotted from the price oracle when the row was written.
+  usdValue    Decimal?          @map("usd_value") @db.Decimal(38, 8)
+  /// Seconds from intent creation to fill; NULL for a failed fill.
+  fillSeconds Int?              @map("fill_seconds")
+  outcome     SolverFillOutcome @map("outcome")
+  ledger      Int?              @map("ledger")
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz
+
+  /// One row per outcome per intent: replayed transitions never double-count.
+  @@unique([intentId, outcome], name: "intentOutcome", map: "solver_fills_intent_outcome_key")
+  @@index([solver, createdAt], name: "solver_fills_solver_created_idx")
+  @@index([createdAt], name: "solver_fills_created_idx")
+  @@map("solver_fills")
+}
+
+// ─── IdempotencyKey (issue #418) ─────────────────────────────────────────────
+// Durable, cross-replica Idempotency-Key store for POST /intents and the
+// accept / fill / cancel writes. Keyed on (key, scope, principal) where scope
+// is "<METHOD> <route pattern>". A crashed request leaves its row
+// `in_progress` until `locked_until`, after which a retry may take it over.
+// DDL: 20261020000001_idempotency_keys.
+
+enum IdempotencyKeyStatus {
+  in_progress
+  completed
+
+  @@map("idempotency_key_status")
+}
+
+model IdempotencyKey {
+  key                 String               @map("key")
+  scope               String               @map("scope")
+  principal           String               @map("principal")
+  /// SHA-256 of method, path and canonical JSON body.
+  requestHash         String               @map("request_hash")
+  status              IdempotencyKeyStatus @map("status")
+  /// Stored response, replayed byte-for-byte (NULL while in progress).
+  responseStatus      Int?                 @map("response_status")
+  responseBody        String?              @map("response_body")
+  responseContentType String?              @map("response_content_type")
+  /// Lease end while in progress.
+  lockedUntil         DateTime?            @map("locked_until") @db.Timestamptz
+  createdAt           DateTime             @default(now()) @map("created_at") @db.Timestamptz
+  expiresAt           DateTime             @map("expires_at") @db.Timestamptz
+
+  @@id([key, scope, principal])
+  @@index([expiresAt], name: "idempotency_keys_expires_idx")
+  @@map("idempotency_keys")
+}
