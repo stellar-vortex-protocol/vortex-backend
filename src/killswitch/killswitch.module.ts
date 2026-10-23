@@ -1,6 +1,7 @@
 import { Global, Module } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { KillSwitchController } from "./killswitch.controller";
+import { KillSwitchStatusController } from "./killswitch-status.controller";
 import { KillSwitchGuard } from "./killswitch.guard";
 import { KillSwitchService } from "./killswitch.service";
 import { OperatorGuard } from "./operator.guard";
@@ -34,7 +35,7 @@ export const KILL_SWITCH_WS_BINDING = Symbol("KILL_SWITCH_WS_BINDING");
 @Global()
 @Module({
   imports: [IntentsModule],
-  controllers: [KillSwitchController],
+  controllers: [KillSwitchController, KillSwitchStatusController],
   providers: [
     KillSwitchService,
     KillSwitchGuard,

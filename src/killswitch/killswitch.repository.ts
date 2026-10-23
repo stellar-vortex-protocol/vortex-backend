@@ -2,6 +2,8 @@ import { Injectable } from "@nestjs/common";
 import {
   KillSwitchOperation,
   KillSwitchScope,
+  ScheduledKillSwitchWindow,
+  ScheduledWindowState,
   SwitchSnapshotEntry,
   scopeKey,
 } from "./killswitch.types";
@@ -60,6 +62,73 @@ export interface KillSwitchRepository {
 
   /** Approvers recorded so far, for the operator status endpoint. */
   listApprovals(id: string): string[] | Promise<string[]>;
+
+  /**
+   * Persist a one-shot scheduled maintenance window. The row starts in the
+   * `pending` state and is picked up by the background scheduler once
+   * `scheduledAt` passes.
+   */
+  createScheduled(
+    input: CreateScheduledInput,
+  ): ScheduledKillSwitchWindow | Promise<ScheduledKillSwitchWindow>;
+
+  /**
+   * Scheduled windows that are still relevant to the operator status endpoint:
+   * `pending` (upcoming) and `active` (currently pausing a scope).
+   */
+  listScheduled(
+    filter?: ListScheduledFilter,
+  ): ScheduledKillSwitchWindow[] | Promise<ScheduledKillSwitchWindow[]>;
+
+  /**
+   * Atomically claim the next `pending` window whose `scheduledAt` has passed
+   * and transition it to `active`. Returns the claimed window, or null when
+   * there is nothing due (or another replica already claimed it).
+   */
+  claimDueActivation(
+    now: number,
+  ): ScheduledKillSwitchWindow | null | Promise<ScheduledKillSwitchWindow | null>;
+
+  /**
+   * Atomically claim the next `active` window whose `autoResumeAt` has passed
+   * and transition it to `completed`. Returns the claimed window, or null when
+   * there is nothing due (or another replica already claimed it).
+   */
+  claimDueAutoResume(
+    now: number,
+  ): ScheduledKillSwitchWindow | null | Promise<ScheduledKillSwitchWindow | null>;
+
+  /**
+   * Resolved (no-longer-active) switches with a non-null `resumedAt`, newest
+   * first. Backs the public status-history endpoint; `since` is an inclusive
+   * lower bound on `resumedAt` (unix epoch ms) and `chain` narrows to one chain.
+   */
+  listResolved(
+    since: number | undefined,
+    chain: string | undefined,
+  ): KillSwitchRecord[] | Promise<KillSwitchRecord[]>;
+}
+
+export interface CreateScheduledInput {
+  scope: KillSwitchScope;
+  chain: string | null;
+  token: string | null;
+  operation: KillSwitchOperation | null;
+  reasonCode: string;
+  reason: string;
+  scheduledBy: string;
+  /** Unix epoch ms at which the pause should activate. */
+  scheduledAt: number;
+  /** Unix epoch ms at which the pause should auto-resume. */
+  autoResumeAt: number;
+  /** Unix epoch ms; defaults to now in the adapters. */
+  now: number;
+}
+
+export interface ListScheduledFilter {
+  /** Restrict to these states; defaults to `pending` + `active`. */
+  states?: ScheduledWindowState[];
+  chain?: string | null;
 }
 
 export interface ActivateInput {
@@ -85,6 +154,8 @@ export interface ActivateInput {
 @Injectable()
 export class InMemoryKillSwitchRepository implements KillSwitchRepository {
   private readonly list = new Map<string, KillSwitchRecord>();
+  private readonly scheduled = new Map<string, ScheduledKillSwitchWindow>();
+  private scheduledSeq = 0;
 
   private static key(input: {
     scope: KillSwitchScope;
@@ -173,6 +244,7 @@ export class InMemoryKillSwitchRepository implements KillSwitchRepository {
 
     record.active = false;
     record.updatedAt = now;
+    record.resumedAt = now;
     record.approvers = [];
     void note;
     return record;
@@ -181,5 +253,68 @@ export class InMemoryKillSwitchRepository implements KillSwitchRepository {
   listApprovals(id: string): string[] {
     const record = [...this.list.values()].find((candidate) => candidate.id === id);
     return record ? [...record.approvers] : [];
+  }
+
+  createScheduled(input: CreateScheduledInput): ScheduledKillSwitchWindow {
+    this.scheduledSeq += 1;
+    const window: ScheduledKillSwitchWindow = {
+      id: `ksw_${this.scheduledSeq}`,
+      scope: input.scope,
+      chain: input.chain,
+      token: input.token,
+      operation: input.operation,
+      reasonCode: input.reasonCode,
+      reason: input.reason,
+      scheduledBy: input.scheduledBy,
+      scheduledAt: input.scheduledAt,
+      autoResumeAt: input.autoResumeAt,
+      state: "pending",
+      activatedSwitchId: null,
+      createdAt: input.now,
+      updatedAt: input.now,
+    };
+    this.scheduled.set(window.id, window);
+    return { ...window };
+  }
+
+  listScheduled(filter?: ListScheduledFilter): ScheduledKillSwitchWindow[] {
+    const states = filter?.states ?? ["pending", "active"];
+    const chain = filter?.chain;
+    return [...this.scheduled.values()]
+      .filter((window) => states.includes(window.state))
+      .filter((window) => (chain === undefined ? true : window.chain === chain))
+      .sort((a, b) => a.scheduledAt - b.scheduledAt)
+      .map((window) => ({ ...window }));
+  }
+
+  claimDueActivation(now: number): ScheduledKillSwitchWindow | null {
+    // Conditional transition: only a row still in `pending` may be claimed, so
+    // a second replica (or a double-fire) sees the updated state and no-ops.
+    const due = [...this.scheduled.values()]
+      .filter((window) => window.state === "pending" && window.scheduledAt <= now)
+      .sort((a, b) => a.scheduledAt - b.scheduledAt)[0];
+    if (!due) return null;
+    due.state = "active";
+    due.updatedAt = now;
+    return { ...due };
+  }
+
+  claimDueAutoResume(now: number): ScheduledKillSwitchWindow | null {
+    const due = [...this.scheduled.values()]
+      .filter((window) => window.state === "active" && window.autoResumeAt <= now)
+      .sort((a, b) => a.autoResumeAt - b.autoResumeAt)[0];
+    if (!due) return null;
+    due.state = "completed";
+    due.updatedAt = now;
+    return { ...due };
+  }
+
+  listResolved(since: number | undefined, chain: string | undefined): KillSwitchRecord[] {
+    return [...this.list.values()]
+      .filter((record) => !record.active && record.resumedAt != null)
+      .filter((record) => (since === undefined ? true : (record.resumedAt as number) >= since))
+      .filter((record) => (chain === undefined ? true : record.chain === chain))
+      .sort((a, b) => (b.resumedAt as number) - (a.resumedAt as number))
+      .map((record) => ({ ...record }));
   }
 }

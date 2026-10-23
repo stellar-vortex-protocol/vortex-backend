@@ -894,6 +894,43 @@ model CanaryAddress {
   @@map("canary_addresses")
 }
 
+// ─── Announcement (issue #688) ───────────────────────────────────────────────
+// Operator-authored service status banner for degraded-but-operational states
+// (elevated latency, scheduled maintenance, …). Independent of the kill-switch:
+// it never blocks writes, it only informs connected clients.
+//
+// Single-active-row convention: `active` is true for at most one row at a time.
+// The partial unique index enforcing that lives in the migration
+// (Prisma cannot express WHERE clauses on indexes); the service flips the
+// previous row to active = false in the same transaction as the insert/update.
+// Expiry is evaluated at read time (expiresAt <= now ⇒ treated as cleared), so
+// an expired row may linger with active = true until the next write.
+
+enum AnnouncementSeverity {
+  info
+  warning
+  critical
+}
+
+model Announcement {
+  id        String               @id @default(uuid()) @map("id")
+  /// Operator-authored free text shown to users/solvers.
+  message   String               @map("message")
+  severity  AnnouncementSeverity @default(info) @map("severity")
+  /// Unix epoch ms after which the announcement is treated as cleared; null = no expiry.
+  expiresAt BigInt?              @map("expires_at")
+  /// false once superseded by a newer announcement or explicitly cleared.
+  active    Boolean              @default(true) @map("active")
+  /// Operator identity that set the announcement.
+  createdBy String               @map("created_by")
+  createdAt DateTime             @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime             @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([active])
+  @@index([expiresAt])
+  @@map("announcements")
+}
+
 // ─── Price history (price-feed worker, issue #566) ────────────────────────────
 // Append-only series backing the extreme-move circuit breaker; `tokens.price_usd`
 // holds the latest value, this table keeps the trail.

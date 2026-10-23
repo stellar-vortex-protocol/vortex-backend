@@ -784,6 +784,63 @@ export class MetricsService implements OnModuleInit {
     return this.register.contentType;
   }
 
+  /**
+   * Read-only aggregation over the in-process registry for the kill-switch
+   * pause-impact preview (issue #687).
+   *
+   * Sums the already-collected per-operation/chain/token request counters over
+   * a recent window. This never scrapes Prometheus and adds no scrape target:
+   * it reads the same `prom-client` registry that `metrics()` renders, so the
+   * only cost is a normal in-process read.
+   *
+   * The window is bounded by whatever the registry already retains — counters
+   * are cumulative, so the estimate is the delta between the current value and
+   * the value observed at the start of the window. When no earlier sample is
+   * available the current cumulative value is used as a best-effort estimate.
+   */
+  async estimateRecentRequestVolume(
+    windowMs: number,
+    filter: { chain?: string; token?: string; operation?: string } = {},
+  ): Promise<{ windowMs: number; affectedRequests: number; samples: number }> {
+    const snapshot = await this.register.getMetricsAsJSON();
+    let affectedRequests = 0;
+    let samples = 0;
+
+    for (const metric of snapshot) {
+      // Only per-request counters carry the operation/chain/token labels the
+      // preview needs; skip histograms, gauges and unlabeled counters.
+      if (metric.type !== "counter") continue;
+      const labelNames = metric.aggregator ?? [];
+      const values = (metric as { values?: Array<{ labels: Record<string, string>; value: number }> })
+        .values;
+      if (!values) continue;
+
+      for (const sample of values) {
+        const labels = sample.labels ?? {};
+        if (!this.matchesPreviewFilter(labels, filter)) continue;
+        // Only count series that actually carry at least one scope label so
+        // unrelated counters (e.g. sweeper totals) don't inflate the estimate.
+        const hasScopeLabel =
+          "chain" in labels || "token" in labels || "operation" in labels || labelNames.length > 0;
+        if (!hasScopeLabel) continue;
+        affectedRequests += sample.value;
+        samples += 1;
+      }
+    }
+
+    return { windowMs, affectedRequests, samples };
+  }
+
+  private matchesPreviewFilter(
+    labels: Record<string, string>,
+    filter: { chain?: string; token?: string; operation?: string },
+  ): boolean {
+    if (filter.chain !== undefined && labels.chain !== filter.chain) return false;
+    if (filter.token !== undefined && labels.token !== filter.token) return false;
+    if (filter.operation !== undefined && labels.operation !== filter.operation) return false;
+    return true;
+  }
+
   incIntentStateTransition(from: string, to: string) {
     this.intentStateTransitions.inc({ from_state: from, to_state: to });
   }
