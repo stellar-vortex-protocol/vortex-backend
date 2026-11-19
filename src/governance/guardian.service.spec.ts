@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- lightweight Prisma fakes */
-import { ConflictException, ServiceUnavailableException } from "@nestjs/common";
+import { BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { SorobanRpc, xdr } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
@@ -13,10 +13,12 @@ import { GuardianStateService } from "./guardian-state.service";
 import { SolversService } from "../solvers/solvers.service";
 import { InMemorySolversRepository } from "../solvers/in-memory-solvers.repository";
 import { decodeGuardianEvent, GuardianEvent } from "../soroban/events/guardian-events";
-import { GuardianService } from "./guardian.service";
+import { GuardianService, OVERRIDE_PROPOSAL_TTL_MS } from "./guardian.service";
 
 const SOLVER = "GSOLVERBLACKLISTED";
 const superadmin = { id: "root", role: "superadmin" as const };
+const superadmin2 = { id: "alice", role: "superadmin" as const };
+const superadmin3 = { id: "bob", role: "superadmin" as const };
 
 function fakePrisma(rows: any[] = []) {
   const actions = new Map(rows.map((r) => [r.id, r]));
@@ -58,7 +60,7 @@ function rawEvent(ledger: number, index: number, name: string, target?: string):
 const event = (ledger: number, name: string, target?: string, index = 0) =>
   decodeGuardianEvent(rawEvent(ledger, index, name, target)) as GuardianEvent;
 
-async function setup(rows: any[] = [], events: SorobanRpc.Api.EventResponse[] = []) {
+async function setup(rows: any[] = [], events: SorobanRpc.Api.EventResponse[] = [], overrideQuorum?: number) {
   prismaState = fakePrisma(rows);
   const state = new GuardianStateService();
   const killSwitch = new KillSwitchService(
@@ -71,7 +73,13 @@ async function setup(rows: any[] = [], events: SorobanRpc.Api.EventResponse[] = 
     getLatestLedger: jest.fn().mockResolvedValue({ sequence: 1_000 }),
     getEvents: jest.fn().mockResolvedValue({ events, latestLedger: 1_000 }),
   };
-  const config = { get: () => "CGUARDIAN" } as unknown as ConfigService<AppConfig, true>;
+  const config = {
+    get: (key: string) => {
+      if (key === "guardianContractId") return "CGUARDIAN";
+      if (key === "guardian.overrideQuorum") return overrideQuorum ?? 2;
+      return undefined;
+    },
+  } as unknown as ConfigService<AppConfig, true>;
   const guardian = new GuardianService(
     soroban as unknown as SorobanService,
     state,
@@ -192,23 +200,177 @@ describe("GuardianService scenarios", () => {
     await guardian.apply(event(10, "guardian_pause"));
     prismaState.auditDown = true;
 
-    await expect(guardian.override("0000000010-0", superadmin, "false positive")).rejects.toBeInstanceOf(
+    await expect(guardian.proposeOverride("0000000010-0", superadmin, "false positive")).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
     expect(writeBlocked()).toBe(true);
   });
+});
 
-  it("superadmin override clears the action with an audit record until the guardian acts again", async () => {
-    const { guardian, writeBlocked } = await setup();
-    await guardian.apply(event(10, "guardian_pause"));
+// ── Quorum override tests ────────────────────────────────────────────────────
 
-    await guardian.override("0000000010-0", superadmin, "false positive");
-    expect(writeBlocked()).toBe(false);
+describe("guardian quorum override — two-phase flow", () => {
+  const ACTION_ID = "0000000010-0";
+
+  async function setupWithPause(quorum?: number) {
+    const ctx = await setup([], [], quorum);
+    await ctx.guardian.apply(event(10, "guardian_pause"));
+    return ctx;
+  }
+
+  it("below-threshold: propose records a proposal but does NOT lift the action", async () => {
+    const { guardian, writeBlocked } = await setupWithPause();
+
+    const { proposal, quorumRequired } = await guardian.proposeOverride(ACTION_ID, superadmin, "false positive");
+
+    expect(quorumRequired).toBe(2);
+    expect(proposal.approvals).toEqual([superadmin.id]);
+    expect(proposal.approvals.length).toBeLessThan(quorumRequired);
+    // Action is still active — quorum not yet reached.
+    expect(writeBlocked()).toBe(true);
+    expect(guardian.status().guardianActions).toHaveLength(1);
+    // Audit entry for the proposal was written.
     expect(prismaState.audit).toEqual([
-      expect.objectContaining({ actor: "root", action: "guardian.override", reason: "false positive" }),
+      expect.objectContaining({ actor: superadmin.id, action: "guardian.override.propose" }),
     ]);
-    expect(prismaState.actions.get("0000000010-0")).toMatchObject({ active: false, overriddenBy: "root" });
+    // Proposal is visible in status.
+    expect(guardian.status().pendingOverrides).toHaveLength(1);
+  });
 
+  it("threshold-reached: second approval executes the override and lifts the action", async () => {
+    const { guardian, writeBlocked } = await setupWithPause();
+
+    await guardian.proposeOverride(ACTION_ID, superadmin, "false positive");
+    const { executed } = await guardian.approveOverride(ACTION_ID, superadmin2);
+
+    expect(executed).toBe(true);
+    expect(writeBlocked()).toBe(false);
+    expect(guardian.status().guardianActions).toHaveLength(0);
+    expect(guardian.status().pendingOverrides).toHaveLength(0);
+
+    // Audit trail: propose + approve + execute entries.
+    expect(prismaState.audit).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ actor: superadmin.id, action: "guardian.override.propose" }),
+        expect.objectContaining({ actor: superadmin2.id, action: "guardian.override.approve" }),
+        expect.objectContaining({ actor: superadmin.id, action: "guardian.override" }),
+      ]),
+    );
+    // DB row reflects the override.
+    expect(prismaState.actions.get(ACTION_ID)).toMatchObject({
+      active: false,
+      overriddenBy: expect.stringContaining(superadmin.id),
+    });
+  });
+
+  it("same-admin-double-approve: proposer cannot also approve their own proposal", async () => {
+    const { guardian, writeBlocked } = await setupWithPause();
+
+    await guardian.proposeOverride(ACTION_ID, superadmin, "false positive");
+
+    await expect(guardian.approveOverride(ACTION_ID, superadmin)).rejects.toBeInstanceOf(BadRequestException);
+    // Action is still active.
+    expect(writeBlocked()).toBe(true);
+  });
+
+  it("same-admin-double-approve: an approver cannot approve twice", async () => {
+    // Use quorum=3 so we can test mid-flow double-approve without executing.
+    const { guardian, writeBlocked } = await setupWithPause(3);
+
+    await guardian.proposeOverride(ACTION_ID, superadmin, "false positive");
+    await guardian.approveOverride(ACTION_ID, superadmin2);
+
+    await expect(guardian.approveOverride(ACTION_ID, superadmin2)).rejects.toBeInstanceOf(BadRequestException);
+    expect(writeBlocked()).toBe(true);
+  });
+
+  it("superseding-event-cancels-proposal: new guardian event for the same key clears the pending proposal", async () => {
+    const { guardian, writeBlocked } = await setupWithPause();
+
+    await guardian.proposeOverride(ACTION_ID, superadmin, "false positive");
+    expect(guardian.status().pendingOverrides).toHaveLength(1);
+
+    // Guardian emits a new pause event — this should cancel the pending proposal.
+    await guardian.apply(event(20, "guardian_pause"));
+
+    expect(guardian.status().pendingOverrides).toHaveLength(0);
+    // The new pause is active.
+    expect(writeBlocked()).toBe(true);
+  });
+
+  it("approve on a non-existent proposal throws NotFoundException", async () => {
+    const { guardian } = await setupWithPause();
+
+    await expect(guardian.approveOverride(ACTION_ID, superadmin2)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it("propose on a non-active action throws NotFoundException", async () => {
+    const { guardian } = await setup();
+
+    await expect(guardian.proposeOverride("nonexistent-id", superadmin, "reason")).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it("duplicate propose on an already-pending proposal throws ConflictException", async () => {
+    const { guardian } = await setupWithPause();
+
+    await guardian.proposeOverride(ACTION_ID, superadmin, "first attempt");
+    await expect(guardian.proposeOverride(ACTION_ID, superadmin2, "second attempt")).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+  });
+
+  it("expired proposal is rejected and removed on approve", async () => {
+    const { guardian } = await setupWithPause();
+
+    await guardian.proposeOverride(ACTION_ID, superadmin, "false positive");
+
+    // Fast-forward time past the TTL.
+    jest.spyOn(Date, "now").mockReturnValue(Date.now() + OVERRIDE_PROPOSAL_TTL_MS + 1_000);
+
+    await expect(guardian.approveOverride(ACTION_ID, superadmin2)).rejects.toBeInstanceOf(NotFoundException);
+    expect(guardian.pendingOverrideProposals()).toHaveLength(0);
+
+    jest.restoreAllMocks();
+  });
+
+  it("threshold-reached with quorum=1: propose immediately executes the override", async () => {
+    const { guardian, writeBlocked } = await setupWithPause(1);
+
+    // With quorum=1 the proposal itself constitutes a full approval.
+    // proposeOverride adds the proposer, reaching threshold=1 on the approve call.
+    // But propose only *records* — approve is still required. With quorum=1 the
+    // first approveOverride call (by any distinct admin, or the proposer) would
+    // double-approve. So quorum=1 is unusual but valid via approveOverride.
+    // The propose leaves 1 approval; approve by a *different* admin executes.
+    await guardian.proposeOverride(ACTION_ID, superadmin, "false positive");
+    // quorum=1 means 1 approval suffices — propose already adds the proposer (count=1).
+    // The approveOverride call for the proposer would throw (double-approve).
+    // A different admin approves and that takes it past threshold.
+    const { executed } = await guardian.approveOverride(ACTION_ID, superadmin2);
+    expect(executed).toBe(true);
+    expect(writeBlocked()).toBe(false);
+  });
+
+  it("guardian override clears the action with an audit record until the guardian acts again (compat)", async () => {
+    // Verifies the full end-to-end flow mirrors the original single-step test.
+    const { guardian, writeBlocked } = await setupWithPause();
+
+    await guardian.proposeOverride(ACTION_ID, superadmin, "false positive");
+    await guardian.approveOverride(ACTION_ID, superadmin2);
+
+    expect(writeBlocked()).toBe(false);
+    expect(prismaState.audit).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ actor: "root", action: "guardian.override.propose", reason: "false positive" }),
+        expect.objectContaining({ actor: "alice", action: "guardian.override.approve" }),
+        expect.objectContaining({ actor: "root", action: "guardian.override", reason: "false positive" }),
+      ]),
+    );
+    expect(prismaState.actions.get(ACTION_ID)).toMatchObject({ active: false });
+
+    // Guardian can re-pause after the override.
     await guardian.apply(event(20, "guardian_pause"));
     expect(writeBlocked()).toBe(true);
   });

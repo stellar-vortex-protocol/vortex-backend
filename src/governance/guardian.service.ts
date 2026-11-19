@@ -1,4 +1,6 @@
 import {
+  BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -21,6 +23,10 @@ import { ALL_PARAMS, GuardianStateService, StateRef } from "./guardian-state.ser
 export const GUARDIAN_POLL_INTERVAL_MS = 10_000;
 /** On start, replay this many ledgers (~24 h at 5 s) to catch actions missed while down. */
 export const GUARDIAN_LOOKBACK_LEDGERS = 17_280;
+/** Default number of distinct superadmin approvals required to execute an override. */
+export const DEFAULT_OVERRIDE_QUORUM = 2;
+/** Milliseconds after which an un-executed pending override proposal expires. */
+export const OVERRIDE_PROPOSAL_TTL_MS = 30 * 60 * 1_000; // 30 minutes
 
 /** An active guardian action, as shown on the public status endpoint. */
 export interface GuardianActionRecord {
@@ -30,6 +36,17 @@ export interface GuardianActionRecord {
   txHash: string;
   ledger: number;
   activatedAt: string;
+}
+
+/** A pending quorum override proposal. */
+export interface OverrideProposal {
+  actionId: string;
+  reason: string;
+  proposedBy: string;
+  proposedAt: number;
+  /** Distinct admin ids that have approved, including the proposer. */
+  approvals: string[];
+  expiresAt: number;
 }
 
 const keyOf = (kind: string, target: string) => `${kind}:${target}`;
@@ -54,8 +71,11 @@ function isAfter(a: { ledger: number; id: string }, b: { ledger: number; id: str
 export class GuardianService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(GuardianService.name);
   private readonly contractId: string;
+  private readonly overrideQuorum: number;
   private readonly active = new Map<string, GuardianActionRecord>();
   private readonly seen = new Set<string>();
+  /** Pending quorum override proposals, keyed by actionId. */
+  private readonly pendingOverrides = new Map<string, OverrideProposal>();
   private cursor?: number;
   private timer?: NodeJS.Timeout;
 
@@ -68,6 +88,9 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
     @Optional() private readonly killSwitch?: KillSwitchService,
   ) {
     this.contractId = config.get("guardianContractId", { infer: true });
+    this.overrideQuorum =
+      (config as ConfigService<AppConfig, false>).get("guardian.overrideQuorum", { infer: true }) ??
+      DEFAULT_OVERRIDE_QUORUM;
   }
 
   async onModuleInit(): Promise<void> {
@@ -118,6 +141,9 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
         activatedAt: event.ledgerClosedAt,
       };
       this.active.set(key, record);
+      // A new on-chain event for this key cancels any pending override proposal
+      // — the guardian has spoken again, so the half-approved proposal is stale.
+      this.cancelPendingOverrideForKey(key, `superseded by new guardian event ${event.id}`);
       this.project(record, true, "guardian action");
       await this.persist(() =>
         this.prisma.guardianAction.upsert({
@@ -132,6 +158,8 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
     // A clear only affects an action activated before it (replay-safe).
     if (!current || !isAfter(event, current)) return;
     this.active.delete(key);
+    // A guardian-issued clear also cancels any pending proposal for this key.
+    this.cancelPendingOverrideForKey(key, `guardian-issued clear tx ${event.txHash}`);
     this.project(current, false, `guardian cleared (tx ${event.txHash})`);
     await this.persist(() =>
       this.prisma.guardianAction.update({
@@ -142,29 +170,198 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Superadmin break-glass: lifts an active guardian action (e.g. a false
-   * positive) until the guardian emits a new one. Refused unless the audit
-   * record is written.
+   * Phase 1 — Superadmin break-glass (quorum path).
+   *
+   * Records a pending override proposal for `actionId`. A second (distinct)
+   * superadmin must call {@link approveOverride} before the action is lifted.
+   * The proposal expires after {@link OVERRIDE_PROPOSAL_TTL_MS} to prevent
+   * stale half-approvals from being completed long after the incident context
+   * has changed.
+   *
+   * Throws if:
+   * - The action is not currently active.
+   * - A non-expired proposal already exists for this action (idempotent retry
+   *   is intentionally rejected so the proposer cannot silently restart the
+   *   quorum window).
    */
-  async override(actionId: string, admin: AdminPrincipal, reason: string): Promise<GuardianActionRecord> {
+  async proposeOverride(
+    actionId: string,
+    admin: AdminPrincipal,
+    reason: string,
+  ): Promise<{ proposal: OverrideProposal; quorumRequired: number }> {
     const record = [...this.active.values()].find((a) => a.id === actionId);
     if (!record) throw new NotFoundException("No active guardian action with that id");
+
+    const existing = this.pendingOverrides.get(actionId);
+    if (existing && Date.now() < existing.expiresAt) {
+      throw new ConflictException(
+        `An override proposal for action ${actionId} is already pending. ` +
+          `Use the approve endpoint to co-sign it, or wait for it to expire.`,
+      );
+    }
+
+    const now = Date.now();
+    const proposal: OverrideProposal = {
+      actionId,
+      reason,
+      proposedBy: admin.id,
+      proposedAt: now,
+      approvals: [admin.id],
+      expiresAt: now + OVERRIDE_PROPOSAL_TTL_MS,
+    };
+    this.pendingOverrides.set(actionId, proposal);
+
     await this.audit.record({
       actor: admin.id,
+      action: "guardian.override.propose",
+      target: `guardian:${actionId}`,
+      before: record,
+      after: { proposal },
+      reason,
+    });
+
+    this.logger.warn(
+      `[guardian] override proposed for ${actionId} by ${admin.id} ` +
+        `(${proposal.approvals.length}/${this.overrideQuorum} approvals)`,
+    );
+    return { proposal, quorumRequired: this.overrideQuorum };
+  }
+
+  /**
+   * Phase 2 — Co-sign a pending override proposal.
+   *
+   * The approving admin must be distinct from every admin who has already
+   * approved (including the proposer). Once the approval count reaches the
+   * configured quorum the override is executed immediately.
+   *
+   * Returns the current proposal state. When the quorum is reached the
+   * returned `executed` flag is `true` and the action has already been lifted.
+   */
+  async approveOverride(
+    actionId: string,
+    admin: AdminPrincipal,
+  ): Promise<{ proposal: OverrideProposal; executed: boolean; quorumRequired: number }> {
+    const proposal = this.pendingOverrides.get(actionId);
+    if (!proposal) {
+      throw new NotFoundException(
+        `No pending override proposal for action ${actionId}. ` +
+          `A superadmin must propose one first via the propose endpoint.`,
+      );
+    }
+    if (Date.now() >= proposal.expiresAt) {
+      this.pendingOverrides.delete(actionId);
+      throw new NotFoundException(
+        `The override proposal for action ${actionId} has expired. Please propose a new one.`,
+      );
+    }
+    if (proposal.approvals.includes(admin.id)) {
+      throw new BadRequestException(
+        `Admin ${admin.id} has already approved this proposal. ` +
+          `A different superadmin must provide the remaining approvals to satisfy the quorum.`,
+      );
+    }
+
+    proposal.approvals.push(admin.id);
+
+    await this.audit.record({
+      actor: admin.id,
+      action: "guardian.override.approve",
+      target: `guardian:${actionId}`,
+      after: { approvals: proposal.approvals, quorumRequired: this.overrideQuorum },
+    });
+
+    this.logger.warn(
+      `[guardian] override co-signed for ${actionId} by ${admin.id} ` +
+        `(${proposal.approvals.length}/${this.overrideQuorum} approvals)`,
+    );
+
+    if (proposal.approvals.length >= this.overrideQuorum) {
+      await this.executeOverride(actionId, proposal);
+      return { proposal, executed: true, quorumRequired: this.overrideQuorum };
+    }
+
+    return { proposal, executed: false, quorumRequired: this.overrideQuorum };
+  }
+
+  /**
+   * Executes an approved override once the quorum threshold is met.
+   * Separated from {@link approveOverride} so the audit write, state mutation
+   * and DB update are clearly scoped to execution rather than approval.
+   */
+  private async executeOverride(actionId: string, proposal: OverrideProposal): Promise<GuardianActionRecord> {
+    const record = [...this.active.values()].find((a) => a.id === actionId);
+    if (!record) {
+      this.pendingOverrides.delete(actionId);
+      throw new NotFoundException("Guardian action is no longer active (may have been cleared on-chain)");
+    }
+
+    // Write the execution audit entry before mutating state.
+    await this.audit.record({
+      actor: proposal.proposedBy,
       action: "guardian.override",
       target: `guardian:${record.id}`,
       before: record,
-      reason,
+      after: { approvals: proposal.approvals },
+      reason: proposal.reason,
     });
+
+    this.pendingOverrides.delete(actionId);
     this.active.delete(keyOf(record.kind, record.target));
-    this.project(record, false, `superadmin override by ${admin.id}: ${reason}`);
+    this.project(record, false, `quorum override by [${proposal.approvals.join(", ")}]: ${proposal.reason}`);
+
     await this.persist(() =>
       this.prisma.guardianAction.update({
         where: { id: record.id },
-        data: { active: false, clearedAt: new Date(), overriddenBy: admin.id },
+        data: { active: false, clearedAt: new Date(), overriddenBy: proposal.approvals.join(",") },
       }),
     );
     return record;
+  }
+
+  /**
+   * Returns pending override proposals (non-expired) so operators can see the
+   * current quorum state without polling logs.
+   */
+  pendingOverrideProposals(): Array<OverrideProposal & { quorumRequired: number }> {
+    const now = Date.now();
+    const result: Array<OverrideProposal & { quorumRequired: number }> = [];
+    for (const [id, proposal] of this.pendingOverrides) {
+      if (now >= proposal.expiresAt) {
+        this.pendingOverrides.delete(id);
+        continue;
+      }
+      result.push({ ...proposal, quorumRequired: this.overrideQuorum });
+    }
+    return result;
+  }
+
+  /** Cancels the pending override proposal for the given action key, if one exists. */
+  private cancelPendingOverrideForKey(key: string, reason: string): void {
+    // The key is "kind:target"; we need to find the matching actionId.
+    for (const [actionId, proposal] of this.pendingOverrides) {
+      const matchingRecord = [...this.active.values()].find((a) => a.id === actionId);
+      if (matchingRecord && keyOf(matchingRecord.kind, matchingRecord.target) === key) {
+        this.pendingOverrides.delete(actionId);
+        this.logger.warn(`[guardian] cancelled pending override proposal for ${actionId}: ${reason}`);
+        return;
+      }
+      // The active record may have already been replaced — also check by scanning all proposals
+      // whose action is no longer in `active` with this key (cover the clear path).
+    }
+    // If no matching active record found, still try to cancel by scanning proposals
+    // for actions no longer in active (e.g. on a guardian clear).
+    for (const [actionId, _proposal] of this.pendingOverrides) {
+      if (!this.active.has(key)) {
+        // Check if this proposal targets the same key-mapped action that just cleared.
+        // We rely on the caller (apply) already having removed the entry from `active`.
+        // So any proposal whose action is gone from active is stale.
+        const stillActive = [...this.active.values()].some((a) => a.id === actionId);
+        if (!stillActive) {
+          this.pendingOverrides.delete(actionId);
+          this.logger.warn(`[guardian] cancelled stale pending override proposal for ${actionId}: ${reason}`);
+        }
+      }
+    }
   }
 
   /**
@@ -179,6 +376,7 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
       guardianPaused,
       operatorSwitches,
       guardianActions: [...this.active.values()].sort((a, b) => a.ledger - b.ledger),
+      pendingOverrides: this.pendingOverrideProposals(),
       ingestionEnabled: Boolean(this.contractId),
       nextLedger: this.cursor ?? null,
     };
