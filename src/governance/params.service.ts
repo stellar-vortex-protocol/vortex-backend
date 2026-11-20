@@ -1,7 +1,9 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { SorobanRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
 import { AppConfig, CHAIN_DEADLINE_DEFAULTS, CHAIN_FILL_WINDOW_DEFAULTS, DEFAULT_DEADLINE_SECONDS, DEFAULT_FILL_WINDOW_SECONDS } from "../config/configuration";
+import { PrismaService } from "../prisma/prisma.service";
+import { AdminPrincipal } from "../admin/admin-auth";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -78,6 +80,41 @@ export interface ParamsApiResponse {
   history: ProtocolParams[];
 }
 
+/** A single validation violation returned when a proposed parameter is out of bounds. */
+export interface ProposalValidationError {
+  field: string;
+  value: unknown;
+  min?: number | string;
+  max?: number | string;
+  message: string;
+}
+
+/** Statuses a draft proposal can be in. */
+export type ProposalDraftStatus = "draft" | "validated" | "submitted" | "rejected";
+
+/** A governance proposal draft as returned by the API. */
+export interface GovernanceProposalDraft {
+  id: string;
+  proposedParams: Partial<ProposedParamsInput>;
+  status: ProposalDraftStatus;
+  createdBy: string;
+  description?: string | null;
+  validationErrors: ProposalValidationError[] | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Input shape for creating a proposal draft.
+ * All fields are optional — only the ones being proposed need to be set.
+ */
+export interface ProposedParamsInput {
+  feeBps?: number;
+  maxExposureRatio?: number;
+  slashAmount?: string;
+  chains?: Record<string, { deadlineSeconds?: number; fillWindowSeconds?: number }>;
+}
+
 // ---------------------------------------------------------------------------
 // Hard validation bounds (backend enforces these even if governance passes insane values)
 // ---------------------------------------------------------------------------
@@ -146,6 +183,7 @@ export class ProtocolParamsService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly configService: ConfigService<AppConfig, true>,
+    private readonly prisma: PrismaService,
   ) {
     // Initialise with code defaults so the service is ready before the first
     // successful RPC poll.
@@ -564,6 +602,163 @@ export class ProtocolParamsService implements OnModuleInit, OnModuleDestroy {
       if (ac.fillWindowSeconds !== bc.fillWindowSeconds) return true;
     }
     return false;
+  }
+
+  // --------------------------------------------------------------------------
+  // Proposal draft CRUD
+  // --------------------------------------------------------------------------
+
+  /**
+   * Validate a proposed parameter set against PARAM_BOUNDS.
+   * Returns all violations as structured data — never throws.
+   * This is the single authoritative pre-submission validation path.
+   */
+  validateProposedParams(proposed: ProposedParamsInput): ProposalValidationError[] {
+    const errors: ProposalValidationError[] = [];
+
+    if (proposed.feeBps !== undefined) {
+      const v = proposed.feeBps;
+      if (!Number.isFinite(v) || v < PARAM_BOUNDS.feeBpsMin || v > PARAM_BOUNDS.feeBpsMax) {
+        errors.push({
+          field: "feeBps",
+          value: v,
+          min: PARAM_BOUNDS.feeBpsMin,
+          max: PARAM_BOUNDS.feeBpsMax,
+          message: `feeBps ${v} is outside bounds [${PARAM_BOUNDS.feeBpsMin}, ${PARAM_BOUNDS.feeBpsMax}]`,
+        });
+      }
+    }
+
+    if (proposed.maxExposureRatio !== undefined) {
+      const v = proposed.maxExposureRatio;
+      if (!Number.isFinite(v) || v < PARAM_BOUNDS.exposureRatioMin || v > PARAM_BOUNDS.exposureRatioMax) {
+        errors.push({
+          field: "maxExposureRatio",
+          value: v,
+          min: PARAM_BOUNDS.exposureRatioMin,
+          max: PARAM_BOUNDS.exposureRatioMax,
+          message: `maxExposureRatio ${v} is outside bounds [${PARAM_BOUNDS.exposureRatioMin}, ${PARAM_BOUNDS.exposureRatioMax}]`,
+        });
+      }
+    }
+
+    if (proposed.slashAmount !== undefined) {
+      try {
+        const bigVal = BigInt(proposed.slashAmount);
+        const bigMin = BigInt(PARAM_BOUNDS.slashAmountMin);
+        const bigMax = BigInt(PARAM_BOUNDS.slashAmountMax);
+        if (bigVal < bigMin || bigVal > bigMax) {
+          errors.push({
+            field: "slashAmount",
+            value: proposed.slashAmount,
+            min: PARAM_BOUNDS.slashAmountMin,
+            max: PARAM_BOUNDS.slashAmountMax,
+            message: `slashAmount ${proposed.slashAmount} outside bounds [${PARAM_BOUNDS.slashAmountMin}, ${PARAM_BOUNDS.slashAmountMax}]`,
+          });
+        }
+      } catch {
+        errors.push({
+          field: "slashAmount",
+          value: proposed.slashAmount,
+          message: `slashAmount "${proposed.slashAmount}" is not a valid integer string`,
+        });
+      }
+    }
+
+    if (proposed.chains) {
+      for (const [chain, windows] of Object.entries(proposed.chains)) {
+        if (windows.deadlineSeconds !== undefined) {
+          const v = windows.deadlineSeconds;
+          if (!Number.isFinite(v) || v < PARAM_BOUNDS.deadlineSecondsMin || v > PARAM_BOUNDS.deadlineSecondsMax) {
+            errors.push({
+              field: `chains.${chain}.deadlineSeconds`,
+              value: v,
+              min: PARAM_BOUNDS.deadlineSecondsMin,
+              max: PARAM_BOUNDS.deadlineSecondsMax,
+              message: `chains.${chain}.deadlineSeconds ${v} outside bounds [${PARAM_BOUNDS.deadlineSecondsMin}, ${PARAM_BOUNDS.deadlineSecondsMax}]`,
+            });
+          }
+        }
+        if (windows.fillWindowSeconds !== undefined) {
+          const v = windows.fillWindowSeconds;
+          if (!Number.isFinite(v) || v < PARAM_BOUNDS.fillWindowSecondsMin || v > PARAM_BOUNDS.fillWindowSecondsMax) {
+            errors.push({
+              field: `chains.${chain}.fillWindowSeconds`,
+              value: v,
+              min: PARAM_BOUNDS.fillWindowSecondsMin,
+              max: PARAM_BOUNDS.fillWindowSecondsMax,
+              message: `chains.${chain}.fillWindowSeconds ${v} outside bounds [${PARAM_BOUNDS.fillWindowSecondsMin}, ${PARAM_BOUNDS.fillWindowSecondsMax}]`,
+            });
+          }
+        }
+      }
+    }
+
+    return errors;
+  }
+
+  /** Create a draft and run validation. Status is "validated" when no violations, "draft" otherwise. */
+  async createProposal(
+    proposed: ProposedParamsInput,
+    admin: AdminPrincipal,
+    description?: string,
+  ): Promise<GovernanceProposalDraft> {
+    const validationErrors = this.validateProposedParams(proposed);
+    const status: ProposalDraftStatus = validationErrors.length === 0 ? "validated" : "draft";
+    const row = await this.prisma.governanceProposalDraft.create({
+      data: {
+        proposedParams: proposed as object,
+        status,
+        createdBy: admin.id,
+        description: description ?? null,
+        validationErrors: validationErrors as object[],
+      },
+    });
+    return this.mapDraft(row);
+  }
+
+  /** List drafts newest-first, optionally filtered by status. */
+  async listProposals(status?: ProposalDraftStatus): Promise<GovernanceProposalDraft[]> {
+    const rows = await this.prisma.governanceProposalDraft.findMany({
+      where: status ? { status } : undefined,
+      orderBy: { createdAt: "desc" },
+    });
+    return rows.map((r) => this.mapDraft(r));
+  }
+
+  /**
+   * Advance status. When transitioning to "validated", re-runs validation and
+   * updates validationErrors so operators always see the latest check results.
+   */
+  async updateProposalStatus(id: string, newStatus: ProposalDraftStatus): Promise<GovernanceProposalDraft> {
+    const existing = await this.prisma.governanceProposalDraft.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException(`Proposal draft ${id} not found`);
+
+    const data: Record<string, unknown> = { status: newStatus };
+    if (newStatus === "validated") {
+      data["validationErrors"] = this.validateProposedParams(
+        existing.proposedParams as ProposedParamsInput,
+      ) as object[];
+    }
+
+    const row = await this.prisma.governanceProposalDraft.update({ where: { id }, data });
+    return this.mapDraft(row);
+  }
+
+  private mapDraft(row: {
+    id: string; proposedParams: unknown; status: string; createdBy: string;
+    description?: string | null; validationErrors: unknown; createdAt: Date; updatedAt: Date;
+  }): GovernanceProposalDraft {
+    return {
+      id: row.id,
+      proposedParams: row.proposedParams as ProposedParamsInput,
+      status: row.status as ProposalDraftStatus,
+      createdBy: row.createdBy,
+      description: row.description,
+      validationErrors: row.validationErrors as ProposalValidationError[] | null,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
   }
 
   /** Build the initial ProtocolParams from code / env defaults. */

@@ -563,7 +563,36 @@ model FlagChangeRequest {
   @@map("flag_change_requests")
 }
 
-// ─── GuardianAction ──────────────────────────────────────────────────────────
+// ─── GovernanceProposalDraft ─────────────────────────────────────────────────
+// Backend-side staging area for parameter-change proposals (issue #507-params).
+// Operators draft and pre-validate a proposed parameter set here before the
+// actual on-chain governance transaction is submitted out-of-band.
+
+enum ProposalDraftStatus {
+  draft
+  validated
+  submitted
+  rejected
+}
+
+model GovernanceProposalDraft {
+  id               String               @id @default(uuid()) @map("id")
+  /// The proposed parameter values (JSON object matching ProtocolParams shape).
+  proposedParams   Json                 @map("proposed_params")
+  status           ProposalDraftStatus  @default(draft) @map("status")
+  /// Admin principal id that created the draft.
+  createdBy        String               @map("created_by")
+  /// Human-readable description / motivation for the change.
+  description      String?              @map("description")
+  /// Structured validation errors: [{ field, value, min?, max?, message }].
+  /// Empty array = all params within bounds. Null = not yet validated.
+  validationErrors Json?                @map("validation_errors")
+  createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime             @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([status, createdAt(sort: Desc)])
+  @@map("governance_proposal_drafts")
+}
 // Emergency actions ingested from the on-chain guardian contract (issue #507).
 // One row per activating event; cleared by the matching guardian event or a
 // superadmin override.
