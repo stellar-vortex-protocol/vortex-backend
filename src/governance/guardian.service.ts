@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
@@ -18,6 +19,7 @@ import { parseEventIndex } from "../soroban/event-ingestion.service";
 import { decodeGuardianEvent, GuardianEvent } from "../soroban/events/guardian-events";
 import { KillSwitchService } from "../killswitch/killswitch.service";
 import { ALL_PARAMS, GuardianStateService, StateRef } from "./guardian-state.service";
+import { INTENTS_REPOSITORY, IIntentsRepository } from "../intents/intents.repository";
 
 /** Guardian actions are applied within one poll of this interval. */
 export const GUARDIAN_POLL_INTERVAL_MS = 10_000;
@@ -27,6 +29,21 @@ export const GUARDIAN_LOOKBACK_LEDGERS = 17_280;
 export const DEFAULT_OVERRIDE_QUORUM = 2;
 /** Milliseconds after which an un-executed pending override proposal expires. */
 export const OVERRIDE_PROPOSAL_TTL_MS = 30 * 60 * 1_000; // 30 minutes
+/** Maximum number of affected intent ids stored per blacklist snapshot (keeps row size bounded). */
+export const SNAPSHOT_MAX_INTENT_IDS = 500;
+
+/** Point-in-time blast-radius snapshot captured when a guardian action activates. */
+export interface GuardianImpactSnapshot {
+  actionId: string;
+  kind: "pause" | "blacklist";
+  /** Solver address for blacklist snapshots; undefined for pause. */
+  solverAddress?: string;
+  /** Total protocol-wide open (open | accepted) intent count at activation. */
+  openIntentCount: number;
+  /** For blacklist: up to SNAPSHOT_MAX_INTENT_IDS open intent ids for the suspended solver. */
+  affectedIntentIds: string[];
+  capturedAt: string;
+}
 
 /** An active guardian action, as shown on the public status endpoint. */
 export interface GuardianActionRecord {
@@ -86,6 +103,7 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
     private readonly audit: AdminAuditService,
     config: ConfigService<AppConfig, true>,
     @Optional() private readonly killSwitch?: KillSwitchService,
+    @Optional() @Inject(INTENTS_REPOSITORY) private readonly intentsRepo?: IIntentsRepository,
   ) {
     this.contractId = config.get("guardianContractId", { infer: true });
     this.overrideQuorum =
@@ -152,6 +170,14 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
           update: {},
         }),
       );
+      // Capture a best-effort blast-radius snapshot for pause and blacklist
+      // actions only (freeze has no "affected intents" concept). Fire-and-forget:
+      // a slow or failed snapshot query must never delay the guardian state taking effect.
+      if (record.kind === "pause" || record.kind === "blacklist") {
+        this.captureImpactSnapshot(record).catch((err) =>
+          this.logger.warn(`[guardian] impact snapshot failed for ${record.id}: ${(err as Error).message}`),
+        );
+      }
       return;
     }
 
@@ -333,6 +359,74 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
       result.push({ ...proposal, quorumRequired: this.overrideQuorum });
     }
     return result;
+  }
+
+  /**
+   * Captures a best-effort blast-radius snapshot for a guardian activation.
+   *
+   * - For **pause**: records the protocol-wide open-intent count at that instant.
+   * - For **blacklist** (solver suspend): records the suspended solver's open
+   *   intent ids (capped at {@link SNAPSHOT_MAX_INTENT_IDS}) and their count.
+   *
+   * The snapshot is fire-and-forget relative to applying guardian state: a slow
+   * or failed query here never delays or blocks the pause/suspend taking effect.
+   * Duplicate activations for the same action id are skipped via the unique
+   * constraint on `action_id` (the upsert silently ignores the conflict).
+   */
+  private async captureImpactSnapshot(record: GuardianActionRecord): Promise<void> {
+    if (!this.intentsRepo) return;
+
+    const allIntents = await this.intentsRepo.findAll();
+    const openStates = new Set(["open", "accepted"]);
+
+    let openIntentCount: number;
+    let affectedIntentIds: string[];
+    let solverAddress: string | undefined;
+
+    if (record.kind === "blacklist") {
+      solverAddress = record.target;
+      const solverOpen = allIntents.filter(
+        (i) => openStates.has(i.state) && i.solver === solverAddress,
+      );
+      affectedIntentIds = solverOpen
+        .slice(0, SNAPSHOT_MAX_INTENT_IDS)
+        .map((i) => i.intentId);
+      openIntentCount = solverOpen.length;
+    } else {
+      // pause
+      const protocolOpen = allIntents.filter((i) => openStates.has(i.state));
+      openIntentCount = protocolOpen.length;
+      affectedIntentIds = [];
+    }
+
+    const snapshot: GuardianImpactSnapshot = {
+      actionId: record.id,
+      kind: record.kind as "pause" | "blacklist",
+      solverAddress,
+      openIntentCount,
+      affectedIntentIds,
+      capturedAt: new Date().toISOString(),
+    };
+
+    await this.persist(() =>
+      this.prisma.guardianImpactSnapshot.upsert({
+        where: { actionId: record.id },
+        create: {
+          actionId: snapshot.actionId,
+          kind: snapshot.kind,
+          solverAddress: snapshot.solverAddress ?? null,
+          openIntentCount: snapshot.openIntentCount,
+          affectedIntentIds: snapshot.affectedIntentIds,
+          capturedAt: new Date(snapshot.capturedAt),
+        },
+        update: {},
+      }),
+    );
+
+    this.logger.log(
+      `[guardian] impact snapshot: action=${record.id} kind=${record.kind} ` +
+        `openIntentCount=${openIntentCount} affectedIds=${affectedIntentIds.length}`,
+    );
   }
 
   /** Cancels the pending override proposal for the given action key, if one exists. */

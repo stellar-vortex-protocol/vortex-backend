@@ -13,7 +13,9 @@ import { GuardianStateService } from "./guardian-state.service";
 import { SolversService } from "../solvers/solvers.service";
 import { InMemorySolversRepository } from "../solvers/in-memory-solvers.repository";
 import { decodeGuardianEvent, GuardianEvent } from "../soroban/events/guardian-events";
-import { GuardianService, OVERRIDE_PROPOSAL_TTL_MS } from "./guardian.service";
+import { GuardianService, OVERRIDE_PROPOSAL_TTL_MS, SNAPSHOT_MAX_INTENT_IDS } from "./guardian.service";
+import { IIntentsRepository } from "../intents/intents.repository";
+import { Intent } from "../intents/intents.types";
 
 const SOLVER = "GSOLVERBLACKLISTED";
 const superadmin = { id: "root", role: "superadmin" as const };
@@ -23,9 +25,11 @@ const superadmin3 = { id: "bob", role: "superadmin" as const };
 function fakePrisma(rows: any[] = []) {
   const actions = new Map(rows.map((r) => [r.id, r]));
   const audit: any[] = [];
+  const snapshots = new Map<string, any>();
   const state = {
     actions,
     audit,
+    snapshots,
     auditDown: false,
     guardianAction: {
       findMany: async () => [...actions.values()],
@@ -33,6 +37,11 @@ function fakePrisma(rows: any[] = []) {
         if (!actions.has(where.id)) actions.set(where.id, create);
       },
       update: async ({ where, data }: any) => Object.assign(actions.get(where.id), data),
+    },
+    guardianImpactSnapshot: {
+      upsert: async ({ where, create }: any) => {
+        if (!snapshots.has(where.actionId)) snapshots.set(where.actionId, create);
+      },
     },
     adminAuditLog: {
       create: async ({ data }: any) => {
@@ -60,7 +69,7 @@ function rawEvent(ledger: number, index: number, name: string, target?: string):
 const event = (ledger: number, name: string, target?: string, index = 0) =>
   decodeGuardianEvent(rawEvent(ledger, index, name, target)) as GuardianEvent;
 
-async function setup(rows: any[] = [], events: SorobanRpc.Api.EventResponse[] = [], overrideQuorum?: number) {
+async function setup(rows: any[] = [], events: SorobanRpc.Api.EventResponse[] = [], overrideQuorum?: number, intentsRepo?: IIntentsRepository) {
   prismaState = fakePrisma(rows);
   const state = new GuardianStateService();
   const killSwitch = new KillSwitchService(
@@ -87,6 +96,7 @@ async function setup(rows: any[] = [], events: SorobanRpc.Api.EventResponse[] = 
     new AdminAuditService(prismaState as unknown as PrismaService),
     config,
     killSwitch,
+    intentsRepo,
   );
   const solvers = new SolversService(new InMemorySolversRepository(), state);
   const writeBlocked = () => killSwitch.isBlocked({ chain: "stellar", token: null, operation: "create" });
@@ -373,5 +383,115 @@ describe("guardian quorum override — two-phase flow", () => {
     // Guardian can re-pause after the override.
     await guardian.apply(event(20, "guardian_pause"));
     expect(writeBlocked()).toBe(true);
+  });
+});
+
+// ── Impact snapshot tests ────────────────────────────────────────────────────
+
+function fakeIntentsRepo(intents: Partial<Intent>[]): IIntentsRepository {
+  return {
+    findAll: jest.fn().mockResolvedValue(intents),
+  } as unknown as IIntentsRepository;
+}
+
+describe("guardian impact snapshot", () => {
+  it("pause activation captures protocol-wide open-intent count", async () => {
+    const intents: Partial<Intent>[] = [
+      { intentId: "i1", state: "open", solver: undefined },
+      { intentId: "i2", state: "accepted", solver: undefined },
+      { intentId: "i3", state: "filled", solver: undefined },
+    ];
+    const repo = fakeIntentsRepo(intents);
+    const { guardian } = await setup([], [], undefined, repo);
+
+    await guardian.apply(event(10, "guardian_pause"));
+    // Snapshot is fire-and-forget; wait a tick for the promise to settle.
+    await new Promise((r) => setTimeout(r, 10));
+
+    const snap = prismaState.snapshots.get("0000000010-0");
+    expect(snap).toBeDefined();
+    expect(snap.kind).toBe("pause");
+    expect(snap.openIntentCount).toBe(2); // only open + accepted
+    expect(snap.affectedIntentIds).toEqual([]);
+    expect(snap.solverAddress).toBeNull();
+  });
+
+  it("blacklist activation captures solver-specific open intent ids", async () => {
+    const intents: Partial<Intent>[] = [
+      { intentId: "i1", state: "open", solver: SOLVER },
+      { intentId: "i2", state: "accepted", solver: SOLVER },
+      { intentId: "i3", state: "open", solver: "OTHER_SOLVER" },
+      { intentId: "i4", state: "filled", solver: SOLVER },
+    ];
+    const repo = fakeIntentsRepo(intents);
+    const { guardian } = await setup([], [], undefined, repo);
+
+    await guardian.apply(event(10, "guardian_blacklist", SOLVER));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const snap = prismaState.snapshots.get("0000000010-0");
+    expect(snap).toBeDefined();
+    expect(snap.kind).toBe("blacklist");
+    expect(snap.solverAddress).toBe(SOLVER);
+    expect(snap.openIntentCount).toBe(2); // i1 + i2 (not i3=other solver, not i4=filled)
+    expect(snap.affectedIntentIds).toEqual(expect.arrayContaining(["i1", "i2"]));
+  });
+
+  it("freeze activation does NOT capture a snapshot", async () => {
+    const repo = fakeIntentsRepo([{ intentId: "i1", state: "open" }]);
+    const { guardian } = await setup([], [], undefined, repo);
+
+    await guardian.apply(event(10, "guardian_freeze", "onchain-dry-run"));
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(prismaState.snapshots.size).toBe(0);
+  });
+
+  it("replayed duplicate activation skips snapshot (upsert no-ops on conflict)", async () => {
+    const repo = fakeIntentsRepo([{ intentId: "i1", state: "open" }]);
+    const { guardian } = await setup([], [], undefined, repo);
+
+    await guardian.apply(event(10, "guardian_pause"));
+    await new Promise((r) => setTimeout(r, 10));
+    const firstSnap = { ...prismaState.snapshots.get("0000000010-0") };
+
+    // seen-set prevents re-apply of the same event id, so snapshot stays as-is.
+    await guardian.apply(event(10, "guardian_pause"));
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(prismaState.snapshots.size).toBe(1);
+    expect(prismaState.snapshots.get("0000000010-0")).toMatchObject(firstSnap);
+  });
+
+  it("snapshot capped at SNAPSHOT_MAX_INTENT_IDS for a large blacklist", async () => {
+    const many: Partial<Intent>[] = Array.from({ length: SNAPSHOT_MAX_INTENT_IDS + 10 }, (_, i) => ({
+      intentId: `i${i}`,
+      state: "open" as const,
+      solver: SOLVER,
+    }));
+    const repo = fakeIntentsRepo(many);
+    const { guardian } = await setup([], [], undefined, repo);
+
+    await guardian.apply(event(10, "guardian_blacklist", SOLVER));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const snap = prismaState.snapshots.get("0000000010-0");
+    expect(snap.affectedIntentIds).toHaveLength(SNAPSHOT_MAX_INTENT_IDS);
+    expect(snap.openIntentCount).toBe(SNAPSHOT_MAX_INTENT_IDS + 10);
+  });
+
+  it("snapshot failure is non-blocking — guardian state still applied", async () => {
+    const brokenRepo = {
+      findAll: jest.fn().mockRejectedValue(new Error("db timeout")),
+    } as unknown as IIntentsRepository;
+    const { guardian, writeBlocked } = await setup([], [], undefined, brokenRepo);
+
+    // Should not throw even though snapshot query fails.
+    await guardian.apply(event(10, "guardian_pause"));
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Guardian state IS applied despite snapshot failure.
+    expect(writeBlocked()).toBe(true);
+    expect(prismaState.snapshots.size).toBe(0);
   });
 });
