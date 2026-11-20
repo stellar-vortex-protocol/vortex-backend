@@ -583,8 +583,39 @@ model GuardianAction {
   clearedTxHash  String?   @map("cleared_tx_hash")
   overriddenBy   String?   @map("overridden_by")
 
+  /// Point-in-time blast-radius snapshot captured on activation (issue #507).
+  impactSnapshot GuardianImpactSnapshot?
+
   @@index([active])
   @@map("guardian_actions")
+}
+
+// ─── GuardianImpactSnapshot ──────────────────────────────────────────────────
+// Point-in-time blast-radius snapshot captured when a guardian action
+// activates (issue #507). Linked 1-to-1 with the GuardianAction it describes.
+//
+// For pause: protocol-wide open-intent count at activation time.
+// For blacklist (solver suspend): the suspended solver's open intent ids/count.
+// Not captured for freeze actions (parameter freezes have no affected-intents
+// concept).
+
+model GuardianImpactSnapshot {
+  id             BigInt   @id @default(autoincrement()) @map("id")
+  /// FK to guardian_actions.id (the Soroban event id).
+  actionId       String   @unique @map("action_id")
+  action         GuardianAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
+  /// "pause" | "blacklist"
+  kind           String   @map("kind")
+  /// For blacklist: the solver address that was suspended. Null for pause.
+  solverAddress  String?  @map("solver_address")
+  /// Total open (state = open | accepted) intent count at activation.
+  openIntentCount Int     @map("open_intent_count")
+  /// For blacklist: the ids of that solver's currently-open intents (up to 500).
+  /// For pause: null (count alone is sufficient; full id list would be huge).
+  affectedIntentIds String[] @map("affected_intent_ids")
+  capturedAt     DateTime @default(now()) @map("captured_at") @db.Timestamptz
+
+  @@map("guardian_impact_snapshots")
 }
 
 // ─── OnchainOutbox ───────────────────────────────────────────────────────────
