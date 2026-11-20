@@ -405,6 +405,31 @@ model KillSwitchApproval {
   @@map("kill_switch_approvals")
 }
 
+// ─── TreasuryAlert ───────────────────────────────────────────────────────────
+// Persistent record of every discrepancy alert raised by TreasuryService.
+// Operators acknowledge alerts via PATCH /api/v1/treasury/alerts/:id/acknowledge.
+
+model TreasuryAlert {
+  id           String   @id @default(uuid()) @map("id")
+  /// "warning" or "critical"
+  severity     String   @map("severity")
+  asset        String   @map("asset")
+  /// Discrepancy amount in base units (bigint as string).
+  discrepancy  String   @map("discrepancy")
+  message      String   @map("message")
+  /// ISO-8601 timestamp when the alert was raised.
+  timestamp    DateTime @default(now()) @map("timestamp") @db.Timestamptz
+  acknowledged Boolean  @default(false) @map("acknowledged")
+  /// ISO-8601 timestamp when the alert was acknowledged, if ever.
+  acknowledgedAt DateTime? @map("acknowledged_at") @db.Timestamptz
+  /// Admin or system id that acknowledged the alert.
+  acknowledgedBy String? @map("acknowledged_by")
+
+  @@index([acknowledged, asset])
+  @@index([timestamp(sort: Desc)])
+  @@map("treasury_alerts")
+}
+
 // ─── TreasurySnapshot ────────────────────────────────────────────────────────
 // Daily snapshots of expected vs actual treasury balances per asset.
 // Used for reconciliation and historical reporting.
