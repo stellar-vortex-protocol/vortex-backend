@@ -45,9 +45,17 @@ function makeConfigService(overrides: Record<string, unknown> = {}): ConfigServi
 }
 
 /** Build a minimal ProtocolParamsService with polling disabled. */
-function makeService(configOverrides: Record<string, unknown> = {}): ProtocolParamsService {
+function makeService(configOverrides: Record<string, unknown> = {}, prisma?: unknown): ProtocolParamsService {
   const cs = makeConfigService(configOverrides);
-  const svc = new ProtocolParamsService(cs);
+  const fakePrisma = prisma ?? {
+    governanceProposalDraft: {
+      create: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+      findUnique: jest.fn().mockResolvedValue(null),
+      update: jest.fn(),
+    },
+  };
+  const svc = new ProtocolParamsService(cs, fakePrisma as any);
   return svc;
 }
 
@@ -507,6 +515,215 @@ describe("snapshotForChain()", () => {
     expect(snapshot.feeBps).toBe(99);
     expect(snapshot.deadlineSeconds).toBe(300);
     expect(snapshot.fillWindowSeconds).toBe(60);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Governance proposal draft tests
+// ---------------------------------------------------------------------------
+
+import { NotFoundException } from "@nestjs/common";
+import { GovernanceProposalDraft, ProposedParamsInput } from "./params.service";
+
+function makeDraftRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "draft-1",
+    proposedParams: { feeBps: 30 },
+    status: "draft",
+    createdBy: "admin1",
+    description: null,
+    validationErrors: [],
+    createdAt: new Date("2026-01-01T00:00:00Z"),
+    updatedAt: new Date("2026-01-01T00:00:00Z"),
+    ...overrides,
+  };
+}
+
+const admin = { id: "admin1", role: "admin" as const };
+
+describe("validateProposedParams()", () => {
+  const svc = makeService();
+
+  it("returns empty array for a fully valid proposal", () => {
+    const errors = svc.validateProposedParams({ feeBps: 30, maxExposureRatio: 0.05, slashAmount: "100000000" });
+    expect(errors).toHaveLength(0);
+  });
+
+  it("returns a violation for feeBps above max", () => {
+    const errors = svc.validateProposedParams({ feeBps: 9999 });
+    expect(errors).toHaveLength(1);
+    expect(errors[0].field).toBe("feeBps");
+    expect(errors[0].min).toBe(PARAM_BOUNDS.feeBpsMin);
+    expect(errors[0].max).toBe(PARAM_BOUNDS.feeBpsMax);
+  });
+
+  it("returns a violation for feeBps below min (negative)", () => {
+    const errors = svc.validateProposedParams({ feeBps: -1 });
+    expect(errors[0].field).toBe("feeBps");
+  });
+
+  it("returns a violation for maxExposureRatio > 1", () => {
+    const errors = svc.validateProposedParams({ maxExposureRatio: 1.5 });
+    expect(errors[0].field).toBe("maxExposureRatio");
+  });
+
+  it("returns a violation for invalid slashAmount string", () => {
+    const errors = svc.validateProposedParams({ slashAmount: "not-a-number" });
+    expect(errors[0].field).toBe("slashAmount");
+  });
+
+  it("returns a violation for slashAmount above max", () => {
+    const errors = svc.validateProposedParams({ slashAmount: "9999999999999999" });
+    expect(errors[0].field).toBe("slashAmount");
+  });
+
+  it("returns violations for out-of-bounds chain deadline and fillWindow", () => {
+    const errors = svc.validateProposedParams({
+      chains: { stellar: { deadlineSeconds: 5, fillWindowSeconds: 999999 } },
+    });
+    expect(errors).toHaveLength(2);
+    expect(errors.map((e) => e.field)).toContain("chains.stellar.deadlineSeconds");
+    expect(errors.map((e) => e.field)).toContain("chains.stellar.fillWindowSeconds");
+  });
+
+  it("collects ALL violations, not just the first", () => {
+    const errors = svc.validateProposedParams({
+      feeBps: 99999,
+      maxExposureRatio: -1,
+      slashAmount: "bad",
+    });
+    expect(errors.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("ignores fields not supplied (partial proposal)", () => {
+    const errors = svc.validateProposedParams({ feeBps: 50 });
+    expect(errors).toHaveLength(0);
+  });
+});
+
+describe("createProposal()", () => {
+  it("creates with status 'validated' when all params pass", async () => {
+    const created = makeDraftRow({ status: "validated", validationErrors: [] });
+    const prisma = {
+      governanceProposalDraft: { create: jest.fn().mockResolvedValue(created) },
+    };
+    const svc = makeService({}, prisma);
+    const result = await svc.createProposal({ feeBps: 30 }, admin, "fee tune");
+    expect(result.status).toBe("validated");
+    expect(result.validationErrors).toHaveLength(0);
+    expect(prisma.governanceProposalDraft.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "validated" }) }),
+    );
+  });
+
+  it("creates with status 'draft' and populates validationErrors when params violate bounds", async () => {
+    const errors = [{ field: "feeBps", value: 9999, message: "out of bounds" }];
+    const created = makeDraftRow({ status: "draft", validationErrors: errors });
+    const prisma = {
+      governanceProposalDraft: { create: jest.fn().mockResolvedValue(created) },
+    };
+    const svc = makeService({}, prisma);
+    const result = await svc.createProposal({ feeBps: 9999 }, admin);
+    expect(result.status).toBe("draft");
+    expect(result.validationErrors).toHaveLength(1);
+    expect(result.validationErrors![0].field).toBe("feeBps");
+  });
+});
+
+describe("listProposals()", () => {
+  it("returns all drafts when no status filter", async () => {
+    const rows = [makeDraftRow({ id: "d1" }), makeDraftRow({ id: "d2", status: "validated" })];
+    const prisma = {
+      governanceProposalDraft: { findMany: jest.fn().mockResolvedValue(rows) },
+    };
+    const svc = makeService({}, prisma);
+    const result = await svc.listProposals();
+    expect(result).toHaveLength(2);
+    expect(prisma.governanceProposalDraft.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: undefined }),
+    );
+  });
+
+  it("passes status filter to the query", async () => {
+    const prisma = {
+      governanceProposalDraft: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const svc = makeService({}, prisma);
+    await svc.listProposals("validated");
+    expect(prisma.governanceProposalDraft.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { status: "validated" } }),
+    );
+  });
+});
+
+describe("updateProposalStatus()", () => {
+  it("throws NotFoundException when draft does not exist", async () => {
+    const prisma = {
+      governanceProposalDraft: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        update: jest.fn(),
+      },
+    };
+    const svc = makeService({}, prisma);
+    await expect(svc.updateProposalStatus("missing-id", "submitted")).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it("transitions to 'submitted' without re-running validation", async () => {
+    const existing = makeDraftRow({ status: "validated", validationErrors: [] });
+    const updated = makeDraftRow({ status: "submitted" });
+    const prisma = {
+      governanceProposalDraft: {
+        findUnique: jest.fn().mockResolvedValue(existing),
+        update: jest.fn().mockResolvedValue(updated),
+      },
+    };
+    const svc = makeService({}, prisma);
+    const result = await svc.updateProposalStatus("draft-1", "submitted");
+    expect(result.status).toBe("submitted");
+    // No validationErrors key in update call
+    expect(prisma.governanceProposalDraft.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.not.objectContaining({ validationErrors: expect.anything() }),
+      }),
+    );
+  });
+
+  it("re-runs validation and updates validationErrors when transitioning to 'validated'", async () => {
+    const badParams: ProposedParamsInput = { feeBps: 99999 };
+    const existing = makeDraftRow({ status: "draft", proposedParams: badParams });
+    const updatedRow = makeDraftRow({
+      status: "validated",
+      proposedParams: badParams,
+      validationErrors: [{ field: "feeBps", value: 99999, message: "out of bounds" }],
+    });
+    const prisma = {
+      governanceProposalDraft: {
+        findUnique: jest.fn().mockResolvedValue(existing),
+        update: jest.fn().mockResolvedValue(updatedRow),
+      },
+    };
+    const svc = makeService({}, prisma);
+    const result = await svc.updateProposalStatus("draft-1", "validated");
+    expect(prisma.governanceProposalDraft.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ validationErrors: expect.any(Array) }),
+      }),
+    );
+    expect(result.validationErrors).toHaveLength(1);
+  });
+
+  it("transitions to 'rejected'", async () => {
+    const existing = makeDraftRow({ status: "draft" });
+    const updated = makeDraftRow({ status: "rejected" });
+    const prisma = {
+      governanceProposalDraft: {
+        findUnique: jest.fn().mockResolvedValue(existing),
+        update: jest.fn().mockResolvedValue(updated),
+      },
+    };
+    const svc = makeService({}, prisma);
+    const result = await svc.updateProposalStatus("draft-1", "rejected");
+    expect(result.status).toBe("rejected");
   });
 });
 

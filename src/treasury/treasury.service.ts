@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger, NotFoundException, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Cron, CronExpression } from "@nestjs/schedule";
 import { PrismaService } from "../prisma/prisma.service";
@@ -10,11 +10,14 @@ import {
   ReconciliationResult,
   ReconciliationSummary,
   ReconciliationDetailResponse,
+  TreasuryAlert,
   FeeLedgerEntry,
   SlashLedgerEntry,
   RefundLedgerEntry,
 } from "./treasury.types";
 import { AppConfig } from "../config/configuration";
+import { TREASURY_ALERT_DELIVERY, ITreasuryAlertDelivery } from "./treasury-alert-delivery";
+import { v4 as uuidv4 } from "uuid";
 
 /**
  * TreasuryService
@@ -33,6 +36,8 @@ export class TreasuryService {
     private readonly prisma: PrismaService,
     private readonly soroban: SorobanService,
     private readonly configService: ConfigService<AppConfig, true>,
+    @Optional() @Inject(TREASURY_ALERT_DELIVERY)
+    private readonly alertDelivery?: ITreasuryAlertDelivery,
   ) {
     const horizonUrl = this.configService.get("stellar.horizonUrl", { infer: true });
     this.horizonServer = new StellarSdk.Horizon.Server(horizonUrl);
@@ -488,18 +493,120 @@ export class TreasuryService {
   }
 
   /**
-   * Alert on unexplained discrepancies
+   * Persist a TreasuryAlert row and deliver it to the configured channel.
+   * Delivery failures are logged and swallowed so a bad webhook never aborts
+   * the nightly reconciliation loop.
    */
   private async alertDiscrepancy(result: ReconciliationResult): Promise<void> {
     const severity = this.getSeverity(result);
-    
+    const message =
+      `Treasury balance for ${result.asset} is off by ${result.discrepancy} base units ` +
+      `(${result.discrepancyPercentage.toFixed(2)}%). Requires investigation.`;
+
     this.logger.warn(
       `[${severity.toUpperCase()}] Treasury discrepancy detected for ${result.asset}: ` +
       `${result.discrepancy} base units (${result.discrepancyPercentage.toFixed(2)}%)`,
     );
 
-    // TODO: Integrate with alerting system (PagerDuty, Slack, etc.)
-    // For now, just log the alert
+    // Persist the alert.
+    const row = await this.prisma.treasuryAlert.create({
+      data: {
+        id: uuidv4(),
+        severity,
+        asset: result.asset,
+        discrepancy: result.discrepancy,
+        message,
+      },
+    });
+
+    const alert: TreasuryAlert = {
+      id: row.id,
+      severity: row.severity as TreasuryAlert["severity"],
+      asset: row.asset,
+      discrepancy: row.discrepancy,
+      message: row.message,
+      timestamp: row.timestamp.toISOString(),
+      acknowledged: row.acknowledged,
+    };
+
+    // Deliver to external channel — failures must not throw.
+    if (this.alertDelivery) {
+      try {
+        await this.alertDelivery.deliver(alert);
+      } catch (err) {
+        this.logger.error(
+          `[treasury] Alert delivery failed for alert ${alert.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * List persisted treasury alerts. All filters are optional.
+   */
+  async listAlerts(filters: {
+    acknowledged?: boolean;
+    asset?: string;
+    severity?: string;
+  } = {}): Promise<TreasuryAlert[]> {
+    const rows = await this.prisma.treasuryAlert.findMany({
+      where: {
+        ...(filters.acknowledged !== undefined ? { acknowledged: filters.acknowledged } : {}),
+        ...(filters.asset ? { asset: filters.asset } : {}),
+        ...(filters.severity ? { severity: filters.severity } : {}),
+      },
+      orderBy: { timestamp: "desc" },
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      severity: r.severity as TreasuryAlert["severity"],
+      asset: r.asset,
+      discrepancy: r.discrepancy,
+      message: r.message,
+      timestamp: r.timestamp.toISOString(),
+      acknowledged: r.acknowledged,
+    }));
+  }
+
+  /**
+   * Acknowledge a treasury alert. Idempotent — acknowledging an already-
+   * acknowledged alert is a no-op and returns the unchanged record.
+   */
+  async acknowledgeAlert(id: string, acknowledgedBy: string): Promise<TreasuryAlert> {
+    const existing = await this.prisma.treasuryAlert.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException(`Treasury alert ${id} not found`);
+
+    // Idempotent: if already acknowledged just return the existing record.
+    if (existing.acknowledged) {
+      return {
+        id: existing.id,
+        severity: existing.severity as TreasuryAlert["severity"],
+        asset: existing.asset,
+        discrepancy: existing.discrepancy,
+        message: existing.message,
+        timestamp: existing.timestamp.toISOString(),
+        acknowledged: true,
+      };
+    }
+
+    const updated = await this.prisma.treasuryAlert.update({
+      where: { id },
+      data: {
+        acknowledged: true,
+        acknowledgedAt: new Date(),
+        acknowledgedBy,
+      },
+    });
+
+    return {
+      id: updated.id,
+      severity: updated.severity as TreasuryAlert["severity"],
+      asset: updated.asset,
+      discrepancy: updated.discrepancy,
+      message: updated.message,
+      timestamp: updated.timestamp.toISOString(),
+      acknowledged: updated.acknowledged,
+    };
   }
 
   /**
