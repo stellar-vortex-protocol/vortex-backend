@@ -17,6 +17,19 @@ export interface SolverInventoryEntry {
   availableAmount: string;
 }
 
+/**
+ * Supplementary collateral posted in an asset other than the primary
+ * `bondAmount` denomination (issue #647).
+ *
+ * `amount` is a decimal string in the asset's base units. Purely
+ * informational/reporting in this iteration: bond-sufficiency checks
+ * (#114/#398) remain keyed off the primary `bondAmount` only.
+ */
+export interface SolverAdditionalBond {
+  asset: string;
+  amount: string;
+}
+
 export interface SolverRecord {
   address: string;
   name: string;
@@ -39,6 +52,17 @@ export interface SolverRecord {
    * exceeds `availableAmount` are filtered out of getEligibleIntents.
    */
   inventory?: SolverInventoryEntry[];
+  /**
+   * Supplementary collateral posted in assets other than the primary
+   * `bondAmount` denomination (issue #647).
+   *
+   * Additive and purely informational/reporting: it does not affect
+   * bond-sufficiency checks, which remain keyed off `bondAmount`. Each
+   * `asset` must be a symbol known to the token registry, and duplicate
+   * assets within a single update are rejected. Absent/empty means no
+   * additional bonds.
+   */
+  additionalBonds?: SolverAdditionalBond[];
   /**
    * Secondary operational signing keys (issue #639).
    *
