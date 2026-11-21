@@ -9,6 +9,7 @@ import {
 	Patch,
 	Post,
 	Query,
+	UseGuards,
 } from "@nestjs/common";
 import {
 	ApiBadRequestResponse,
@@ -22,6 +23,7 @@ import {
 import { IntentsService } from "../intents/intents.service";
 import { RequireScope } from "../auth/solver-credentials/require-scope.decorator";
 import { ScopeGuard } from "../auth/solver-credentials/scope.guard";
+import { AdminGuard } from "../admin/admin.guard";
 import {
 	buildDisputeMessage,
 	buildRegisterMessage,
@@ -40,6 +42,11 @@ const WINDOW_SECONDS: Record<Exclude<LeaderboardWindow, "all">, number> = {
 	"7d": 7 * 24 * 60 * 60,
 	"30d": 30 * 24 * 60 * 60,
 };
+
+const COHORT_AGE_MARKS = [7, 30, 90] as const;
+const DEFAULT_RECENCY_WINDOW_DAYS = 30;
+const SECONDS_PER_DAY = 24 * 60 * 60;
+const SECONDS_PER_WEEK = 7 * SECONDS_PER_DAY;
 
 @ApiTags("solvers")
 @Controller({ path: "solvers", version: "1" })
@@ -127,6 +134,68 @@ export class SolversController {
 		return { solvers: ranked, count: ranked.length, window: resolvedWindow };
 	}
 
+	@Get("cohort-retention")
+	@UseGuards(AdminGuard)
+	@ApiOperation({
+		summary: "Solver cohort retention report",
+		description:
+			"Buckets solvers into weekly cohorts by registration time and reports the fraction still active at 7/30/90-day marks. Admin-only operator metric.",
+	})
+	@ApiQuery({
+		name: "recencyWindowDays",
+		required: false,
+		type: Number,
+		description: "Days since lastActiveAt to still count as active (default 30).",
+	})
+	@ApiOkResponse({ description: "Weekly cohort retention report" })
+	@ApiUnauthorizedResponse({ description: "Admin credentials required" })
+	async getCohortRetention(@Query("recencyWindowDays") recencyWindowDays?: string) {
+		const recencyDays = this.parseRecencyWindow(recencyWindowDays);
+		const solvers = await this.solversService.getAll();
+		const now = Math.floor(Date.now() / 1000);
+		const recencyCutoff = now - recencyDays * SECONDS_PER_DAY;
+
+		const cohorts = new Map<number, typeof solvers>();
+		for (const solver of solvers) {
+			const weekStart = Math.floor(solver.registeredAt / SECONDS_PER_WEEK) * SECONDS_PER_WEEK;
+			const bucket = cohorts.get(weekStart);
+			if (bucket) bucket.push(solver);
+			else cohorts.set(weekStart, [solver]);
+		}
+
+		const report = Array.from(cohorts.entries())
+			.sort((a, b) => a[0] - b[0])
+			.map(([weekStart, members]) => {
+				const retention: Record<string, number | null> = {};
+				for (const mark of COHORT_AGE_MARKS) {
+					const markCutoff = weekStart + mark * SECONDS_PER_DAY;
+					if (now < markCutoff) {
+						retention[`day${mark}`] = null;
+						continue;
+					}
+					const active = members.filter((solver) => {
+						if (solver.isActive) return true;
+						return solver.lastActiveAt != null && solver.lastActiveAt >= recencyCutoff;
+					}).length;
+					retention[`day${mark}`] = members.length > 0 ? Number((active / members.length).toFixed(4)) : null;
+				}
+
+				return {
+					cohortWeekStart: weekStart,
+					cohortWeekStartIso: new Date(weekStart * 1000).toISOString(),
+					cohortSize: members.length,
+					retention,
+				};
+			});
+
+		return {
+			cohorts: report,
+			count: report.length,
+			recencyWindowDays: recencyDays,
+			ageMarks: [...COHORT_AGE_MARKS],
+		};
+	}
+
 	@Get()
 	async getLegacyLeaderboard() {
 		const solvers = (await this.solversService.getAll()).sort(
@@ -206,89 +275,27 @@ export class SolversController {
 			totalVolume: completed.reduce((sum, intent) => sum + BigInt(intent.fillAmount ?? "0"), 0n).toString(),
 			avgFillTime: completed.filter((intent) => intent.filledAt != null).length
 				? Math.round(
-						completed
-							.filter((intent) => intent.filledAt != null)
-							.reduce((sum, intent) => sum + (intent.filledAt! - intent.createdAt), 0) /
+						completed.reduce((sum, intent) => sum + ((intent.filledAt ?? intent.createdAt) - intent.createdAt), 0) /
 							completed.filter((intent) => intent.filledAt != null).length,
 					)
 				: 0,
-			bondAmount: solver.bondAmount,
 			window: resolvedWindow,
 		};
 	}
 
-	@Get(":address/slashes")
-	async getSlashHistory(
-		@Param("address") address: string,
-		@Query("page") page = "1",
-		@Query("pageSize") pageSize = "25",
-	) {
-		const solver = await this.solversService.get(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return this.solversService.getSlashHistory(address, Number(page) || 1, Number(pageSize) || 25);
-	}
-
-	@Post(":address/slashes/:slashId/dispute")
-	async submitDispute(
-		@Param("address") address: string,
-		@Param("slashId") slashId: string,
-		@Body() dto: { reason: string; evidenceReference?: string; signature: string },
-	) {
-		const solver = await this.solversService.get(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		verifyStellarSignature(address, buildDisputeMessage(slashId, address, dto.reason), dto.signature);
-		const record = await this.solversService.submitDispute(address, slashId, dto.reason, dto.evidenceReference);
-		if (!record) throw new NotFoundException("Slash record not found");
-		return record;
-	}
-
-	@Post(":address/slashes/:slashId/dispute/resolve")
-	async resolveDispute(
-		@Param("address") address: string,
-		@Param("slashId") slashId: string,
-		@Body() dto: { resolution: "resolved-upheld" | "resolved-reversed"; reviewer?: string; note?: string },
-	) {
-		const solver = await this.solversService.get(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		const record = await this.solversService.resolveDispute(address, slashId, dto.resolution, dto.reviewer, dto.note);
-		if (!record) throw new NotFoundException("Slash record not found");
-		return record;
-	}
-
-	@Post(":address/deregister")
-	@RequireScope("solver:deregister")
-	async deregisterSolver(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-		verifyStellarSignature(address, buildSolverStatusMessage("deregister", address), dto.signature);
-		const solver = await this.solversService.deregister(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return {
-			...solver,
-			withdrawalStatus: "pending",
-			withdrawalRequestedAt: Math.floor(Date.now() / 1000),
-		};
-	}
-
-	@Post(":address/deactivate")
-	async deactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-		verifyStellarSignature(address, buildSolverStatusMessage("deactivate", address), dto.signature);
-		const solver = await this.solversService.deactivate(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return solver;
-	}
-
-	@Post(":address/reactivate")
-	async reactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-		verifyStellarSignature(address, buildSolverStatusMessage("reactivate", address), dto.signature);
-		const solver = await this.solversService.reactivate(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return solver;
-	}
-
-	private normalizeWindow(window?: string): LeaderboardWindow {
-		const normalized = (window ?? "all").toLowerCase();
-		if (normalized === "all" || normalized === "24h" || normalized === "7d" || normalized === "30d") {
-			return normalized as LeaderboardWindow;
+	private parseRecencyWindow(value?: string): number {
+		if (value == null || value === "") return DEFAULT_RECENCY_WINDOW_DAYS;
+		const parsed = Number(value);
+		if (!Number.isFinite(parsed) || parsed <= 0) {
+			throw new BadRequestException("recencyWindowDays must be a positive number");
 		}
-		throw new BadRequestException("Unsupported leaderboard window. Choose 24h, 7d, 30d, or all.");
+		return parsed;
+	}
+
+	private normalizeWindow(window: string): LeaderboardWindow {
+		if (window === "24h" || window === "7d" || window === "30d" || window === "all") {
+			return window;
+		}
+		throw new BadRequestException("Invalid window. Expected one of: 24h, 7d, 30d, all");
 	}
 }

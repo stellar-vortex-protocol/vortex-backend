@@ -39,3 +39,26 @@ export interface ISolversRepository {
    */
   findAll(): SolverRecord[] | Promise<SolverRecord[]>;
 }
+
+/**
+ * In-memory adapter for {@link ISolversRepository}.
+ *
+ * Backed by a Map keyed on solver address. Suitable for tests and local
+ * development; production deployments should provide a persistent adapter.
+ */
+export class InMemorySolversRepository implements ISolversRepository {
+  private readonly records = new Map<string, SolverRecord>();
+
+  save(solver: SolverRecord): SolverRecord {
+    this.records.set(solver.address, solver);
+    return solver;
+  }
+
+  findByAddress(address: string): SolverRecord | undefined {
+    return this.records.get(address);
+  }
+
+  findAll(): SolverRecord[] {
+    return Array.from(this.records.values());
+  }
+}
