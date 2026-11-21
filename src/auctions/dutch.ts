@@ -80,3 +80,27 @@ export function currentAuctionPrice(
   if (!auction) return null;
   return dutchAuctionPrice(auction, timestamp, minDstAmount);
 }
+
+/** A single member of a batch-clearing group. */
+export interface BatchAuctionMember {
+  auction: DutchAuction;
+  minDstAmount: string;
+}
+
+/**
+ * Compute a single uniform clearing price for a batch of same-pair Dutch
+ * auctions at `timestamp`. The clearing price is the most restrictive member
+ * price (the minimum across the group), so every member's `minDstAmount` is
+ * satisfied by the uniform price. A group of exactly one member yields the
+ * same value as `dutchAuctionPrice()` for that member, keeping the batch path
+ * identical to the non-batch path for singletons.
+ */
+export function batchClearingPrice(members: BatchAuctionMember[], timestamp: number): string | null {
+  if (members.length === 0) return null;
+  let clearing: bigint | null = null;
+  for (const member of members) {
+    const price = BigInt(dutchAuctionPrice(member.auction, timestamp, member.minDstAmount));
+    if (clearing === null || price < clearing) clearing = price;
+  }
+  return clearing === null ? null : clearing.toString();
+}
