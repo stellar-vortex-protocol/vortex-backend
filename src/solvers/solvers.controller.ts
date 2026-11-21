@@ -34,6 +34,7 @@ import { ListIntentsDto } from "../intents/dto/list-intents.dto";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
 import { UpdateSolverDto } from "./dto/update-solver.dto";
 import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
+import { PricingAggregatorService } from "../pricing/aggregator.service";
 
 const WINDOW_SECONDS: Record<Exclude<LeaderboardWindow, "all">, number> = {
 	"24h": 24 * 60 * 60,
@@ -47,6 +48,7 @@ export class SolversController {
 	constructor(
 		private readonly solversService: SolversService,
 		private readonly intentsService: IntentsService,
+		private readonly pricingAggregator: PricingAggregatorService,
 	) {}
 
 	@Post()
@@ -101,6 +103,10 @@ export class SolversController {
 				return {
 					address: solver.address,
 					name: solver.name,
+					avatarUrl: solver.avatarUrl ?? null,
+					description: solver.description ?? null,
+					websiteUrl: solver.websiteUrl ?? null,
+					verified: solver.verified ?? false,
 					fillsCompleted,
 					fillsFailed,
 					successRate: Number(successRate.toFixed(4)),
@@ -142,7 +148,16 @@ export class SolversController {
 		if (!solver.isActive) throw new ForbiddenException("Solver is not active");
 
 		const open = await this.intentsService.getByState("open");
-		const eligible = open.filter((intent) => solverSupports(solver, intent.srcChain, intent.srcToken.symbol));
+		const supported = open.filter((intent) =>
+			solverSupports(solver, intent.srcChain, intent.srcToken.symbol),
+		);
+
+		const minIntentSizeUsd = solver.minIntentSizeUsd;
+		const eligible =
+			minIntentSizeUsd === undefined || minIntentSizeUsd === null
+				? supported
+				: await this.filterByMinIntentSize(supported, minIntentSizeUsd);
+
 		const limit = Math.min(dto.limit ?? 20, 100);
 		const offset = dto.offset ?? 0;
 		if ((dto.limit ?? 20) > 100) {
@@ -151,6 +166,29 @@ export class SolversController {
 
 		const page = eligible.slice(offset, offset + limit);
 		return { intents: page, total: eligible.length, count: eligible.length, limit, offset };
+	}
+
+	private async filterByMinIntentSize<T extends { srcToken: { symbol: string }; amount: string }>(
+		intents: T[],
+		minIntentSizeUsd: number,
+	): Promise<T[]> {
+		const results = await Promise.all(
+			intents.map(async (intent) => {
+				let usdValue: number | null = null;
+				try {
+					usdValue = await this.pricingAggregator.getUsdValue(
+						intent.srcToken.symbol,
+						intent.amount,
+					);
+				} catch {
+					usdValue = null;
+				}
+				// Fail open: if the intent cannot be priced, keep it visible.
+				if (usdValue === null || usdValue === undefined) return intent;
+				return usdValue >= minIntentSizeUsd ? intent : null;
+			}),
+		);
+		return results.filter((intent): intent is T => intent !== null);
 	}
 
 	@Get(":address")
@@ -199,96 +237,35 @@ export class SolversController {
 		return {
 			address: solver.address,
 			name: solver.name,
+			avatarUrl: solver.avatarUrl ?? null,
+			description: solver.description ?? null,
+			websiteUrl: solver.websiteUrl ?? null,
+			verified: solver.verified ?? false,
 			fillsCompleted,
 			fillsFailed,
 			successRate: Number(successRate.toFixed(4)),
 			reputationScore: Number((successRate * Math.exp(-ageDays / 180)).toFixed(4)),
-			totalVolume: completed.reduce((sum, intent) => sum + BigInt(intent.fillAmount ?? "0"), 0n).toString(),
-			avgFillTime: completed.filter((intent) => intent.filledAt != null).length
+			totalVolume: completed
+				.reduce((sum, intent) => sum + BigInt(intent.fillAmount ?? "0"), 0n)
+				.toString(),
+			avgFillTime: completed.length
 				? Math.round(
-						completed
-							.filter((intent) => intent.filledAt != null)
-							.reduce((sum, intent) => sum + (intent.filledAt! - intent.createdAt), 0) /
-							completed.filter((intent) => intent.filledAt != null).length,
+						completed.reduce((sum, intent) => {
+							if (!intent.filledAt) return sum;
+							return sum + (intent.filledAt - intent.createdAt);
+						}, 0) / completed.length,
 					)
 				: 0,
 			bondAmount: solver.bondAmount,
+			isActive: solver.isActive,
 			window: resolvedWindow,
 		};
 	}
 
-	@Get(":address/slashes")
-	async getSlashHistory(
-		@Param("address") address: string,
-		@Query("page") page = "1",
-		@Query("pageSize") pageSize = "25",
-	) {
-		const solver = await this.solversService.get(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return this.solversService.getSlashHistory(address, Number(page) || 1, Number(pageSize) || 25);
-	}
-
-	@Post(":address/slashes/:slashId/dispute")
-	async submitDispute(
-		@Param("address") address: string,
-		@Param("slashId") slashId: string,
-		@Body() dto: { reason: string; evidenceReference?: string; signature: string },
-	) {
-		const solver = await this.solversService.get(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		verifyStellarSignature(address, buildDisputeMessage(slashId, address, dto.reason), dto.signature);
-		const record = await this.solversService.submitDispute(address, slashId, dto.reason, dto.evidenceReference);
-		if (!record) throw new NotFoundException("Slash record not found");
-		return record;
-	}
-
-	@Post(":address/slashes/:slashId/dispute/resolve")
-	async resolveDispute(
-		@Param("address") address: string,
-		@Param("slashId") slashId: string,
-		@Body() dto: { resolution: "resolved-upheld" | "resolved-reversed"; reviewer?: string; note?: string },
-	) {
-		const solver = await this.solversService.get(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		const record = await this.solversService.resolveDispute(address, slashId, dto.resolution, dto.reviewer, dto.note);
-		if (!record) throw new NotFoundException("Slash record not found");
-		return record;
-	}
-
-	@Post(":address/deregister")
-	@RequireScope("solver:deregister")
-	async deregisterSolver(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-		verifyStellarSignature(address, buildSolverStatusMessage("deregister", address), dto.signature);
-		const solver = await this.solversService.deregister(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return {
-			...solver,
-			withdrawalStatus: "pending",
-			withdrawalRequestedAt: Math.floor(Date.now() / 1000),
-		};
-	}
-
-	@Post(":address/deactivate")
-	async deactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-		verifyStellarSignature(address, buildSolverStatusMessage("deactivate", address), dto.signature);
-		const solver = await this.solversService.deactivate(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return solver;
-	}
-
-	@Post(":address/reactivate")
-	async reactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-		verifyStellarSignature(address, buildSolverStatusMessage("reactivate", address), dto.signature);
-		const solver = await this.solversService.reactivate(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return solver;
-	}
-
-	private normalizeWindow(window?: string): LeaderboardWindow {
-		const normalized = (window ?? "all").toLowerCase();
-		if (normalized === "all" || normalized === "24h" || normalized === "7d" || normalized === "30d") {
-			return normalized as LeaderboardWindow;
+	private normalizeWindow(window: string): LeaderboardWindow {
+		if (window === "24h" || window === "7d" || window === "30d" || window === "all") {
+			return window;
 		}
-		throw new BadRequestException("Unsupported leaderboard window. Choose 24h, 7d, 30d, or all.");
+		return "all";
 	}
 }

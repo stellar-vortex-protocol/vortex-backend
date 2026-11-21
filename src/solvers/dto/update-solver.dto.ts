@@ -4,8 +4,11 @@ import {
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
+  IsUrl,
+  Matches,
   MaxLength,
   Min,
 } from "class-validator";
@@ -25,11 +28,16 @@ const SUPPORTED_CHAINS: SupportedChain[] = [
 /**
  * Partial update to a solver's *mutable* profile fields (issue #273).
  *
- * Only `name`, `supportedChains`, `supportedTokens` and `avgFillTime` may be
+ * Only `name`, `supportedChains`, `supportedTokens`, `avgFillTime`,
+ * `avatarUrl`, `description`, `websiteUrl` and `minIntentSizeUsd` may be
  * changed. Immutable fields (`address`, `bondAmount`, `fillsCompleted`,
  * `fillsFailed`, `totalVolume`, `registeredAt`, `isActive`) are not declared
  * here, so the global `ValidationPipe({ whitelist: true })` strips them from
  * the request body before this DTO is ever handed to the controller.
+ *
+ * `verified` is deliberately NOT declared here (issue #643): it is an
+ * operator-only badge settable solely through the admin-gated endpoint, so a
+ * compromised solver signature can never self-certify.
  */
 export class UpdateSolverDto {
   @ApiPropertyOptional({ description: "New display name" })
@@ -61,6 +69,49 @@ export class UpdateSolverDto {
   @IsInt()
   @Min(0)
   avgFillTime?: number;
+
+  @ApiPropertyOptional({
+    description:
+      "Link to an externally hosted avatar image (https:// only; images are not uploaded here)",
+    maxLength: 512,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  @IsUrl({ protocols: ["https"], require_protocol: true, require_tld: false })
+  @Matches(/^https:\/\//i, { message: "avatarUrl must use the https:// scheme" })
+  avatarUrl?: string;
+
+  @ApiPropertyOptional({
+    description: "Plain-text public description of the solver (HTML is stripped)",
+    maxLength: 1000,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  description?: string;
+
+  @ApiPropertyOptional({
+    description: "Link to the solver's website (https:// only)",
+    maxLength: 512,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  @IsUrl({ protocols: ["https"], require_protocol: true, require_tld: false })
+  @Matches(/^https:\/\//i, { message: "websiteUrl must use the https:// scheme" })
+  websiteUrl?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "Minimum USD value of an intent's source amount to include in this solver's " +
+      "eligible-intents list; omit to see all open intents (issue #644)",
+    minimum: 0,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  minIntentSizeUsd?: number;
 
   @ApiProperty({
     description:
