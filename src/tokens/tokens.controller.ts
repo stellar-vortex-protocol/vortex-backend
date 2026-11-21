@@ -88,6 +88,64 @@ export class TokensController {
     return this.tokensService.getByChain(chain);
   }
 
+  @Get("search")
+  @ApiQuery({
+    name: "q",
+    required: true,
+    description:
+      "Case-insensitive substring to match against token `symbol` and `name`.",
+  })
+  @ApiQuery({
+    name: "chain",
+    required: false,
+    description: "Restrict the search to a single chain (e.g. `stellar`, `ethereum`, `base`).",
+  })
+  @ApiQuery({
+    name: "limit",
+    required: false,
+    description: "Maximum number of results to return (default 20, max 100).",
+    schema: { type: "integer", default: 20, minimum: 1, maximum: 100 },
+  })
+  @ApiQuery({
+    name: "cursor",
+    required: false,
+    description: "Opaque cursor for pagination, taken from a previous response's `nextCursor`.",
+  })
+  @ApiOkResponse({
+    description:
+      "Tokens whose `symbol` or `name` contains `q` (case-insensitive). Delisted tokens are excluded.",
+    schema: {
+      type: "object",
+      properties: {
+        tokens: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              address: { type: "string" },
+              contract: { type: "string" },
+              symbol: { type: "string", example: "USDC" },
+              name: { type: "string", example: "USD Coin" },
+              decimals: { type: "number", example: 6 },
+              priceUSD: { type: "number", example: 1 },
+            },
+            required: ["symbol", "name", "decimals", "priceUSD"],
+          },
+        },
+        nextCursor: { type: "string", nullable: true },
+      },
+      required: ["tokens"],
+    },
+  })
+  searchTokens(
+    @Query("q") q: string,
+    @Query("chain") chain?: string,
+    @Query("limit") limit?: string,
+    @Query("cursor") cursor?: string,
+  ) {
+    return this.tokensService.search(q, chain, limit, cursor);
+  }
+
   @Get("stellar")
   @ApiOkResponse({
     type: StellarTokensResponseDto,

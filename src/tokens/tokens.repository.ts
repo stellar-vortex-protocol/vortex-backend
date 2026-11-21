@@ -28,6 +28,11 @@ export interface ITokensRepository {
   findByChain(chain: SupportedChain | string): TokenRecord[];
   findByAddressAndChain(address: string, chain: SupportedChain | string): TokenRecord | undefined;
   /**
+   * Case-insensitive substring match against `symbol` and `name`, optionally
+   * narrowed to a single chain. Delisted rows are filtered by the service.
+   */
+  search(query: string, chain?: SupportedChain | string): Promise<TokenRecord[]>;
+  /**
    * Insert or replace the row for `(address, chain)` and drop any cached copy.
    * Must not be called with metadata that failed on-chain verification.
    */
