@@ -206,3 +206,77 @@ export function parseReferrals(raw: string | undefined): ReferralCode[] {
   const parsed = JSON.parse(raw) as ReferralCode[];
   return Array.isArray(parsed) ? parsed : [];
 }
+
+export interface FeeRuleValidationError {
+  /** Index of the offending rule in the candidate array. */
+  index: number;
+  ruleId: string | null;
+  field: string;
+  message: string;
+}
+
+/**
+ * Validate a candidate rule set with the same invariants `clamp()` enforces at
+ * quote time, plus the structural checks `quoteFee()` would otherwise only
+ * surface as a thrown error mid-quote. Returns one entry per problem so callers
+ * can report errors per-rule instead of a single generic failure.
+ */
+export function validateFeeRules(rules: readonly FeeRule[]): FeeRuleValidationError[] {
+  const errors: FeeRuleValidationError[] = [];
+  rules.forEach((rule, index) => {
+    const ruleId = typeof rule?.id === "string" ? rule.id : null;
+    const push = (field: string, message: string) =>
+      errors.push({ index, ruleId, field, message });
+
+    if (!rule || typeof rule !== "object") {
+      push("rule", "rule must be an object");
+      return;
+    }
+    if (typeof rule.id !== "string" || rule.id === "") push("id", "id is required");
+    if (rule.scope !== "pair" && rule.scope !== "chain" && rule.scope !== "default") {
+      push("scope", "scope must be pair, chain, or default");
+    }
+    if (typeof rule.bps !== "number" || rule.bps < 0 || rule.bps > 10_000) {
+      push("bps", "bps must be between 0 and 10000");
+    }
+    if (
+      typeof rule.integratorShareBps !== "number" ||
+      rule.integratorShareBps < 0 ||
+      rule.integratorShareBps > 10_000
+    ) {
+      push("integratorShareBps", "integratorShareBps must be between 0 and 10000");
+    }
+
+    let min: bigint | null = null;
+    let max: bigint | null = null;
+    try {
+      min = parseUnits(rule.minFee, "minFee");
+    } catch (err) {
+      push("minFee", (err as Error).message);
+    }
+    try {
+      max = parseUnits(rule.maxFee, "maxFee");
+    } catch (err) {
+      push("maxFee", (err as Error).message);
+    }
+    if (min !== null && max !== null && max > 0n && min > max) {
+      push("minFee", `rule ${rule.id} has minFee above maxFee`);
+    }
+
+    if (!Array.isArray(rule.tiers)) {
+      push("tiers", "tiers must be an array");
+    } else {
+      rule.tiers.forEach((tier, tierIndex) => {
+        try {
+          parseUnits(tier.minVolume, "tier.minVolume");
+        } catch (err) {
+          push(`tiers[${tierIndex}].minVolume`, (err as Error).message);
+        }
+        if (typeof tier.bps !== "number" || tier.bps < 0 || tier.bps > 10_000) {
+          push(`tiers[${tierIndex}].bps`, "bps must be between 0 and 10000");
+        }
+      });
+    }
+  });
+  return errors;
+}
