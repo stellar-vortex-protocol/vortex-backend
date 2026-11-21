@@ -91,6 +91,32 @@ export class SorobanService {
     return this.server.simulateTransaction(transaction);
   }
 
+  /**
+   * Simulate a read-only contract invocation and return the raw return value.
+   *
+   * This is the shared entry point for SAC `balance_of`-style reads (treasury
+   * reconciliation, token verification). It deliberately distinguishes a
+   * failed simulation from a successful one that returned zero: callers get a
+   * thrown error on RPC/simulation failure so a failed read is never mistaken
+   * for a $0 balance.
+   */
+  async simulateReadOnlyInvocation(
+    transaction: Transaction,
+  ): Promise<xdr.ScVal> {
+    const response = await this.server.simulateTransaction(transaction);
+    if (SorobanRpc.Api.isSimulationError(response)) {
+      throw new Error(`Soroban simulation failed: ${response.error}`);
+    }
+    if (!SorobanRpc.Api.isSimulationSuccess(response)) {
+      throw new Error("Soroban simulation did not return a result");
+    }
+    const retval = response.result?.retval;
+    if (!retval) {
+      throw new Error("Soroban simulation returned no retval");
+    }
+    return retval;
+  }
+
   prepareTransaction(
     transaction: Transaction,
   ): Promise<Transaction> {
