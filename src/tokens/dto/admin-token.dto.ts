@@ -1,78 +1,56 @@
-import { IsIn, IsInt, IsNumber, IsOptional, IsString, Max, Min, MinLength } from "class-validator";
-import { SUPPORTED_CHAINS } from "../../intents/intents.types";
-import { TokenStatus } from "../tokens.repository";
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
+import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
+  IsBoolean,
+  IsInt,
+  IsOptional,
+  IsString,
+  Length,
+  Min,
+  ValidateNested,
+} from 'class-validator';
 
 export class CreateAdminTokenDto {
-  @IsIn(SUPPORTED_CHAINS)
+  @ApiProperty({ description: 'Chain identifier the token lives on', example: 'ethereum' })
+  @IsString()
+  @Length(1, 64)
   chain!: string;
 
+  @ApiProperty({ description: 'Token contract address', example: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' })
   @IsString()
-  @MinLength(1)
+  @Length(1, 128)
   address!: string;
 
-  @IsOptional()
+  @ApiProperty({ description: 'Token symbol', example: 'USDC' })
   @IsString()
-  symbol?: string;
+  @Length(1, 32)
+  symbol!: string;
 
-  @IsOptional()
-  @IsString()
-  name?: string;
-
-  @IsOptional()
+  @ApiProperty({ description: 'Token decimals', example: 6 })
   @IsInt()
   @Min(0)
-  @Max(255)
-  decimals?: number;
+  decimals!: number;
 
+  @ApiPropertyOptional({ description: 'Whether the token is enabled for solving', example: true })
   @IsOptional()
-  @IsString()
-  logoUri?: string;
-
-  @IsOptional()
-  @IsNumber()
-  priceUSD?: number;
+  @IsBoolean()
+  enabled?: boolean;
 }
 
-export class PatchAdminTokenDto {
-  @IsIn(SUPPORTED_CHAINS)
-  chain!: string;
+export const MAX_BATCH_ADMIN_TOKENS = 50;
 
-  @IsString()
-  @MinLength(1)
-  address!: string;
-
-  @IsOptional()
-  @IsIn(["active", "paused", "delisted"])
-  status?: TokenStatus;
-
-  @IsOptional()
-  @IsString()
-  symbol?: string;
-
-  @IsOptional()
-  @IsString()
-  name?: string;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(255)
-  decimals?: number;
-
-  @IsOptional()
-  @IsString()
-  logoUri?: string;
-
-  @IsOptional()
-  @IsNumber()
-  priceUSD?: number;
-}
-
-export class DeleteAdminTokenDto {
-  @IsIn(SUPPORTED_CHAINS)
-  chain!: string;
-
-  @IsString()
-  @MinLength(1)
-  address!: string;
+export class BatchCreateAdminTokensDto {
+  @ApiProperty({
+    description: `Tokens to register (max ${MAX_BATCH_ADMIN_TOKENS} per call)`,
+    type: [CreateAdminTokenDto],
+  })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(MAX_BATCH_ADMIN_TOKENS)
+  @ValidateNested({ each: true })
+  @Type(() => CreateAdminTokenDto)
+  tokens!: CreateAdminTokenDto[];
 }
