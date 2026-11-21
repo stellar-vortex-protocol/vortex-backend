@@ -4,10 +4,12 @@ import {
   Post,
   Query,
   Param,
+  Res,
   UseGuards,
   HttpCode,
   HttpStatus,
 } from "@nestjs/common";
+import { Response } from "express";
 import {
   ApiTags,
   ApiOperation,
@@ -77,6 +79,68 @@ export class TreasuryController {
     @Query("date") date?: string,
   ): Promise<ReconciliationSummary> {
     return this.treasuryService.getReconciliationSummary(date);
+  }
+
+  /**
+   * GET /api/v1/treasury/reconciliation/export
+   * 
+   * Export reconciliation results for a date range as a downloadable CSV
+   * statement suitable for external auditors / finance teams.
+   */
+  @Get("reconciliation/export")
+  @ApiOperation({
+    summary: "Export treasury reconciliation statement",
+    description:
+      "Streams a CSV statement of reconciliation snapshots for a date range as an attachment",
+  })
+  @ApiQuery({
+    name: "from",
+    required: true,
+    description: "Start date in YYYY-MM-DD format (inclusive)",
+    example: "2026-09-01",
+  })
+  @ApiQuery({
+    name: "to",
+    required: true,
+    description: "End date in YYYY-MM-DD format (inclusive)",
+    example: "2026-09-30",
+  })
+  @ApiQuery({
+    name: "asset",
+    required: false,
+    description: "Restrict export to a single asset",
+    example: "native",
+  })
+  @ApiQuery({
+    name: "format",
+    required: false,
+    description: "Export format (only 'csv' is supported)",
+    enum: ["csv"],
+    example: "csv",
+  })
+  @ApiResponse({
+    status: 200,
+    description: "CSV reconciliation statement",
+    content: { "text/csv": {} },
+  })
+  async exportReconciliation(
+    @Query("from") from: string,
+    @Query("to") to: string,
+    @Query("asset") asset: string | undefined,
+    @Query("format") format: string | undefined,
+    @Res() res: Response,
+  ): Promise<void> {
+    const csv = await this.treasuryService.exportReconciliationCsv({
+      from,
+      to,
+      asset,
+      format,
+    });
+
+    const filename = `treasury-reconciliation-${from}_${to}.csv`;
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.status(HttpStatus.OK).send(csv);
   }
 
   /**

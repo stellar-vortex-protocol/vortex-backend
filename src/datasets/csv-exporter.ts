@@ -34,3 +34,23 @@ export function toCsv(schema: DatasetSchema, rows: DatasetRow[]): Buffer {
 
   return Buffer.from(lines.join("\n") + "\n", "utf8");
 }
+
+/**
+ * Stream rows to CSV without buffering the whole range in memory.
+ *
+ * Yields the header line first, then one line per record, so callers can pipe
+ * the output straight to an HTTP response.  Uses the same escaping rules as
+ * {@link toCsv}.
+ */
+export function* streamCsv(
+  schema: DatasetSchema,
+  rows: Iterable<DatasetRow>,
+): Generator<string> {
+  const names = fieldNames(schema);
+  yield names.join(",") + "\n";
+
+  for (const row of rows) {
+    const cells = names.map((name) => escapeField(cellToString(row[name])));
+    yield cells.join(",") + "\n";
+  }
+}
