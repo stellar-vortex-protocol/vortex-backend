@@ -34,6 +34,7 @@ import { ListIntentsDto } from "../intents/dto/list-intents.dto";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
 import { UpdateSolverDto } from "./dto/update-solver.dto";
 import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
+import { PricingAggregatorService } from "../pricing/aggregator.service";
 
 const WINDOW_SECONDS: Record<Exclude<LeaderboardWindow, "all">, number> = {
 	"24h": 24 * 60 * 60,
@@ -47,6 +48,7 @@ export class SolversController {
 	constructor(
 		private readonly solversService: SolversService,
 		private readonly intentsService: IntentsService,
+		private readonly pricingAggregator: PricingAggregatorService,
 	) {}
 
 	@Post()
@@ -146,7 +148,16 @@ export class SolversController {
 		if (!solver.isActive) throw new ForbiddenException("Solver is not active");
 
 		const open = await this.intentsService.getByState("open");
-		const eligible = open.filter((intent) => solverSupports(solver, intent.srcChain, intent.srcToken.symbol));
+		const supported = open.filter((intent) =>
+			solverSupports(solver, intent.srcChain, intent.srcToken.symbol),
+		);
+
+		const minIntentSizeUsd = solver.minIntentSizeUsd;
+		const eligible =
+			minIntentSizeUsd === undefined || minIntentSizeUsd === null
+				? supported
+				: await this.filterByMinIntentSize(supported, minIntentSizeUsd);
+
 		const limit = Math.min(dto.limit ?? 20, 100);
 		const offset = dto.offset ?? 0;
 		if ((dto.limit ?? 20) > 100) {
@@ -155,6 +166,29 @@ export class SolversController {
 
 		const page = eligible.slice(offset, offset + limit);
 		return { intents: page, total: eligible.length, count: eligible.length, limit, offset };
+	}
+
+	private async filterByMinIntentSize<T extends { srcToken: { symbol: string }; amount: string }>(
+		intents: T[],
+		minIntentSizeUsd: number,
+	): Promise<T[]> {
+		const results = await Promise.all(
+			intents.map(async (intent) => {
+				let usdValue: number | null = null;
+				try {
+					usdValue = await this.pricingAggregator.getUsdValue(
+						intent.srcToken.symbol,
+						intent.amount,
+					);
+				} catch {
+					usdValue = null;
+				}
+				// Fail open: if the intent cannot be priced, keep it visible.
+				if (usdValue === null || usdValue === undefined) return intent;
+				return usdValue >= minIntentSizeUsd ? intent : null;
+			}),
+		);
+		return results.filter((intent): intent is T => intent !== null);
 	}
 
 	@Get(":address")
@@ -211,15 +245,19 @@ export class SolversController {
 			fillsFailed,
 			successRate: Number(successRate.toFixed(4)),
 			reputationScore: Number((successRate * Math.exp(-ageDays / 180)).toFixed(4)),
-			totalVolume: completed.reduce((sum, intent) => sum + BigInt(intent.fillAmount ?? "0"), 0n).toString(),
-			avgFillTime: completed.filter((intent) => intent.filledAt != null).length
+			totalVolume: completed
+				.reduce((sum, intent) => sum + BigInt(intent.fillAmount ?? "0"), 0n)
+				.toString(),
+			avgFillTime: completed.length
 				? Math.round(
 						completed.reduce((sum, intent) => {
 							if (!intent.filledAt) return sum;
 							return sum + (intent.filledAt - intent.createdAt);
-						}, 0) / completed.filter((intent) => intent.filledAt != null).length,
+						}, 0) / completed.length,
 					)
 				: 0,
+			bondAmount: solver.bondAmount,
+			isActive: solver.isActive,
 			window: resolvedWindow,
 		};
 	}
@@ -228,6 +266,6 @@ export class SolversController {
 		if (window === "24h" || window === "7d" || window === "30d" || window === "all") {
 			return window;
 		}
-		throw new BadRequestException("Invalid window. Expected one of: 24h, 7d, 30d, all");
+		return "all";
 	}
 }

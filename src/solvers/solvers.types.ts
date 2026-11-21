@@ -88,6 +88,17 @@ export interface SolverRecord {
    * can never self-certify. Absent/false means unverified.
    */
   verified?: boolean;
+  /**
+   * Optional minimum intent size in USD (issue #644).
+   *
+   * Opt-in: when set, getEligibleIntents excludes intents whose USD-estimated
+   * source amount is below this value, so solvers are not shown dust-sized
+   * intents that are unprofitable to fill given fixed costs. Absent means no
+   * minimum is applied (default behavior unchanged). If the pricing
+   * aggregator cannot price an intent's source token, the intent is included
+   * (fail open), consistent with ORACLE_FAIL_OPEN_MAX_USD.
+   */
+  minIntentSizeUsd?: number;
 }
 
 /**

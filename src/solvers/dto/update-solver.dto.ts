@@ -4,6 +4,7 @@ import {
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
   IsUrl,
@@ -28,11 +29,11 @@ const SUPPORTED_CHAINS: SupportedChain[] = [
  * Partial update to a solver's *mutable* profile fields (issue #273).
  *
  * Only `name`, `supportedChains`, `supportedTokens`, `avgFillTime`,
- * `avatarUrl`, `description` and `websiteUrl` may be changed. Immutable fields
- * (`address`, `bondAmount`, `fillsCompleted`, `fillsFailed`, `totalVolume`,
- * `registeredAt`, `isActive`) are not declared here, so the global
- * `ValidationPipe({ whitelist: true })` strips them from the request body
- * before this DTO is ever handed to the controller.
+ * `avatarUrl`, `description`, `websiteUrl` and `minIntentSizeUsd` may be
+ * changed. Immutable fields (`address`, `bondAmount`, `fillsCompleted`,
+ * `fillsFailed`, `totalVolume`, `registeredAt`, `isActive`) are not declared
+ * here, so the global `ValidationPipe({ whitelist: true })` strips them from
+ * the request body before this DTO is ever handed to the controller.
  *
  * `verified` is deliberately NOT declared here (issue #643): it is an
  * operator-only badge settable solely through the admin-gated endpoint, so a
@@ -100,6 +101,17 @@ export class UpdateSolverDto {
   @IsUrl({ protocols: ["https"], require_protocol: true, require_tld: false })
   @Matches(/^https:\/\//i, { message: "websiteUrl must use the https:// scheme" })
   websiteUrl?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "Minimum USD value of an intent's source amount to include in this solver's " +
+      "eligible-intents list; omit to see all open intents (issue #644)",
+    minimum: 0,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  minIntentSizeUsd?: number;
 
   @ApiProperty({
     description:
