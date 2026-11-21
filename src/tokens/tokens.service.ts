@@ -16,6 +16,7 @@ export interface ResolvedSrcToken {
   decimals: number;
   chain: SupportedChain;
   priceUSD: number;
+  riskFlags?: string[];
 }
 
 /**
@@ -28,6 +29,7 @@ export interface ResolvedDstToken {
   name: string;
   decimals: number;
   priceUSD: number;
+  riskFlags?: string[];
 }
 
 export type ResolvedToken = ResolvedSrcToken | ResolvedDstToken;
@@ -39,6 +41,7 @@ export interface ApiToken {
   name: string;
   decimals: number;
   priceUSD: number;
+  riskFlags: string[];
 }
 
 export interface TokensByChainResponse {
@@ -137,6 +140,7 @@ export class TokensService {
       name: token.name,
       decimals: token.decimals,
       priceUSD: token.priceUsd ?? 0,
+      riskFlags: token.riskFlags ?? [],
     };
   }
 
@@ -180,6 +184,37 @@ export class TokensService {
       decimals: token.decimals,
       chain,
       priceUSD: token.priceUsd ?? 0,
+      riskFlags: token.riskFlags ?? [],
+    };
+  }
+
+  /**
+   * Project a resolved token into the public `ApiToken` shape used by the
+   * registry endpoints (issue #655 reuses this for watchlist resolution).
+   *
+   * `riskFlags` is always present (empty array when unset) so clients can
+   * render a warning badge without defensive null checks (issue #656).
+   */
+  toApiToken(token: ResolvedToken): ApiToken {
+    if (token.kind === "dst") {
+      return {
+        address: token.contract,
+        contract: token.contract,
+        symbol: token.symbol,
+        name: token.name,
+        decimals: token.decimals,
+        priceUSD: token.priceUSD,
+        riskFlags: token.riskFlags ?? [],
+      };
+    }
+    return {
+      address: token.address,
+      contract: token.address,
+      symbol: token.symbol,
+      name: token.name,
+      decimals: token.decimals,
+      priceUSD: token.priceUSD,
+      riskFlags: token.riskFlags ?? [],
     };
   }
 
@@ -212,131 +247,3 @@ export class TokensService {
    * populated, so the caller can fall back per-field rather than per-pair.
    */
   async resolvePairOracleOverride(
-    srcToken: string,
-    dstToken: string,
-  ): Promise<PairOracleOverride | undefined> {
-    const key = normalizePairKey(srcToken, dstToken);
-    const overrides = await this.loadPairOracleOverrides();
-    return overrides.get(key);
-  }
-
-  /**
-   * Build the full `pairOverrides` lookup keyed by normalised `srcToken:dstToken`.
-   *
-   * Reads the registry once and projects any per-pair oracle bound columns into
-   * a `Map`. Pairs without an override are omitted entirely so a lookup miss is
-   * an unambiguous "use the global default" signal.
-   */
-  async loadPairOracleOverrides(): Promise<Map<string, PairOracleOverride>> {
-    const records = await this.repo.findAll();
-    const overrides = new Map<string, PairOracleOverride>();
-    for (const record of records) {
-      const slippage = record.oracleMaxUserSlippageBps;
-      const premium = record.oracleMaxPremiumBps;
-      if (slippage == null && premium == null) continue;
-      const dstToken = record.oracleOverrideDstToken;
-      if (!dstToken) continue;
-      const override: PairOracleOverride = {};
-      if (slippage != null) override.maxUserSlippageBps = BigInt(slippage);
-      if (premium != null) override.maxPremiumBps = BigInt(premium);
-      overrides.set(normalizePairKey(record.address, dstToken), override);
-    }
-    return overrides;
-  }
-
-  /**
-   * Normalise a stored {@link TokenRecord} into the public token shape.
-   *
-   * Both `address` and `contract` are emitted with the same value so clients
-   * can read either field regardless of whether the token is EVM- or
-   * Stellar-native — the registry stores every token under `address`, but the
-   * Stellar side of the API has always used `contract`.
-   */
-  private toApiToken(record: TokenRecord): ApiToken {
-    return {
-      address: record.address,
-      contract: record.address,
-      symbol: record.symbol,
-      name: record.name,
-      decimals: record.decimals,
-      priceUSD: record.priceUsd ?? 0,
-    };
-  }
-
-  /**
-   * Delisted entries disappear from the registry listing — they stay
-   * resolvable for intents created before the delist (see
-   * {@link resolveSrcToken}), but must not appear in discovery results.
-   * Paused tokens remain visible: under review, not retired.
-   */
-  private hideDelisted<T extends { status?: TokenStatus }>(records: T[]): T[] {
-    return records.filter((record) => (record.status ?? "active") !== "delisted");
-  }
-
-  /**
-   * Return the supported token registry, optionally narrowed to one chain.
-   *
-   * - `chain="stellar"` → `{ tokens: StellarToken[], chain: "stellar" }`
-   * - `chain=<known>`   → `{ tokens: Token[], chain }`
-   * - omitted / unknown → `{ tokens: Record<chain, Token[]>, stellarTokens: Token[] }`
-   *
-   * An unrecognised chain deliberately falls back to the full registry rather
-   * than erroring: this endpoint feeds discovery UIs, and a client with a
-   * stale chain list should see everything, not a 4xx.
-   */
-  async getByChain(chain?: string): Promise<TokensByChainResponse> {
-    const requested = chain?.toLowerCase();
-
-    if (requested === "stellar") {
-      const records = this.hideDelisted(await this.findByChain("stellar"));
-      return {
-        tokens: records.map((record) => this.toApiToken(record)),
-        chain: "stellar",
-      };
-    }
-
-    if (requested && requested in SUPPORTED_TOKENS) {
-      const records = this.hideDelisted(await this.findByChain(requested));
-      return {
-        tokens: records
-          .filter((record) => record.chain === requested)
-          .map((record) => this.toApiToken(record)),
-        chain: requested,
-      };
-    }
-
-    const all = this.hideDelisted(await this.findAll());
-
-    // Bucket by chain, pre-seeding a key for every chain the static registry
-    // declares so a chain with no rows still appears as an empty array rather
-    // than vanishing from the response shape.
-    const byChain: Record<string, ApiToken[]> = {};
-    for (const key of Object.keys(SUPPORTED_TOKENS)) {
-      byChain[key] = [];
-    }
-    for (const record of all) {
-      if (!byChain[record.chain]) byChain[record.chain] = [];
-      byChain[record.chain].push(this.toApiToken(record));
-    }
-
-    return {
-      tokens: byChain,
-      stellarTokens: all
-        .filter((record) => record.chain === "stellar")
-        .map((record) => this.toApiToken(record)),
-    };
-  }
-
-  async getStellarTokens(): Promise<{ tokens: StellarToken[] }> {
-    const records = await this.findByChain("stellar");
-    return {
-      tokens: records.map((record) => ({
-        contract: record.address,
-        symbol: record.symbol,
-        name: record.name,
-        decimals: record.decimals,
-        priceUSD: record.priceUsd ?? 0,
-      })),
-    };
-  }
-}
