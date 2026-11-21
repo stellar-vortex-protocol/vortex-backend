@@ -1,4 +1,4 @@
-import { ArrayMaxSize, IsArray, IsIn, IsInt, IsNumber, IsOptional, IsString, Max, Min, MinLength } from "class-validator";
+import { ArrayMaxSize, IsArray, IsIn, IsInt, IsNumber, IsOptional, IsString, Max, Min, MinLength, ValidateIf } from "class-validator";
 import { SUPPORTED_CHAINS } from "../../intents/intents.types";
 import { TokenStatus } from "../tokens.repository";
 
@@ -75,6 +75,14 @@ export class PatchAdminTokenDto {
   @ArrayMaxSize(TOKEN_RISK_FLAGS.length)
   @IsIn(TOKEN_RISK_FLAGS, { each: true })
   riskFlags?: TokenRiskFlag[];
+
+  // Admin-asserted canonical asset grouping. Send a string to group this row
+  // under a logical asset id, or `null` to ungroup it. Omit to leave unchanged.
+  @IsOptional()
+  @ValidateIf((_o, value) => value !== null)
+  @IsString()
+  @MinLength(1)
+  canonicalAssetId?: string | null;
 }
 
 export class DeleteAdminTokenDto {

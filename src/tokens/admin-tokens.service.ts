@@ -98,6 +98,9 @@ export class AdminTokensService {
     if (dto.logoUri !== undefined) next.logoUri = dto.logoUri;
     if (dto.priceUSD !== undefined) next.priceUsd = dto.priceUSD;
     if (dto.riskFlags !== undefined) next.riskFlags = dto.riskFlags;
+    if (dto.canonicalAssetId !== undefined) {
+      next.canonicalAssetId = dto.canonicalAssetId === null ? null : dto.canonicalAssetId;
+    }
     const saved = await this.repo.save(next);
     await this.audit.record({
       actor: admin.id,
@@ -197,6 +200,7 @@ export class AdminTokensService {
       logoUri: record.logoUri ?? null,
       priceUSD: record.priceUsd ?? null,
       riskFlags: record.riskFlags ?? [],
+      canonicalAssetId: record.canonicalAssetId ?? null,
     };
   }
 
