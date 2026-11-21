@@ -37,6 +37,7 @@ import { AllowlistService } from "./allowlist.service";
 import { AccountAgeService } from "./account-age.service";
 import { ChallengeVerifier } from "./challenge-verifier";
 import { AbuseContext } from "./abuse.types";
+import { AsnLookupProvider } from "./asn-lookup.provider";
 import { logger as winstonLogger } from "../common/logger";
 import { createHash } from "crypto";
 import { ATTR } from "../tracing";
@@ -68,12 +69,14 @@ export class AbuseDetectorGuard implements CanActivate {
 
   private readonly challengeVerifier: ChallengeVerifier;
   private readonly accountAge?: AccountAgeService;
+  private readonly asnLookup?: AsnLookupProvider;
 
   constructor(
     private readonly scorer: AbuseScoreService,
     private readonly allowlist: AllowlistService,
     @Optional() challengeVerifier?: ChallengeVerifier,
     @Optional() accountAge?: AccountAgeService,
+    @Optional() asnLookup?: AsnLookupProvider,
   ) {
     if (challengeVerifier && "getAccountAgeSeconds" in (challengeVerifier as unknown as Record<string, unknown>)) {
       this.accountAge = challengeVerifier as unknown as AccountAgeService;
@@ -82,6 +85,7 @@ export class AbuseDetectorGuard implements CanActivate {
       this.challengeVerifier = challengeVerifier ?? new ChallengeVerifier();
       this.accountAge = accountAge;
     }
+    this.asnLookup = asnLookup;
   }
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
@@ -99,12 +103,13 @@ export class AbuseDetectorGuard implements CanActivate {
 
     const allowlisted = this.allowlist.isAllowlisted({ userAddress, clientIp, apiKey });
     const accountAgeSeconds = await this.resolveAccountAge(req, operation);
+    const asn = await this.resolveAsn(clientIp);
 
     const abuseCtx: AbuseContext = {
       userAddress,
       solverAddress,
       clientIp,
-      asn: undefined, // future: integrate MaxMind or ip-api
+      asn,
       srcAmount,
       srcTokenPriceUsd,
       srcTokenDecimals,
@@ -165,6 +170,20 @@ export class AbuseDetectorGuard implements CanActivate {
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
+  /**
+   * Resolve the client's ASN via the configured provider. Fails open: any
+   * error/timeout (bounded by the provider) yields `undefined` so scoring
+   * proceeds exactly as before enrichment.
+   */
+  private async resolveAsn(clientIp: string): Promise<string | undefined> {
+    if (!this.asnLookup) return undefined;
+    try {
+      return await this.asnLookup.lookup(clientIp);
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Extract the user Stellar address from the request. */
   private resolveUserAddress(req: Request): string {
     const user: unknown = req.body?.user;
@@ -211,38 +230,19 @@ export class AbuseDetectorGuard implements CanActivate {
   }
 
   private resolveOperation(req: Request): AbuseContext["operation"] {
-    const path = req.path ?? "";
-    const method = (req.method ?? "").toUpperCase();
-
-    if (method === "POST" && path.endsWith("/cancel")) return "cancel";
-    if (method === "POST" && path.endsWith("/accept")) return "accept";
-    if (method === "POST" && path.endsWith("/fill")) return "fill";
+    const path = req.path ?? req.url ?? "";
+    if (path.includes("/cancel")) return "cancel";
+    if (path.includes("/accept")) return "solver_accept";
     return "create";
   }
 
   private resolveApiKey(req: Request): string | undefined {
-    const raw = req.headers["x-api-key"] ?? req.headers["authorization"];
-    if (typeof raw === "string" && raw.length > 0) {
-      return raw.startsWith("Bearer ") ? raw.slice(7) : raw;
-    }
+    const key = req.headers["x-api-key"];
+    if (typeof key === "string" && key.length > 0) return key;
     return undefined;
   }
 
-  /**
-   * Stable deterministic fingerprint of the intent's economic parameters.
-   * Excludes deadline (changes every request) and user (scorer already keys by that).
-   */
-  private fingerprint(body: Record<string, unknown>): string {
-    const relevant = {
-      srcChain: body.srcChain,
-      srcTokenAddress: body.srcTokenAddress,
-      srcAmount: body.srcAmount,
-      dstTokenContract: body.dstTokenContract,
-      minDstAmount: body.minDstAmount,
-    };
-    return createHash("sha256")
-      .update(JSON.stringify(relevant))
-      .digest("hex")
-      .slice(0, 16);
+  private fingerprint(body: unknown): string {
+    return createHash("sha256").update(JSON.stringify(body)).digest("hex");
   }
 }

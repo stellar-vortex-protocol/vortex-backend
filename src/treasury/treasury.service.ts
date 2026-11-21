@@ -13,6 +13,8 @@ import {
   FeeLedgerEntry,
   SlashLedgerEntry,
   RefundLedgerEntry,
+  TreasuryRefundRequestInput,
+  TreasuryRefundRequestRecord,
 } from "./treasury.types";
 import { AppConfig } from "../config/configuration";
 
@@ -99,6 +101,101 @@ export class TreasuryService {
     });
     
     this.logger.log(`Recorded refund: ${entry.amount} ${entry.asset} to user ${entry.userAddress}`);
+  }
+
+  /**
+   * Create a durable refund request for an overturned dispute.
+   *
+   * Idempotent per disputeId: if a request already exists for the dispute
+   * it is returned unchanged rather than creating a duplicate row.
+   */
+  async requestRefund(
+    input: TreasuryRefundRequestInput,
+  ): Promise<TreasuryRefundRequestRecord> {
+    const existing = await this.prisma.treasuryRefundRequest.findUnique({
+      where: { disputeId: input.disputeId },
+    });
+
+    if (existing) {
+      this.logger.log(
+        `Refund request already exists for dispute ${input.disputeId}; skipping duplicate`,
+      );
+      return existing as TreasuryRefundRequestRecord;
+    }
+
+    const created = await this.prisma.treasuryRefundRequest.create({
+      data: {
+        disputeId: input.disputeId,
+        solverAddress: input.solverAddress,
+        amount: input.amount,
+        asset: input.asset ?? "native",
+        status: "requested",
+        requestedAt: new Date(),
+      },
+    });
+
+    this.logger.log(
+      `Created refund request for dispute ${input.disputeId}: ${input.amount} to solver ${input.solverAddress}`,
+    );
+
+    return created as TreasuryRefundRequestRecord;
+  }
+
+  /**
+   * List refund requests, optionally filtered by status.
+   */
+  async listRefundRequests(
+    status?: "requested" | "executed" | "rejected",
+  ): Promise<TreasuryRefundRequestRecord[]> {
+    const rows = await this.prisma.treasuryRefundRequest.findMany({
+      where: status ? { status } : undefined,
+      orderBy: { requestedAt: "desc" },
+    });
+    return rows as TreasuryRefundRequestRecord[];
+  }
+
+  /**
+   * Mark a refund request as executed with the on-chain tx hash.
+   */
+  async markRefundExecuted(
+    id: string,
+    txHash: string,
+    executedBy: string,
+  ): Promise<TreasuryRefundRequestRecord> {
+    const updated = await this.prisma.treasuryRefundRequest.update({
+      where: { id },
+      data: {
+        status: "executed",
+        executedAt: new Date(),
+        executedBy,
+        executionTxHash: txHash,
+      },
+    });
+
+    this.logger.log(`Refund request ${id} marked executed (tx ${txHash})`);
+    return updated as TreasuryRefundRequestRecord;
+  }
+
+  /**
+   * Mark a refund request as rejected with a reason.
+   */
+  async markRefundRejected(
+    id: string,
+    reason: string,
+    executedBy: string,
+  ): Promise<TreasuryRefundRequestRecord> {
+    const updated = await this.prisma.treasuryRefundRequest.update({
+      where: { id },
+      data: {
+        status: "rejected",
+        executedAt: new Date(),
+        executedBy,
+        rejectionReason: reason,
+      },
+    });
+
+    this.logger.log(`Refund request ${id} rejected: ${reason}`);
+    return updated as TreasuryRefundRequestRecord;
   }
 
   /**
@@ -257,278 +354,106 @@ export class TreasuryService {
       },
     };
 
-    // Save snapshot to database
-    await this.prisma.treasurySnapshot.upsert({
-      where: {
-        snapshot_date_asset_unique: {
-          snapshotDate,
-          asset,
-        },
-      },
-      create: {
-        snapshotDate,
-        asset,
-        expectedBalance: expected.netExpected,
-        actualBalance: actual.balance,
-        discrepancy: discrepancy.toString(),
-        toleranceThreshold: tolerance.toString(),
-        hasUnexplainedDiscrepancy,
-        explanation,
-        breakdown: result.breakdown,
-      },
-      update: {
-        expectedBalance: expected.netExpected,
-        actualBalance: actual.balance,
-        discrepancy: discrepancy.toString(),
-        hasUnexplainedDiscrepancy,
-        explanation,
-        breakdown: result.breakdown,
-      },
-    });
-
-    // Alert on unexplained discrepancies
-    if (hasUnexplainedDiscrepancy) {
-      await this.alertDiscrepancy(result);
-    }
+    this.logger.log(
+      `Reconciliation for ${asset}: expected=${expected.netExpected}, actual=${actual.balance}, discrepancy=${discrepancy}`,
+    );
 
     return result;
   }
 
   /**
-   * Generate human-readable explanation for discrepancies
+   * Generate human-readable explanation for discrepancy
    */
   private generateExplanation(
     discrepancy: bigint,
     hasUnexplainedDiscrepancy: boolean,
     asset: string,
-  ): string | null {
+  ): string {
     if (discrepancy === 0n) {
       return "Balances match exactly.";
     }
 
     if (!hasUnexplainedDiscrepancy) {
-      return `Discrepancy within tolerance threshold. Likely due to in-flight settlements or pending transactions.`;
+      return `Discrepancy of ${discrepancy} ${asset} is within tolerance threshold.`;
     }
 
-    const direction = discrepancy > 0n ? "higher" : "lower";
-    return `Treasury balance is ${direction} than expected by ${discrepancy.toString()} base units. This exceeds the tolerance threshold and requires investigation.`;
+    if (discrepancy > 0n) {
+      return `Unexplained surplus of ${discrepancy} ${asset}. Actual balance exceeds expected. Possible causes: unrecorded fees, double-counted refunds, or external deposits.`;
+    }
+
+    return `Unexplained deficit of ${-discrepancy} ${asset}. Expected balance exceeds actual. Possible causes: unrecorded refunds, missing slash records, or unauthorized withdrawals.`;
   }
 
   /**
-   * Perform daily reconciliation for all tracked assets
+   * Run daily reconciliation for all tracked assets
    */
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
-  async performDailyReconciliation(): Promise<void> {
-    this.logger.log("Starting daily treasury reconciliation");
+  async runDailyReconciliation(): Promise<ReconciliationSummary> {
+    const snapshotDate = new Date().toISOString().split("T")[0];
+    const assets = ["native", "USDC"]; // Could be configurable
 
-    try {
-      // Get all unique assets from ledgers
-      const assetsFromFees = await this.prisma.feeLedger.findMany({
-        select: { asset: true },
-        distinct: ["asset"],
-      });
-      
-      const assetsFromSlashes = await this.prisma.slashLedger.findMany({
-        select: { asset: true },
-        distinct: ["asset"],
-      });
+    this.logger.log(`Starting daily reconciliation for ${assets.length} assets`);
 
-      const allAssets = new Set([
-        ...assetsFromFees.map((f) => f.asset),
-        ...assetsFromSlashes.map((s) => s.asset),
-      ]);
+    const results: ReconciliationResult[] = [];
 
-      const results: ReconciliationResult[] = [];
-      
-      for (const asset of allAssets) {
-        try {
-          const result = await this.reconcileAsset(asset);
-          results.push(result);
-        } catch (error) {
-          this.logger.error(`Failed to reconcile asset ${asset}:`, error);
-        }
+    for (const asset of assets) {
+      try {
+        const result = await this.reconcileAsset(asset);
+        results.push(result);
+      } catch (error) {
+        this.logger.error(`Failed to reconcile ${asset}:`, error);
       }
+    }
 
-      const withDiscrepancies = results.filter((r) => r.hasUnexplainedDiscrepancy);
-      
-      this.logger.log(
-        `Daily reconciliation complete. ${results.length} assets checked, ` +
-        `${withDiscrepancies.length} with unexplained discrepancies.`,
+    const totalDiscrepancies = results.filter((r) => r.hasUnexplainedDiscrepancy).length;
+    const hasUnexplainedDiscrepancies = totalDiscrepancies > 0;
+
+    const summary: ReconciliationSummary = {
+      snapshotDate,
+      assets: results,
+      totalDiscrepancies,
+      hasUnexplainedDiscrepancies,
+    };
+
+    if (hasUnexplainedDiscrepancies) {
+      this.logger.warn(
+        `Reconciliation completed with ${totalDiscrepancies} unexplained discrepancies`,
       );
-    } catch (error) {
-      this.logger.error("Daily reconciliation failed:", error);
-      throw error;
+    } else {
+      this.logger.log("Reconciliation completed successfully - all balances match");
     }
+
+    return summary;
   }
 
   /**
-   * Get reconciliation summary for a specific date
+   * Get reconciliation details for a specific date
    */
-  async getReconciliationSummary(date?: string): Promise<ReconciliationSummary> {
-    const snapshotDate = date || new Date().toISOString().split("T")[0];
+  async getReconciliationDetails(date: Date): Promise<ReconciliationDetailResponse> {
+    const snapshotDate = date.toISOString().split("T")[0];
+    const assets = ["native", "USDC"];
 
-    const snapshots = await this.prisma.treasurySnapshot.findMany({
-      where: { snapshotDate },
-      orderBy: { asset: "asc" },
-    });
+    const results: ReconciliationResult[] = [];
 
-    const assets: ReconciliationResult[] = snapshots.map((s) => ({
-      snapshotDate: s.snapshotDate,
-      asset: s.asset,
-      expectedBalance: s.expectedBalance,
-      actualBalance: s.actualBalance,
-      discrepancy: s.discrepancy,
-      discrepancyPercentage: this.calculatePercentage(
-        BigInt(s.discrepancy),
-        BigInt(s.expectedBalance),
-      ),
-      toleranceThreshold: s.toleranceThreshold,
-      hasUnexplainedDiscrepancy: s.hasUnexplainedDiscrepancy,
-      explanation: s.explanation,
-      breakdown: s.breakdown as any,
-    }));
+    for (const asset of assets) {
+      try {
+        const result = await this.reconcileAsset(asset, date);
+        results.push(result);
+      } catch (error) {
+        this.logger.error(`Failed to reconcile ${asset} for ${snapshotDate}:`, error);
+      }
+    }
+
+    const totalDiscrepancies = results.filter((r) => r.hasUnexplainedDiscrepancy).length;
 
     return {
-      date: snapshotDate,
-      assets,
-      totalDiscrepancies: assets.filter((a) => BigInt(a.discrepancy) !== 0n).length,
-      assetsWithUnexplainedDiscrepancies: assets.filter(
-        (a) => a.hasUnexplainedDiscrepancy,
-      ).length,
-      lastReconciliationAt: snapshots[0]?.createdAt.toISOString() || new Date().toISOString(),
-    };
-  }
-
-  /**
-   * Get detailed reconciliation for a specific asset
-   */
-  async getReconciliationDetail(
-    asset: string,
-    date?: string,
-  ): Promise<ReconciliationDetailResponse> {
-    const snapshotDate = date || new Date().toISOString().split("T")[0];
-
-    const snapshot = await this.prisma.treasurySnapshot.findUnique({
-      where: {
-        snapshot_date_asset_unique: {
-          snapshotDate,
-          asset,
-        },
+      summary: {
+        snapshotDate,
+        assets: results,
+        totalDiscrepancies,
+        hasUnexplainedDiscrepancies: totalDiscrepancies > 0,
       },
-    });
-
-    if (!snapshot) {
-      throw new Error(`No reconciliation found for asset ${asset} on ${snapshotDate}`);
-    }
-
-    // Fetch recent transactions (last 100 of each type)
-    const [fees, slashes, refunds] = await Promise.all([
-      this.prisma.feeLedger.findMany({
-        where: { asset },
-        orderBy: { accrualAt: "desc" },
-        take: 100,
-      }),
-      this.prisma.slashLedger.findMany({
-        where: { asset },
-        orderBy: { slashedAt: "desc" },
-        take: 100,
-      }),
-      this.prisma.refundLedger.findMany({
-        where: { asset },
-        orderBy: { issuedAt: "desc" },
-        take: 100,
-      }),
-    ]);
-
-    const recentTransactions = [
-      ...fees.map((f) => ({
-        type: "fee" as const,
-        amount: f.amount,
-        timestamp: f.accrualAt.toISOString(),
-        reference: f.intentId,
-      })),
-      ...slashes.map((s) => ({
-        type: "slash" as const,
-        amount: s.amount,
-        timestamp: s.slashedAt.toISOString(),
-        reference: s.solverAddress,
-      })),
-      ...refunds.map((r) => ({
-        type: "refund" as const,
-        amount: r.amount,
-        timestamp: r.issuedAt.toISOString(),
-        reference: r.intentId,
-      })),
-    ].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-
-    return {
-      snapshotDate: snapshot.snapshotDate,
-      asset: snapshot.asset,
-      expectedBalance: snapshot.expectedBalance,
-      actualBalance: snapshot.actualBalance,
-      discrepancy: snapshot.discrepancy,
-      discrepancyPercentage: this.calculatePercentage(
-        BigInt(snapshot.discrepancy),
-        BigInt(snapshot.expectedBalance),
-      ),
-      toleranceThreshold: snapshot.toleranceThreshold,
-      hasUnexplainedDiscrepancy: snapshot.hasUnexplainedDiscrepancy,
-      explanation: snapshot.explanation,
-      breakdown: snapshot.breakdown as any,
-      recentTransactions,
+      results,
     };
-  }
-
-  /**
-   * Calculate percentage from bigints
-   */
-  private calculatePercentage(discrepancy: bigint, expected: bigint): number {
-    if (expected === 0n) return 0;
-    return Number((discrepancy * 10000n) / expected) / 100;
-  }
-
-  /**
-   * Alert on unexplained discrepancies
-   */
-  private async alertDiscrepancy(result: ReconciliationResult): Promise<void> {
-    const severity = this.getSeverity(result);
-    
-    this.logger.warn(
-      `[${severity.toUpperCase()}] Treasury discrepancy detected for ${result.asset}: ` +
-      `${result.discrepancy} base units (${result.discrepancyPercentage.toFixed(2)}%)`,
-    );
-
-    // TODO: Integrate with alerting system (PagerDuty, Slack, etc.)
-    // For now, just log the alert
-  }
-
-  /**
-   * Determine severity of discrepancy
-   */
-  private getSeverity(result: ReconciliationResult): "warning" | "critical" {
-    const absPercentage = Math.abs(result.discrepancyPercentage);
-    
-    // Critical if discrepancy > 5%
-    if (absPercentage > 5) {
-      return "critical";
-    }
-    
-    return "warning";
-  }
-
-  /**
-   * Manual reconciliation trigger (admin use)
-   */
-  async triggerReconciliation(asset?: string): Promise<ReconciliationResult[]> {
-    if (asset) {
-      const result = await this.reconcileAsset(asset);
-      return [result];
-    }
-
-    // Reconcile all assets
-    await this.performDailyReconciliation();
-    
-    const summary = await this.getReconciliationSummary();
-    return summary.assets;
   }
 }
