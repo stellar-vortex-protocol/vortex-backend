@@ -5,10 +5,11 @@ import {
   NotFoundException,
   Param,
   Query,
+  Req,
   Res,
 } from "@nestjs/common";
 import { ApiTags, ApiOkResponse, ApiQuery, ApiParam } from "@nestjs/swagger";
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import { TokensService } from "./tokens.service";
 import { StellarTokensResponseDto } from "./dto/token-response.dto";
 
@@ -167,6 +168,57 @@ export class TokensController {
   })
   getStellarTokens(@Query("vsCurrency") vsCurrency?: string) {
     return this.tokensService.getStellarTokens(parseVsCurrency(vsCurrency));
+  }
+
+  @Get("changelog")
+  @ApiQuery({
+    name: "since",
+    required: false,
+    description:
+      "Cursor to return entries after. Accepts a `cacheGeneration` value or an ISO-8601 " +
+      "timestamp. When omitted, the most recent entries are returned.",
+  })
+  @ApiOkResponse({
+    description:
+      "Recent token-registry mutations (`created`/`updated`/`delisted`) with timestamps. " +
+      "The response carries an `ETag` tied to the registry `cacheGeneration()`; send it " +
+      "back via `If-None-Match` to receive `304 Not Modified` when nothing has changed.",
+    schema: {
+      type: "object",
+      properties: {
+        cacheGeneration: { type: "string" },
+        entries: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              type: { type: "string", example: "delisted" },
+              address: { type: "string" },
+              chain: { type: "string" },
+              timestamp: { type: "string", format: "date-time" },
+            },
+          },
+        },
+      },
+    },
+  })
+  async getChangelog(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Query("since") since?: string,
+  ) {
+    const changelog = await this.tokensService.getChangelog(since);
+    const etag = `"${changelog.cacheGeneration}"`;
+    res.setHeader("ETag", etag);
+    res.setHeader("Cache-Control", "no-cache");
+
+    const ifNoneMatch = req.headers["if-none-match"];
+    if (ifNoneMatch && ifNoneMatch.split(",").some((tag) => tag.trim() === etag)) {
+      res.status(304);
+      return undefined;
+    }
+
+    return changelog;
   }
 
   @Get(":address/logo")
