@@ -1,5 +1,5 @@
-import { Controller, Get, Query } from "@nestjs/common";
-import { ApiTags, ApiOkResponse, ApiQuery } from "@nestjs/swagger";
+import { Controller, Get, Param, Query } from "@nestjs/common";
+import { ApiTags, ApiOkResponse, ApiQuery, ApiParam } from "@nestjs/swagger";
 import { TokensService } from "./tokens.service";
 import { StellarTokensResponseDto } from "./dto/token-response.dto";
 
@@ -95,5 +95,54 @@ export class TokensController {
   })
   getStellarTokens() {
     return this.tokensService.getStellarTokens();
+  }
+
+  @Get(":symbol/price-history")
+  @ApiParam({ name: "symbol", description: "Token symbol, e.g. `USDC`." })
+  @ApiQuery({
+    name: "from",
+    required: false,
+    description: "ISO-8601 lower bound (inclusive) on `recordedAt`.",
+  })
+  @ApiQuery({
+    name: "to",
+    required: false,
+    description: "ISO-8601 upper bound (inclusive) on `recordedAt`.",
+  })
+  @ApiQuery({
+    name: "limit",
+    required: false,
+    description: "Maximum number of points to return (default 500).",
+  })
+  @ApiOkResponse({
+    description:
+      "Recent price history for the token, ordered oldest-first. Returns an empty " +
+      "`points` array when the token exists but has no history yet.",
+    schema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", example: "USDC" },
+        points: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              priceUsd: { type: "number", example: 1 },
+              recordedAt: { type: "string", format: "date-time" },
+            },
+            required: ["priceUsd", "recordedAt"],
+          },
+        },
+      },
+      required: ["symbol", "points"],
+    },
+  })
+  getPriceHistory(
+    @Param("symbol") symbol: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("limit") limit?: string,
+  ) {
+    return this.tokensService.getPriceHistory(symbol, { from, to, limit });
   }
 }

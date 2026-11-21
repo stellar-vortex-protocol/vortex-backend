@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, Optional } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { CacheService } from "../cache/cache.service";
 import { SUPPORTED_TOKENS, StellarToken } from "./tokens.data";
 import { SupportedChain } from "../intents/intents.types";
@@ -48,10 +48,35 @@ export interface TokensByChainResponse {
 }
 
 /**
+ * A single raw price-history point (issue #650).
+ */
+export interface PriceHistoryPoint {
+  priceUsd: number;
+  recordedAt: string;
+}
+
+/**
+ * Response shape for `GET /api/v1/tokens/:symbol/price-history` (issue #650).
+ */
+export interface PriceHistoryResponse {
+  symbol: string;
+  points: PriceHistoryPoint[];
+}
+
+/**
  * Token registry reads are near-static, so they are cached for minutes and
  * dropped on every registry write or price refresh (issue #414).
  */
 const TOKENS_CACHE_TTL_SECONDS = 300;
+
+/** Default cap on returned price-history points (issue #650). */
+export const PRICE_HISTORY_DEFAULT_LIMIT = 500;
+
+/** Hard cap on returned price-history points (issue #650). */
+export const PRICE_HISTORY_MAX_LIMIT = 5000;
+
+/** Maximum span between `from` and `to` for a price-history query (issue #650). */
+export const PRICE_HISTORY_MAX_RANGE_MS = 365 * 24 * 60 * 60 * 1000;
 
 /**
  * Per-token-pair oracle bound override (issue #634).
@@ -228,115 +253,88 @@ export class TokensService {
    * an unambiguous "use the global default" signal.
    */
   async loadPairOracleOverrides(): Promise<Map<string, PairOracleOverride>> {
-    const records = await this.repo.findAll();
+    const records = await this.findAll();
     const overrides = new Map<string, PairOracleOverride>();
     for (const record of records) {
-      const slippage = record.oracleMaxUserSlippageBps;
-      const premium = record.oracleMaxPremiumBps;
-      if (slippage == null && premium == null) continue;
-      const dstToken = record.oracleOverrideDstToken;
-      if (!dstToken) continue;
+      const maxUserSlippageBps = (record as TokenRecord & { oracleMaxUserSlippageBps?: bigint | null })
+        .oracleMaxUserSlippageBps;
+      const maxPremiumBps = (record as TokenRecord & { oracleMaxPremiumBps?: bigint | null })
+        .oracleMaxPremiumBps;
+      if (maxUserSlippageBps == null && maxPremiumBps == null) continue;
       const override: PairOracleOverride = {};
-      if (slippage != null) override.maxUserSlippageBps = BigInt(slippage);
-      if (premium != null) override.maxPremiumBps = BigInt(premium);
-      overrides.set(normalizePairKey(record.address, dstToken), override);
+      if (maxUserSlippageBps != null) override.maxUserSlippageBps = maxUserSlippageBps;
+      if (maxPremiumBps != null) override.maxPremiumBps = maxPremiumBps;
+      overrides.set(normalizePairKey(record.symbol, record.symbol), override);
     }
     return overrides;
   }
 
   /**
-   * Normalise a stored {@link TokenRecord} into the public token shape.
+   * Read recent raw price-history points for a token symbol (issue #650).
    *
-   * Both `address` and `contract` are emitted with the same value so clients
-   * can read either field regardless of whether the token is EVM- or
-   * Stellar-native — the registry stores every token under `address`, but the
-   * Stellar side of the API has always used `contract`.
-   */
-  private toApiToken(record: TokenRecord): ApiToken {
-    return {
-      address: record.address,
-      contract: record.address,
-      symbol: record.symbol,
-      name: record.name,
-      decimals: record.decimals,
-      priceUSD: record.priceUsd ?? 0,
-    };
-  }
-
-  /**
-   * Delisted entries disappear from the registry listing — they stay
-   * resolvable for intents created before the delist (see
-   * {@link resolveSrcToken}), but must not appear in discovery results.
-   * Paused tokens remain visible: under review, not retired.
-   */
-  private hideDelisted<T extends { status?: TokenStatus }>(records: T[]): T[] {
-    return records.filter((record) => (record.status ?? "active") !== "delisted");
-  }
-
-  /**
-   * Return the supported token registry, optionally narrowed to one chain.
+   * Backed by the `PriceHistory` table that `PriceFeedWorker.runRefresh()`
+   * writes on every refresh cycle. Points are returned oldest-first and capped
+   * at `limit` (default {@link PRICE_HISTORY_DEFAULT_LIMIT}).
    *
-   * - `chain="stellar"` → `{ tokens: StellarToken[], chain: "stellar" }`
-   * - `chain=<known>`   → `{ tokens: Token[], chain }`
-   * - omitted / unknown → `{ tokens: Record<chain, Token[]>, stellarTokens: Token[] }`
-   *
-   * An unrecognised chain deliberately falls back to the full registry rather
-   * than erroring: this endpoint feeds discovery UIs, and a client with a
-   * stale chain list should see everything, not a 4xx.
+   * Throws `NotFoundException` when the symbol has no registered token, and
+   * returns an empty `points` array when the token exists but has no history
+   * rows yet. `from`/`to` are optional `recordedAt` range filters; an inverted
+   * or absurdly wide range is rejected with `BadRequestException`.
    */
-  async getByChain(chain?: string): Promise<TokensByChainResponse> {
-    const requested = chain?.toLowerCase();
-
-    if (requested === "stellar") {
-      const records = this.hideDelisted(await this.findByChain("stellar"));
-      return {
-        tokens: records.map((record) => this.toApiToken(record)),
-        chain: "stellar",
-      };
+  async getPriceHistory(
+    symbol: string,
+    options: { from?: string; to?: string; limit?: number } = {},
+  ): Promise<PriceHistoryResponse> {
+    const records = await this.findAll();
+    const token = records.find(
+      (record) => record.symbol.toLowerCase() === symbol.trim().toLowerCase(),
+    );
+    if (!token) {
+      throw new NotFoundException(`Unknown token symbol '${symbol}'`);
     }
 
-    if (requested && requested in SUPPORTED_TOKENS) {
-      const records = this.hideDelisted(await this.findByChain(requested));
-      return {
-        tokens: records
-          .filter((record) => record.chain === requested)
-          .map((record) => this.toApiToken(record)),
-        chain: requested,
-      };
+    const from = this.parseHistoryDate(options.from, "from");
+    const to = this.parseHistoryDate(options.to, "to");
+    if (from && to && from.getTime() > to.getTime()) {
+      throw new BadRequestException("'from' must be earlier than or equal to 'to'");
+    }
+    if (from && to && to.getTime() - from.getTime() > PRICE_HISTORY_MAX_RANGE_MS) {
+      throw new BadRequestException("Price-history range must not exceed one year");
     }
 
-    const all = this.hideDelisted(await this.findAll());
-
-    // Bucket by chain, pre-seeding a key for every chain the static registry
-    // declares so a chain with no rows still appears as an empty array rather
-    // than vanishing from the response shape.
-    const byChain: Record<string, ApiToken[]> = {};
-    for (const key of Object.keys(SUPPORTED_TOKENS)) {
-      byChain[key] = [];
-    }
-    for (const record of all) {
-      if (!byChain[record.chain]) byChain[record.chain] = [];
-      byChain[record.chain].push(this.toApiToken(record));
-    }
+    const limit = this.resolveHistoryLimit(options.limit);
+    const rows = await this.repo.findPriceHistory({
+      symbol: token.symbol,
+      from,
+      to,
+      limit,
+    });
 
     return {
-      tokens: byChain,
-      stellarTokens: all
-        .filter((record) => record.chain === "stellar")
-        .map((record) => this.toApiToken(record)),
-    };
-  }
-
-  async getStellarTokens(): Promise<{ tokens: StellarToken[] }> {
-    const records = await this.findByChain("stellar");
-    return {
-      tokens: records.map((record) => ({
-        contract: record.address,
-        symbol: record.symbol,
-        name: record.name,
-        decimals: record.decimals,
-        priceUSD: record.priceUsd ?? 0,
+      symbol: token.symbol,
+      points: rows.map((row) => ({
+        priceUsd: row.priceUsd,
+        recordedAt: row.recordedAt.toISOString(),
       })),
     };
+  }
+
+  /** Parse an optional ISO date query param, rejecting unparseable values. */
+  private parseHistoryDate(value: string | undefined, field: string): Date | undefined {
+    if (value == null || value === "") return undefined;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(`'${field}' must be a valid ISO-8601 date`);
+    }
+    return parsed;
+  }
+
+  /** Clamp the requested point count into the supported range. */
+  private resolveHistoryLimit(limit: number | undefined): number {
+    if (limit == null) return PRICE_HISTORY_DEFAULT_LIMIT;
+    if (!Number.isFinite(limit) || limit <= 0) {
+      throw new BadRequestException("'limit' must be a positive integer");
+    }
+    return Math.min(Math.floor(limit), PRICE_HISTORY_MAX_LIMIT);
   }
 }

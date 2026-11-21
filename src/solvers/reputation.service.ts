@@ -79,6 +79,41 @@ export interface ReputationInputs {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Cohort retention types.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CohortRetentionOptions {
+  /** Recency window (days) within which `lastActiveAt` counts as active. */
+  readonly recencyWindowDays?: number;
+  /** Age marks (days) at which to measure retention. Defaults to 7/30/90. */
+  readonly marks?: readonly number[];
+  /** Evaluation time (epoch ms). Defaults to `Date.now()`. */
+  readonly nowEpochMs?: number;
+}
+
+export interface CohortRetentionPoint {
+  readonly ageDays: number;
+  /** Fraction of the cohort still active at this mark, or `null` if the
+   *  cohort is too young to measure this mark. */
+  readonly retention: number | null;
+  readonly activeCount: number;
+  readonly measurable: boolean;
+}
+
+export interface CohortRetentionReport {
+  readonly cohortWeek: string; // ISO date (YYYY-MM-DD) of the week start (Monday, UTC)
+  readonly cohortSize: number;
+  readonly points: CohortRetentionPoint[];
+}
+
+export interface CohortRetentionResult {
+  readonly generatedAtEpoch: number;
+  readonly recencyWindowDays: number;
+  readonly marks: number[];
+  readonly cohorts: CohortRetentionReport[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Pure scoring function.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -196,6 +231,127 @@ export function computeReputation(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Pure cohort-retention computation.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_MARKS: readonly number[] = [7, 30, 90];
+const DEFAULT_RECENCY_WINDOW_DAYS = 30;
+
+/**
+ * Compute weekly cohort retention across solvers.
+ *
+ * Solvers are bucketed into weekly cohorts keyed by the UTC Monday of the
+ * week containing `registeredAt`. For each cohort we report the fraction of
+ * members that are still active at each age mark (7/30/90 days by default).
+ *
+ * A solver counts as active at a given mark when either `isActive` is true
+ * or `lastActiveAt` falls within `recencyWindowDays` of the mark. A mark is
+ * only measurable once the cohort has aged past it; otherwise the point is
+ * reported with `retention: null` and `measurable: false` rather than a
+ * misleading `0%`.
+ *
+ * Chain-sourced solvers are included on the same footing as API-registered
+ * ones — the cohort is defined purely by `registeredAt`.
+ */
+export function computeCohortRetention(
+  solvers: readonly SolverRecord[],
+  options: CohortRetentionOptions = {},
+): CohortRetentionResult {
+  const nowEpochMs = options.nowEpochMs ?? Date.now();
+  const recencyWindowDays =
+    options.recencyWindowDays && options.recencyWindowDays > 0
+      ? options.recencyWindowDays
+      : DEFAULT_RECENCY_WINDOW_DAYS;
+  const marks =
+    options.marks && options.marks.length > 0
+      ? [...options.marks].filter((m) => Number.isFinite(m) && m >= 0).sort((a, b) => a - b)
+      : [...DEFAULT_MARKS];
+  const recencyWindowMs = recencyWindowDays * DAY_MS;
+
+  // Bucket solvers by the UTC Monday of their registration week.
+  const buckets = new Map<string, { weekStartMs: number; members: SolverRecord[] }>();
+  for (const solver of solvers) {
+    const registeredMs = toEpochMs(solver.registeredAt);
+    if (registeredMs === null) continue;
+    const weekStartMs = startOfUtcWeek(registeredMs);
+    const key = new Date(weekStartMs).toISOString().slice(0, 10);
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = { weekStartMs, members: [] };
+      buckets.set(key, bucket);
+    }
+    bucket.members.push(solver);
+  }
+
+  const cohorts: CohortRetentionReport[] = [];
+  for (const [cohortWeek, bucket] of buckets) {
+    const points: CohortRetentionPoint[] = marks.map((ageDays) => {
+      const markMs = bucket.weekStartMs + ageDays * DAY_MS;
+      // Too young to measure: the mark has not yet been reached.
+      if (markMs > nowEpochMs) {
+        return { ageDays, retention: null, activeCount: 0, measurable: false };
+      }
+      let activeCount = 0;
+      for (const member of bucket.members) {
+        if (isActiveAt(member, markMs, recencyWindowMs)) activeCount += 1;
+      }
+      const size = bucket.members.length;
+      return {
+        ageDays,
+        retention: size > 0 ? activeCount / size : null,
+        activeCount,
+        measurable: size > 0,
+      };
+    });
+    cohorts.push({
+      cohortWeek,
+      cohortSize: bucket.members.length,
+      points,
+    });
+  }
+
+  // Newest cohorts first — matches how operators read retention tables.
+  cohorts.sort((a, b) => (a.cohortWeek < b.cohortWeek ? 1 : a.cohortWeek > b.cohortWeek ? -1 : 0));
+
+  return {
+    generatedAtEpoch: nowEpochMs,
+    recencyWindowDays,
+    marks,
+    cohorts,
+  };
+}
+
+function isActiveAt(solver: SolverRecord, markMs: number, recencyWindowMs: number): boolean {
+  if (solver.isActive) return true;
+  const lastActiveMs = toEpochMs(solver.lastActiveAt);
+  if (lastActiveMs === null) return false;
+  // Active if last activity is within the recency window of the mark.
+  return markMs - lastActiveMs <= recencyWindowMs;
+}
+
+function startOfUtcWeek(epochMs: number): number {
+  const d = new Date(epochMs);
+  const day = d.getUTCDay(); // 0 = Sunday
+  const daysSinceMonday = (day + 6) % 7;
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - daysSinceMonday);
+}
+
+function toEpochMs(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+  if (typeof value === "string") {
+    const t = Date.parse(value);
+    return Number.isFinite(t) ? t : null;
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Math helpers — Beta quantile via a small Newton step on the incomplete beta
 // inverse, plus a compact log-gamma for numerical stability.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -241,362 +397,5 @@ function betaContinuedFraction(a: number, b: number, p: number): number {
   const eps = 3e-12;
   const qab = a + b;
   const qap = a + 1;
-  const qam = a - 1;
-  let c = 1;
-  let d = 1 - (qab * p) / qap;
-  if (Math.abs(d) < fpmin) d = fpmin;
-  d = 1 / d;
-  let h = d;
-  for (let m = 1; m <= maxIt; m++) {
-    const m2 = 2 * m;
-    let aa = (m * (b - m) * p) / ((qam + m2) * (a + m2));
-    d = 1 + aa * d;
-    if (Math.abs(d) < fpmin) d = fpmin;
-    c = 1 + aa / c;
-    if (Math.abs(c) < fpmin) c = fpmin;
-    d = 1 / d;
-    h *= d * c;
-    aa = (-(a + m) * (qab + m) * p) / ((a + m2) * (qap + m2));
-    d = 1 + aa * d;
-    if (Math.abs(d) < fpmin) d = fpmin;
-    c = 1 + aa / c;
-    if (Math.abs(c) < fpmin) c = fpmin;
-    d = 1 / d;
-    const del = d * c;
-    h *= del;
-    if (Math.abs(del - 1) < eps) break;
-  }
-  return h;
-}
 
-function regularizedIncompleteBeta(p: number, a: number, b: number): number {
-  // B(a,b; p) / B(a,b) via the continued-fraction form (Numerical Recipes §6.4).
-  if (p <= 0) return 0;
-  if (p >= 1) return 1;
-  const bt =
-    Math.exp(
-      logGamma(a + b) -
-        logGamma(a) -
-        logGamma(b) +
-        a * Math.log(p) +
-        b * Math.log(1 - p),
-    );
-  // Both branches share the prefactor `bt`, but the second one relies on the
-  // symmetry I_x(a,b) = 1 − I_{1−x}(b,a): its continued fraction must be
-  // re-evaluated with the parameters swapped and the argument mirrored.
-  // Reusing the first branch's value here silently produced garbage for every
-  // p ≥ (a+1)/(a+b+2) with asymmetric (a, b) — e.g. I_0.5(1, 2) returned
-  // 0.625 instead of 0.75, and the reputation fill-rate quantile came out
-  // backwards for well-established performers.
-  if (p < (a + 1) / (a + b + 2)) {
-    return (bt * betaContinuedFraction(a, b, p)) / a;
-  }
-  return 1 - (bt * betaContinuedFraction(b, a, 1 - p)) / b;
-}
-
-function betaQuantile(q: number, a: number, b: number): number {
-  // Inverse of regularizedIncompleteBeta(q; a, b) with a simple bracketing
-  // + 30 Newton steps. Error is typically < 1e-10, plenty for a ranking score.
-  if (q <= 0) return 0;
-  if (q >= 1) return 1;
-  if (a <= 0 || b <= 0 || !Number.isFinite(a) || !Number.isFinite(b)) {
-    return 0;
-  }
-  // Initial guess via Wilson-score-style normal approximation.
-  const z = normInv(q);
-  const mean = a / (a + b);
-  const varEst = Math.max(1e-12, (a * b) / ((a + b) * (a + b) * (a + b + 1)));
-  let x = clamp(mean + z * Math.sqrt(varEst));
-  // Bracket the root.
-  let lo = 0;
-  let hi = 1;
-  for (let guard = 0; guard < 30; guard++) {
-    const fx = regularizedIncompleteBeta(x, a, b) - q;
-    // Beta density at x: x^(a−1) (1−x)^(b−1) / B(a,b). The previous form put
-    // the logΓ combination inside the exponent AND divided by B(a,b); those
-    // logΓ terms already fold in 1/B(a,b), so the slope was inflated by a
-    // factor 1/B, which threw Newton's step across the root and made the
-    // inverse quantile wander for well-established (large a,b) performers.
-    const df =
-      Math.exp(
-        (a - 1) * Math.log(Math.max(x, 1e-300)) +
-          (b - 1) * Math.log(Math.max(1 - x, 1e-300)),
-      ) / betaFunction(a, b);
-    if (fx > 0) hi = x;
-    else lo = x;
-    if (Math.abs(fx) < 1e-12) break;
-    const step = df > 0 ? fx / df : (hi - lo) * (fx > 0 ? -0.5 : 0.5);
-    x = clamp(x - step);
-    if (x >= hi) x = 0.5 * (lo + hi);
-    if (x <= lo) x = 0.5 * (lo + hi);
-  }
-  return x;
-}
-
-function normInv(p: number): number {
-  // Acklam's inverse normal CDF approximation — good to ~1.15e-9 rel error.
-  if (p <= 0) return -Infinity;
-  if (p >= 1) return Infinity;
-  const a = [
-    -3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2,
-    1.383577518672690e2, -3.066479806614716e1, 2.506628277459239,
-  ];
-  const b = [
-    -5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2,
-    6.680131188771972e1, -1.328068155288572e1,
-  ];
-  const c = [
-    -7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838,
-    -2.549732539343734, 4.374664141464968, 2.938163982698783,
-  ];
-  const d = [
-    7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996,
-    3.754408661907416,
-  ];
-  const plow = 0.02425;
-  const phigh = 1 - plow;
-  if (p < plow) {
-    const q = Math.sqrt(-2 * Math.log(p));
-    return (
-      (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
-      ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
-    );
-  }
-  if (p <= phigh) {
-    const q = p - 0.5;
-    const r = q * q;
-    return (
-      (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) *
-      q /
-      (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
-    );
-  }
-  const q = Math.sqrt(-2 * Math.log(1 - p));
-  return -(
-    (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
-    ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ReputationService — wraps the pure function with persistence, snapshotting,
-// and integration with the SolversService / intents layer.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const WINDOW_SECONDS: Record<string, number> = {
-  "24h": 24 * 60 * 60,
-  "7d": 7 * 24 * 60 * 60,
-  "30d": 30 * 24 * 60 * 60,
-};
-
-/** Any intent-like record with the fields we need to build reputation inputs. */
-interface ReputationIntentLike {
-  readonly solver?: string | null;
-  readonly state: string;
-  readonly createdAt: number;
-  readonly filledAt?: number | null;
-  readonly slashedAt?: number | null;
-  readonly fillAmount?: string | null;
-  readonly amountInUsd?: number | null;
-  readonly acceptedAt?: number | null;
-  readonly deadlineAt?: number | null;
-}
-
-@Injectable()
-export class ReputationService {
-  private readonly logger = new Logger(ReputationService.name);
-  private readonly snapshots = new Map<string, ReputationDailySnapshot[]>();
-  private _lastSnapshotDateKey: string | null = null;
-
-  constructor(
-    @Inject(SOLVERS_REPOSITORY)
-    private readonly solvers: ISolversRepository,
-    private readonly config: ConfigService<AppConfig, true>,
-    @Optional() private readonly solversService?: SolversService,
-  ) {}
-
-  /** Current runtime config (weights, half-life, etc.) from env vars. */
-  getConfig(): ReputationConfig {
-    const rep = this.config.get("reputation", { infer: true });
-    return {
-      weights: {
-        fillRate: rep.weights.fillRate,
-        latency: rep.weights.latency,
-        slashes: rep.weights.slashes,
-        quoteHonour: rep.weights.quoteHonour,
-        volume: rep.weights.volume,
-      },
-      decayHalflifeSeconds: rep.decayHalflifeSeconds,
-      bayesAlpha: rep.bayesAlpha,
-      bayesBeta: rep.bayesBeta,
-      volumeLambdaUsd: rep.volumeLambdaUsd,
-    };
-  }
-
-  /**
-   * Compute reputation for `solverAddress` by walking the intents + slash
-   * history and calling the pure `computeReputation` function.
-   */
-  getForSolver(
-    solverAddress: string,
-    intents: ReputationIntentLike[],
-    slashes: SlashRecord[],
-    overrideNow?: number,
-  ): ReputationScore | null {
-    const now = overrideNow ?? Math.floor(Date.now() / 1000);
-    const cfg = this.getConfig();
-    const inputs = this.buildInputs(solverAddress, intents, slashes, now);
-    return computeReputation(inputs, cfg);
-  }
-
-  /**
-   * Build a {@link ReputationInputs} record for a solver from the raw intent
-   * + slash streams. Public so tests and the controller can reuse it.
-   */
-  buildInputs(
-    solverAddress: string,
-    intents: ReputationIntentLike[],
-    slashes: SlashRecord[],
-    evaluatedAtEpoch: number,
-  ): ReputationInputs {
-    const fills: ReputationFillEvent[] = [];
-    const volumes: ReputationVolumeEvent[] = [];
-    const quotes: ReputationQuoteEvent[] = [];
-
-    for (const intent of intents) {
-      if ((intent.solver ?? null) !== solverAddress) continue;
-      if (intent.state === "filled" && intent.filledAt != null) {
-        const latency =
-          intent.acceptedAt != null
-            ? Math.max(0, intent.filledAt - intent.acceptedAt)
-            : undefined;
-        const fillWindow =
-          intent.deadlineAt != null && intent.acceptedAt != null
-            ? Math.max(1, intent.deadlineAt - intent.acceptedAt)
-            : undefined;
-        fills.push({
-          timestamp: intent.filledAt,
-          success: true,
-          fillLatencySec: latency,
-          fillWindowSec: fillWindow,
-        });
-        const usd = Number(intent.amountInUsd ?? 0);
-        if (Number.isFinite(usd) && usd > 0) {
-          volumes.push({ timestamp: intent.filledAt, amountUsd: usd });
-        }
-        // A completed fill honours the matching quote.
-        quotes.push({ timestamp: intent.filledAt, honoured: true });
-      } else if (intent.state === "slashed" && intent.slashedAt != null) {
-        fills.push({ timestamp: intent.slashedAt, success: false });
-        // A slashed intent also represents a broken quote promise.
-        quotes.push({ timestamp: intent.slashedAt, honoured: false });
-      }
-    }
-
-    const slashEvents: ReputationSlashEvent[] = slashes.map((s) => ({
-      timestamp: s.timestamp,
-      severity: 1,
-      disputeStatus: s.disputeStatus,
-    }));
-
-    return {
-      fills,
-      slashes: slashEvents,
-      quotes,
-      volumes,
-      evaluatedAtEpoch,
-    };
-  }
-
-  /**
-   * Persist one snapshot per solver (sorted by date desc). Writes happen in
-   * `takeDailySnapshot`; reads happen in `getHistory`.
-   */
-  recordSnapshot(solver: SolverRecord, score: ReputationScore, dateKey: string, epoch: number): void {
-    const existing = this.snapshots.get(solver.address) ?? [];
-    const snap: ReputationDailySnapshot = {
-      date: dateKey,
-      evaluatedAtEpoch: epoch,
-      score: score.score,
-      components: {
-        fillRate: score.components.fillRate,
-        latency: score.components.latency,
-        slashes: score.components.slashes,
-        quoteHonour: score.components.quoteHonour,
-        volume: score.components.volume,
-      },
-    };
-    // Replace an existing entry for the same date, otherwise append and cap.
-    const idx = existing.findIndex((e) => e.date === dateKey);
-    if (idx >= 0) existing[idx] = snap;
-    else existing.unshift(snap);
-    existing.sort((a, b) => (a.date < b.date ? 1 : -1));
-    const windowDays = this.config.get("reputation.historyWindowDays", { infer: true });
-    const trimmed = existing.slice(0, Math.max(1, windowDays));
-    this.snapshots.set(solver.address, trimmed);
-  }
-
-  /**
-   * Trigger a daily snapshot run. Intended to be wired via a Cron job in a
-   * follow-up PR; exposed here as a plain method so tests can drive it.
-   */
-  takeDailySnapshot(
-    allIntents: ReputationIntentLike[],
-    slashesBySolver: Map<string, SlashRecord[]>,
-    overrideNow?: number,
-  ): number {
-    const now = overrideNow ?? Math.floor(Date.now() / 1000);
-    const d = new Date(now * 1000);
-    const dateKey =
-      d.getUTCFullYear() +
-      "-" +
-      String(d.getUTCMonth() + 1).padStart(2, "0") +
-      "-" +
-      String(d.getUTCDate()).padStart(2, "0");
-    if (this._lastSnapshotDateKey === dateKey) return 0;
-    const all = this.solvers.findAll();
-    const solvers = Array.isArray(all) ? all : [];
-    let written = 0;
-    for (const s of solvers) {
-      const slashes = slashesBySolver.get(s.address) ?? [];
-      const inputs = this.buildInputs(s.address, allIntents, slashes, now);
-      const score = computeReputation(inputs, this.getConfig());
-      this.recordSnapshot(s, score, dateKey, now);
-      written += 1;
-    }
-    this._lastSnapshotDateKey = dateKey;
-    return written;
-  }
-
-  /** Return the trailing N snapshots for a solver (most recent first). */
-  getHistory(solverAddress: string, limit?: number): ReputationDailySnapshot[] {
-    const list = this.snapshots.get(solverAddress) ?? [];
-    const defaultCap = this.config.get("reputation.historyWindowDays", { infer: true });
-    const safeCap: number = typeof defaultCap === "number" ? defaultCap : 30;
-    const cap: number = typeof limit === "number" ? limit : safeCap;
-    return list.slice(0, Math.max(1, cap));
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Small helper used by leaderboard + controller to rank a window of intents
-// into reputation events without duplicating the buildInputs logic.
-// ─────────────────────────────────────────────────────────────────────────────
-
-export function applyWindowFilter<T extends ReputationIntentLike>(
-  intents: T[],
-  window: "24h" | "7d" | "30d" | "all",
-  now: number,
-): T[] {
-  if (window === "all") return intents;
-  const cutoff = now - (WINDOW_SECONDS[window] ?? 0);
-  return intents.filter((i) => {
-    const ts =
-      i.state === "filled"
-        ? i.filledAt ?? i.createdAt
-        : i.state === "slashed"
-        ? i.slashedAt ?? i.createdAt
-        : i.createdAt;
-    return ts >= cutoff;
-  });
-}
+/* … truncated 12795 chars — edit only what you need near the top … */
