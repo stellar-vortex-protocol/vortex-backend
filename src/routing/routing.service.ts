@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import { Route, RouteStep, TokenInfo } from "../intents/intents.types";
 
 /**
@@ -14,6 +14,31 @@ export interface RouteOptions {
   /** Estimated fill time in seconds (solver avg + jitter). */
   estimatedFillTime: number;
 }
+
+/**
+ * A candidate intermediate (bridge) token for two-hop routes.
+ */
+export interface IntermediateToken {
+  symbol: string;
+  address: string;
+  decimals: number;
+  /** Human-readable name; defaults to the symbol when omitted. */
+  name?: string;
+}
+
+/**
+ * Per-chain ordered list of candidate intermediate tokens. The router picks the
+ * first viable candidate for the source chain. Chains with no entry fall back
+ * to the hardcoded USDC behavior.
+ */
+export type IntermediateTokenConfig = Partial<Record<string, IntermediateToken[]>>;
+
+/**
+ * DI token for the configurable intermediate bridge-token list. Provided by
+ * RoutingModule so RoutingService stays a pure, stateless, easily-testable
+ * class (see issue #220 implementation guidelines).
+ */
+export const INTERMEDIATE_TOKENS = Symbol("INTERMEDIATE_TOKENS");
 
 /**
  * USDC contract addresses used as the intermediate token for two-hop routes.
@@ -34,8 +59,32 @@ const USDC_SYMBOL = "USDC";
 const USDC_DECIMALS_EVM = 6;
 const USDC_DECIMALS_STELLAR = 7;
 
+/**
+ * Default intermediate-token config: USDC-only, matching the historical
+ * hardcoded behavior exactly.
+ */
+export const DEFAULT_INTERMEDIATE_TOKENS: IntermediateTokenConfig = Object.fromEntries(
+  Object.entries(USDC_ADDRESSES).map(([chain, address]) => [
+    chain,
+    [
+      {
+        symbol: USDC_SYMBOL,
+        address: address as string,
+        decimals: chain === "stellar" ? USDC_DECIMALS_STELLAR : USDC_DECIMALS_EVM,
+        name: "USD Coin",
+      },
+    ],
+  ]),
+);
+
 @Injectable()
 export class RoutingService {
+  constructor(
+    @Optional()
+    @Inject(INTERMEDIATE_TOKENS)
+    private readonly intermediateTokens: IntermediateTokenConfig = DEFAULT_INTERMEDIATE_TOKENS,
+  ) {}
+
   /**
    * Build the optimal route for a cross-chain swap.
    *
@@ -45,8 +94,8 @@ export class RoutingService {
    *    "transfer" step via the solver.
    * 2. **Two-hop route** — when the source token is not USDC (or another
    *    well-known stable) a two-hop path is used:
-   *      step 1: swap/bridge srcToken → USDC on the source chain
-   *      step 2: bridge USDC → dstToken on Stellar
+   *      step 1: swap/bridge srcToken → intermediate on the source chain
+   *      step 2: bridge intermediate → dstToken on Stellar
    *
    * Fee and price-impact figures are passed in from the caller so this service
    * stays stateless and free of cross-module dependencies (see issue #220
@@ -96,11 +145,12 @@ export class RoutingService {
   }
 
   /**
-   * Two-hop route: srcToken → USDC (on source chain) → dstToken (on Stellar).
+   * Two-hop route: srcToken → intermediate (on source chain) → dstToken (on Stellar).
    *
    * Used when the source token is not directly bridgeable by a solver
-   * (e.g. WETH → USDC → yXLM).  The intermediate token is always USDC so
-   * the solver only needs to handle stable-to-stable bridges.
+   * (e.g. WETH → USDC → yXLM). The intermediate token is selected from the
+   * configured per-chain candidate list (first viable candidate), falling back
+   * to USDC when no candidates are configured for the source chain.
    */
   createTwoHopRoute(
     srcToken: TokenInfo,
@@ -108,34 +158,27 @@ export class RoutingService {
     solver: string,
     opts?: RouteOptions,
   ): Route {
-    const usdcAddress = USDC_ADDRESSES[srcToken.chain] ?? "";
-    const usdcIntermediate: TokenInfo = {
-      address: usdcAddress,
-      symbol: USDC_SYMBOL,
-      name: "USD Coin",
-      decimals: USDC_DECIMALS_EVM,
-      chain: srcToken.chain,
-    };
+    const intermediate = this.selectIntermediate(srcToken);
 
-    // Step 1: swap/bridge srcToken → USDC on source chain
+    // Step 1: swap/bridge srcToken → intermediate on source chain
     const step1: RouteStep = {
       type: "swap",
       protocol: "uniswap-v3",
       fromChain: srcToken.chain,
       toChain: srcToken.chain,
       fromToken: srcToken,
-      toToken: usdcIntermediate,
+      toToken: intermediate,
       estimatedTime: 15,
       estimatedGas: "21000",
     };
 
-    // Step 2: bridge USDC → Stellar dstToken
+    // Step 2: bridge intermediate → Stellar dstToken
     const step2: RouteStep = {
       type: "bridge",
       protocol: "direct-solver",
       fromChain: srcToken.chain,
       toChain: "stellar",
-      fromToken: usdcIntermediate,
+      fromToken: intermediate,
       toToken: dstToken,
       estimatedTime: opts?.estimatedFillTime ?? 60,
       estimatedGas: "0",
@@ -154,6 +197,42 @@ export class RoutingService {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Select the first viable intermediate token for the source chain from the
+   * configured candidate list. Falls back to the hardcoded USDC behavior when
+   * the chain has no configured candidates (or none are viable).
+   */
+  private selectIntermediate(srcToken: TokenInfo): TokenInfo {
+    const candidates = this.intermediateTokens?.[srcToken.chain] ?? [];
+    const viable = candidates.find(
+      (c) => c.address && c.symbol && c.symbol.toUpperCase() !== srcToken.symbol.toUpperCase(),
+    );
+    if (viable) {
+      return {
+        address: viable.address,
+        symbol: viable.symbol,
+        name: viable.name ?? viable.symbol,
+        decimals: viable.decimals,
+        chain: srcToken.chain,
+      };
+    }
+    return this.defaultUsdcIntermediate(srcToken.chain);
+  }
+
+  /**
+   * Historical USDC-only intermediate, used as the fallback when no other
+   * candidates are configured for a chain.
+   */
+  private defaultUsdcIntermediate(chain: string): TokenInfo {
+    return {
+      address: USDC_ADDRESSES[chain] ?? "",
+      symbol: USDC_SYMBOL,
+      name: "USD Coin",
+      decimals: chain === "stellar" ? USDC_DECIMALS_STELLAR : USDC_DECIMALS_EVM,
+      chain,
+    };
+  }
 
   /**
    * Returns true when the src/dst token pair can be handled with a single
