@@ -1,49 +1,37 @@
-import { IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, Matches } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { SupportedChain } from "../intents.types";
-
-const SUPPORTED_CHAINS: SupportedChain[] = [
-  "stellar",
-  "ethereum",
-  "base",
-  "polygon",
-  "arbitrum",
-  "optimism",
-  "avalanche",
-];
+import { ArrayMaxSize, IsArray, IsOptional, IsString } from "class-validator";
+import { IsValidAddress } from "../../common/validators/is-valid-address.validator";
 
 export class QuoteRequestDto {
-  @ApiProperty({ enum: SUPPORTED_CHAINS, description: "Source chain the funds are coming from" })
-  @IsIn(SUPPORTED_CHAINS)
-  srcChain!: SupportedChain;
-
-  @ApiProperty({ description: "Source token symbol, e.g. USDC" })
+  @ApiProperty({ description: "Source chain", example: "stellar" })
   @IsString()
-  @IsNotEmpty()
-  srcTokenSymbol!: string;
+  srcChain!: string;
 
-  @ApiProperty({ description: "Source amount as a non-negative integer string" })
+  @ApiProperty({ description: "Source token contract address" })
   @IsString()
-  @Matches(/^\d+$/)
+  srcToken!: string;
+
+  @ApiProperty({ description: "Destination chain", example: "stellar" })
+  @IsString()
+  dstChain!: string;
+
+  @ApiProperty({ description: "Destination token contract address" })
+  @IsString()
+  dstToken!: string;
+
+  @ApiProperty({ description: "Source amount in base units" })
+  @IsString()
   srcAmount!: string;
 
-  @ApiProperty({ description: "Destination token symbol, e.g. USDC" })
-  @IsString()
-  @IsNotEmpty()
-  dstTokenSymbol!: string;
-
-  @ApiPropertyOptional({ description: "Intent ID to persist the quote to" })
+  @ApiPropertyOptional({
+    description:
+      "Optional allowlist of trusted solver addresses. When present, quotes are solicited only from the intersection of eligible solvers and this list. Addresses that are not registered/active solvers are ignored. If the intersection is empty, no quotes are returned.",
+    type: [String],
+    maxItems: 10,
+  })
   @IsOptional()
-  @IsUUID()
-  intentId?: string;
-
-  @ApiPropertyOptional({ description: "Source token contract address / ID (used for precise token resolution)" })
-  @IsOptional()
-  @IsString()
-  srcTokenAddress?: string;
-
-  @ApiPropertyOptional({ description: "Destination Stellar token contract ID (used for precise token resolution)" })
-  @IsOptional()
-  @IsString()
-  dstTokenContract?: string;
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsValidAddress({ each: true })
+  preferredSolvers?: string[];
 }
