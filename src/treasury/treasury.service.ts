@@ -13,6 +13,7 @@ import {
   FeeLedgerEntry,
   SlashLedgerEntry,
   RefundLedgerEntry,
+  SlashAttribution,
 } from "./treasury.types";
 import { AppConfig } from "../config/configuration";
 
@@ -99,6 +100,94 @@ export class TreasuryService {
     });
     
     this.logger.log(`Recorded refund: ${entry.amount} ${entry.asset} to user ${entry.userAddress}`);
+  }
+
+  /**
+   * Attribute treasury slash inflow to the solver it came from.
+   *
+   * Groups `slashLedger` rows by `solverAddress` (and `asset`) via a single
+   * grouped Prisma query, returning a per-asset breakdown per solver so that
+   * multi-asset totals are never blended into one number.
+   */
+  async getSlashAttribution(
+    asset?: string,
+    from?: Date,
+    to?: Date,
+  ): Promise<SlashAttribution[]> {
+    const where: {
+      asset?: string;
+      slashedAt?: { gte?: Date; lte?: Date };
+    } = {};
+
+    if (asset) {
+      where.asset = asset;
+    }
+
+    if (from || to) {
+      where.slashedAt = {};
+      if (from) {
+        where.slashedAt.gte = from;
+      }
+      if (to) {
+        where.slashedAt.lte = to;
+      }
+    }
+
+    const grouped = await this.prisma.slashLedger.groupBy({
+      by: ["solverAddress", "asset"],
+      where,
+      _sum: { amount: true },
+      _count: { _all: true },
+    });
+
+    const bySolver = new Map<string, SlashAttribution>();
+
+    for (const row of grouped) {
+      const solverAddress = row.solverAddress;
+      const rowAsset = row.asset;
+      const total = BigInt(row._sum.amount ?? 0);
+      const count = row._count._all;
+
+      let attribution = bySolver.get(solverAddress);
+      if (!attribution) {
+        attribution = {
+          solverAddress,
+          totalSlashed: "0",
+          entryCount: 0,
+          byAsset: {},
+        };
+        bySolver.set(solverAddress, attribution);
+      }
+
+      attribution.byAsset[rowAsset] = {
+        totalSlashed: total.toString(),
+        entryCount: count,
+      };
+      attribution.entryCount += count;
+    }
+
+    // Sort descending by total slashed. When multiple assets are present we
+    // cannot blend units, so rank by the largest single-asset total per solver.
+    const results = Array.from(bySolver.values());
+    for (const attribution of results) {
+      let max = 0n;
+      for (const breakdown of Object.values(attribution.byAsset)) {
+        const value = BigInt(breakdown.totalSlashed);
+        if (value > max) {
+          max = value;
+        }
+      }
+      attribution.totalSlashed = max.toString();
+    }
+
+    results.sort((a, b) => {
+      const diff = BigInt(b.totalSlashed) - BigInt(a.totalSlashed);
+      if (diff > 0n) return 1;
+      if (diff < 0n) return -1;
+      return 0;
+    });
+
+    return results;
   }
 
   /**
@@ -252,34 +341,9 @@ export class TreasuryService {
       explanation,
       breakdown: {
         fees: expected.totalFees,
-        slashes: expected.totalSlashes,
-        refunds: expected.totalRefunds,
+        slashes: expected.totalSlashes
       },
     };
-
-    // Persist snapshot
-    await this.prisma.treasurySnapshot.create({
-      data: {
-        snapshotDate: new Date(snapshotDate),
-        asset,
-        expectedBalance: result.expectedBalance,
-        actualBalance: result.actualBalance,
-        discrepancy: result.discrepancy,
-        discrepancyPercentage: result.discrepancyPercentage,
-        toleranceThreshold: result.toleranceThreshold,
-        hasUnexplainedDiscrepancy: result.hasUnexplainedDiscrepancy,
-        explanation: result.explanation,
-        breakdown: result.breakdown as any,
-      },
-    });
-
-    if (hasUnexplainedDiscrepancy) {
-      this.logger.warn(
-        `Unexplained discrepancy for ${asset} on ${snapshotDate}: ${discrepancy.toString()} (${discrepancyPercentage}%)`,
-      );
-    } else {
-      this.logger.log(`Reconciliation OK for ${asset} on ${snapshotDate}`);
-    }
 
     return result;
   }
@@ -293,208 +357,119 @@ export class TreasuryService {
     asset: string,
   ): string {
     if (discrepancy === 0n) {
-      return "Perfect reconciliation - no discrepancy";
+      return "Balances match exactly";
     }
 
     if (!hasUnexplainedDiscrepancy) {
-      return `Discrepancy of ${discrepancy.toString()} ${asset} is within tolerance threshold`;
+      return `Discrepancy of ${discrepancy} ${asset} is within tolerance`;
     }
 
     if (discrepancy > 0n) {
-      return `Unexplained surplus of ${discrepancy.toString()} ${asset} - actual balance exceeds expected`;
+      return `Unexplained surplus of ${discrepancy} ${asset} - possible unrecorded fees or missing refund entries`;
     }
 
-    return `Unexplained deficit of ${(-discrepancy).toString()} ${asset} - expected balance exceeds actual`;
+    return `Unexplained deficit of ${-discrepancy} ${asset} - possible unrecorded slashes or missing fee entries`;
   }
 
   /**
-   * Get reconciliation history for a date range
+   * Run daily reconciliation for all configured assets
    */
-  async getReconciliationHistory(
-    from: Date,
-    to: Date,
-    asset?: string,
-  ): Promise<ReconciliationResult[]> {
-    const snapshots = await this.prisma.treasurySnapshot.findMany({
-      where: {
-        snapshotDate: {
-          gte: from,
-          lte: to,
-        },
-        ...(asset ? { asset } : {}),
-      },
-      orderBy: { snapshotDate: "asc" },
-    });
-
-    return snapshots.map((s) => ({
-      snapshotDate: s.snapshotDate.toISOString().split("T")[0],
-      asset: s.asset,
-      expectedBalance: s.expectedBalance,
-      actualBalance: s.actualBalance,
-      discrepancy: s.discrepancy,
-      discrepancyPercentage: s.discrepancyPercentage,
-      toleranceThreshold: s.toleranceThreshold,
-      hasUnexplainedDiscrepancy: s.hasUnexplainedDiscrepancy,
-      explanation: s.explanation,
-      breakdown: s.breakdown as any,
-    }));
-  }
-
-  /**
-   * Stream reconciliation history as CSV rows for export.
-   * Reuses the same history query as getReconciliationHistory so the
-   * export reflects exactly what the JSON endpoint returns.
-   */
-  async *streamReconciliationCsv(
-    from: Date,
-    to: Date,
-    asset?: string,
-  ): AsyncGenerator<string> {
-    const header = [
-      "snapshotDate",
-      "asset",
-      "expectedBalance",
-      "actualBalance",
-      "discrepancy",
-      "discrepancyPercentage",
-      "toleranceThreshold",
-      "hasUnexplainedDiscrepancy",
-      "explanation",
-      "fees",
-      "slashes",
-      "refunds",
-    ];
-    yield header.map((h) => this.escapeCsvField(h)).join(",") + "\n";
-
-    const results = await this.getReconciliationHistory(from, to, asset);
-    for (const r of results) {
-      const row = [
-        r.snapshotDate,
-        r.asset,
-        r.expectedBalance,
-        r.actualBalance,
-        r.discrepancy,
-        String(r.discrepancyPercentage),
-        r.toleranceThreshold,
-        String(r.hasUnexplainedDiscrepancy),
-        r.explanation,
-        r.breakdown?.fees ?? "",
-        r.breakdown?.slashes ?? "",
-        r.breakdown?.refunds ?? "",
-      ];
-      yield row.map((v) => this.escapeCsvField(v)).join(",") + "\n";
-    }
-  }
-
-  /**
-   * Escape a value for inclusion in a CSV field (RFC 4180).
-   */
-  private escapeCsvField(value: string): string {
-    if (value === undefined || value === null) {
-      return "";
-    }
-    const str = String(value);
-    if (/[",\n\r]/.test(str)) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  }
-
-  /**
-   * Get reconciliation summary for a date range
-   */
-  async getReconciliationSummary(
-    from: Date,
-    to: Date,
-  ): Promise<ReconciliationSummary> {
-    const snapshots = await this.prisma.treasurySnapshot.findMany({
-      where: {
-        snapshotDate: {
-          gte: from,
-          lte: to,
-        },
-      },
-    });
-
-    const totalSnapshots = snapshots.length;
-    const unexplainedDiscrepancies = snapshots.filter(
-      (s) => s.hasUnexplainedDiscrepancy,
-    ).length;
-
-    const assets = [...new Set(snapshots.map((s) => s.asset))];
-    const byAsset = assets.map((asset) => {
-      const assetSnapshots = snapshots.filter((s) => s.asset === asset);
-      const totalDiscrepancy = assetSnapshots.reduce(
-        (sum, s) => sum + BigInt(s.discrepancy),
-        0n,
-      );
-      return {
-        asset,
-        snapshots: assetSnapshots.length,
-        totalDiscrepancy: totalDiscrepancy.toString(),
-        unexplainedDiscrepancies: assetSnapshots.filter(
-          (s) => s.hasUnexplainedDiscrepancy,
-        ).length,
-      };
-    });
-
-    return {
-      from: from.toISOString().split("T")[0],
-      to: to.toISOString().split("T")[0],
-      totalSnapshots,
-      unexplainedDiscrepancies,
-      byAsset,
-    };
-  }
-
-  /**
-   * Get detailed reconciliation for a specific date
-   */
-  async getReconciliationDetail(
-    date: Date,
-  ): Promise<ReconciliationDetailResponse> {
-    const snapshotDate = date.toISOString().split("T")[0];
-    const snapshots = await this.prisma.treasurySnapshot.findMany({
-      where: {
-        snapshotDate: new Date(snapshotDate),
-      },
-    });
-
-    return {
-      date: snapshotDate,
-      results: snapshots.map((s) => ({
-        snapshotDate: s.snapshotDate.toISOString().split("T")[0],
-        asset: s.asset,
-        expectedBalance: s.expectedBalance,
-        actualBalance: s.actualBalance,
-        discrepancy: s.discrepancy,
-        discrepancyPercentage: s.discrepancyPercentage,
-        toleranceThreshold: s.toleranceThreshold,
-        hasUnexplainedDiscrepancy: s.hasUnexplainedDiscrepancy,
-        explanation: s.explanation,
-        breakdown: s.breakdown as any,
-      })),
-    };
-  }
-
-  /**
-   * Daily reconciliation cron job
-   */
-  @Cron(CronExpression.EVERY_DAY_AT_2AM)
-  async dailyReconciliation(): Promise<void> {
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  async runDailyReconciliation(): Promise<ReconciliationSummary> {
     this.logger.log("Starting daily treasury reconciliation");
 
     const assets = ["native", "USDC"];
-    const today = new Date();
+    const results: ReconciliationResult[] = [];
 
     for (const asset of assets) {
       try {
-        await this.reconcileAsset(asset, today);
+        const result = await this.reconcileAsset(asset);
+        results.push(result);
       } catch (error) {
-        this.logger.error(`Reconciliation failed for ${asset}:`, error);
+        this.logger.error(`Failed to reconcile ${asset}:`, error);
       }
     }
 
-    this.logger.log("Daily treasury reconciliation complete");
+    const summary: ReconciliationSummary = {
+      timestamp: new Date().toISOString(),
+      assets: results,
+      allBalanced: results.every((r) => !r.hasUnexplainedDiscrepancy),
+    };
+
+    this.logger.log(
+      `Reconciliation complete: ${summary.allBalanced ? "all balanced" : "discrepancies found"}`,
+    );
+
+    return summary;
+  }
+
+  /**
+   * Get detailed reconciliation report for a date range
+   */
+  async getReconciliationDetail(
+    asset: string,
+    fromDate: Date,
+    toDate: Date,
+  ): Promise<ReconciliationDetailResponse> {
+    const fees = await this.prisma.feeLedger.findMany({
+      where: {
+        asset,
+        accrualAt: { gte: fromDate, lte: toDate },
+      },
+      orderBy: { accrualAt: "asc" },
+    });
+
+    const slashes = await this.prisma.slashLedger.findMany({
+      where: {
+        asset,
+        slashedAt: { gte: fromDate, lte: toDate },
+      },
+      orderBy: { slashedAt: "asc" },
+    });
+
+    const refunds = await this.prisma.refundLedger.findMany({
+      where: {
+        asset,
+        issuedAt: { gte: fromDate, lte: toDate },
+      },
+      orderBy: { issuedAt: "asc" },
+    });
+
+    const totalFees = fees.reduce((sum, f) => sum + BigInt(f.amount), 0n);
+    const totalSlashes = slashes.reduce((sum, s) => sum + BigInt(s.amount), 0n);
+    const totalRefunds = refunds.reduce((sum, r) => sum + BigInt(r.amount), 0n);
+
+    return {
+      asset,
+      fromDate: fromDate.toISOString(),
+      toDate: toDate.toISOString(),
+      fees: fees.map((f) => ({
+        intentId: f.intentId,
+        amount: f.amount,
+        accrualAt: f.accrualAt.toISOString(),
+        txHash: f.txHash,
+      })),
+      slashes: slashes.map((s) => ({
+        solverAddress: s.solverAddress,
+        amount: s.amount,
+        slashedAt: s.slashedAt.toISOString(),
+        reason: s.reason,
+        txHash: s.txHash,
+      })),
+      refunds: refunds.map((r) => ({
+        intentId: r.intentId,
+        userAddress: r.userAddress,
+        amount: r.amount,
+        issuedAt: r.issuedAt.toISOString(),
+        reason: r.reason,
+        txHash: r.txHash,
+      })),
+      totals: {
+        fees: totalFees.toString(),
+        slashes: totalSlashes.toString(),
+        refunds: totalRefunds.toString(),
+        net: (totalFees + totalSlashes - totalRefunds).toString(),
+      },
+    };
   }
 }

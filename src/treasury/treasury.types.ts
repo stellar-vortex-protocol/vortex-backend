@@ -90,3 +90,30 @@ export interface RefundLedgerEntry {
   reason: string;
   txHash?: string;
 }
+
+/**
+ * Per-asset slash total for a single solver.
+ * Amounts are kept per-asset so multi-asset totals are never blended.
+ */
+export interface SlashAttributionAssetBreakdown {
+  asset: string;
+  totalSlashed: string; // bigint as string
+  entryCount: number;
+}
+
+/**
+ * Slash contribution attributed to a single solver address.
+ */
+export interface SlashAttributionEntry {
+  solverAddress: string;
+  totalSlashed: string; // bigint as string, sum across assets (informational only)
+  entryCount: number;
+  byAsset: SlashAttributionAssetBreakdown[];
+}
+
+export interface SlashAttributionReport {
+  asset: string | null;
+  from: string | null;
+  to: string | null;
+  solvers: SlashAttributionEntry[];
+}
