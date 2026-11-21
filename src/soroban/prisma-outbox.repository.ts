@@ -4,6 +4,8 @@ import {
   NewOutboxEntry,
   OUTBOX_DONE_STATUSES,
   OutboxEntry,
+  OutboxListFilter,
+  OutboxListPage,
   OutboxOperation,
   OutboxStatus,
   emptyStatusCounts,
@@ -103,6 +105,33 @@ export class PrismaOutboxRepository implements IOutboxRepository {
       orderBy: { id: "asc" },
     });
     return rows.map(fromModel);
+  }
+
+  /**
+   * Cursor-paginated inspection query for the admin API (issue #660).
+   *
+   * Ordered by ascending `id` (the cursor column) so the `status` filter can
+   * ride the `(status, id)` index and `status=dead` lookups stay cheap.
+   */
+  async list(filter: OutboxListFilter, pagination: { cursor?: string; limit: number }): Promise<OutboxListPage> {
+    const where: Prisma.OnchainOutboxWhereInput = {};
+    if (filter.status) where.status = filter.status;
+    if (filter.operation) where.operation = filter.operation;
+    if (filter.intentId) where.intentId = filter.intentId;
+    if (pagination.cursor) where.id = { gt: BigInt(pagination.cursor) };
+
+    const rows = await this.prisma.onchainOutbox.findMany({
+      where,
+      orderBy: { id: "asc" },
+      take: pagination.limit + 1,
+    });
+
+    const hasMore = rows.length > pagination.limit;
+    const page = hasMore ? rows.slice(0, pagination.limit) : rows;
+    return {
+      items: page.map(fromModel),
+      nextCursor: hasMore ? page[page.length - 1].id.toString() : null,
+    };
   }
 
   async countByStatus(): Promise<Record<OutboxStatus, number>> {

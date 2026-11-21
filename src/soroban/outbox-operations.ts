@@ -1,118 +1,118 @@
-import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
-import type { Intent } from "../intents/intents.types";
-import type { NewOutboxEntry, OutboxOperation } from "./outbox.repository";
-import type { InvokeContractParams } from "./stellar-tx.service";
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { SorobanService } from './soroban.service';
+import { Intent } from '../intents/entities/intent.entity';
 
 /**
- * Payload builders and ScVal encoders for settlement-contract operations that
- * flow through the outbox (issue #396).
- *
- * Payloads are plain JSON (bigint amounts as strings) so they survive the
- * `payload JSONB` column; ScVal encoding happens at relay time. The contract
- * method names follow docs/architecture/onchain-settlement.md and stay
- * provisional until the settlement ADR (issue #19) fixes the interface.
+ * Builds and (optionally) simulates the Soroban invocation that would settle an
+ * intent on-chain. `buildOutboxInvocation` is a pure builder used by the outbox
+ * relay; `SettlementCostEstimator` reuses it as a read-only preflight so intent
+ * creation/quoting can disclose an estimated settlement cost up front.
  */
+@Injectable()
+export class OutboxOperations {
+  private readonly logger = new Logger(OutboxOperations.name);
 
-export function createIntentEntry(intent: Intent): NewOutboxEntry {
-  return {
-    intentId: intent.intentId,
-    operation: "create_intent",
-    payload: {
-      intentId: intent.intentId,
-      user: intent.user,
-      srcChain: intent.srcChain,
-      srcTokenAddress: intent.srcToken.address,
-      srcAmount: intent.srcAmount,
-      dstTokenContract: intent.dstToken.contract,
-      minDstAmount: intent.minDstAmount,
-      deadline: intent.deadline,
-    },
-  };
-}
+  constructor(
+    private readonly sorobanService: SorobanService,
+    private readonly configService: ConfigService,
+  ) {}
 
-export function acceptIntentEntry(intent: Intent): NewOutboxEntry {
-  return {
-    intentId: intent.intentId,
-    operation: "accept_intent",
-    payload: { intentId: intent.intentId, solver: intent.solver, fillDeadline: intent.deadline },
-  };
-}
+  /**
+   * Build the `create_intent`/`fill_intent` invocation payload for an intent
+   * without enqueueing it. Pure: no side effects, no lease consumption.
+   */
+  buildOutboxInvocation(intent: Intent): {
+    contractId: string;
+    method: string;
+    args: unknown[];
+  } {
+    const contractId = this.configService.get<string>(
+      'SETTLEMENT_CONTRACT_ID',
+    );
+    if (!contractId) {
+      throw new Error('SETTLEMENT_CONTRACT_ID is not configured');
+    }
 
-export function fillIntentEntry(intent: Intent): NewOutboxEntry {
-  return {
-    intentId: intent.intentId,
-    operation: "fill_intent",
-    payload: {
-      intentId: intent.intentId,
-      solver: intent.solver,
-      fillAmount: intent.fillAmount,
-      fillTxHash: intent.txHash ?? "",
-    },
-  };
-}
-
-export function cancelIntentEntry(intent: Intent): NewOutboxEntry {
-  return {
-    intentId: intent.intentId,
-    operation: "cancel_intent",
-    payload: { intentId: intent.intentId, user: intent.user },
-  };
+    const method = intent.status === 'filled' ? 'fill_intent' : 'create_intent';
+    return {
+      contractId,
+      method,
+      args: [
+        intent.id,
+        intent.maker ?? null,
+        intent.amountIn ?? null,
+        intent.amountOut ?? null,
+      ],
+    };
+  }
 }
 
 /**
- * Encodes an outbox payload as a contract invocation.
+ * Advisory, read-only settlement-cost preflight estimator.
  *
- * @throws on a malformed payload (bad address, non-integer amount). Callers
- *         run this at enqueue time too, so bad input fails the HTTP request
- *         instead of becoming a poison row.
+ * Builds the would-be outbox invocation for an intent and simulates it against
+ * a throwaway/sandbox envelope using a configured read-only simulation account
+ * (never a channel-pool account, so no lease is consumed). Any failure or
+ * missing configuration yields `undefined` — this path must never block intent
+ * creation or quoting.
  */
-export function buildOutboxInvocation(
-  entry: { operation: OutboxOperation; payload: Record<string, unknown> },
-  settlementContractId: string,
-): InvokeContractParams {
-  const p = entry.payload;
-  let args: xdr.ScVal[];
-  switch (entry.operation) {
-    case "create_intent":
-      args = [
-        str(p.intentId),
-        address(p.user),
-        nativeToScVal(String(p.srcChain), { type: "symbol" }),
-        str(p.srcTokenAddress),
-        i128(p.srcAmount),
-        address(p.dstTokenContract),
-        i128(p.minDstAmount),
-        nativeToScVal(Number(p.deadline), { type: "u64" }),
-      ];
-      break;
-    case "accept_intent":
-      args = [str(p.intentId), address(p.solver), nativeToScVal(Number(p.fillDeadline), { type: "u64" })];
-      break;
-    case "fill_intent":
-      args = [str(p.intentId), address(p.solver), i128(p.fillAmount), str(p.fillTxHash)];
-      break;
-    case "cancel_intent":
-      args = [str(p.intentId), address(p.user)];
-      break;
-    default: {
-      const unknown: never = entry.operation;
-      throw new Error(`unknown outbox operation: ${String(unknown)}`);
+@Injectable()
+export class SettlementCostEstimator {
+  private readonly logger = new Logger(SettlementCostEstimator.name);
+
+  constructor(
+    private readonly outboxOperations: OutboxOperations,
+    private readonly sorobanService: SorobanService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  /**
+   * Estimate the on-chain settlement cost (resource fee + inclusion fee) in
+   * stroops for a would-be intent. Returns `undefined` when the settlement
+   * contract is unconfigured or simulation fails.
+   */
+  async estimate(intent: Intent): Promise<number | undefined> {
+    try {
+      const contractId = this.configService.get<string>(
+        'SETTLEMENT_CONTRACT_ID',
+      );
+      if (!contractId) {
+        return undefined;
+      }
+
+      const simulationAccount = this.configService.get<string>(
+        'SETTLEMENT_SIMULATION_ACCOUNT',
+      );
+      if (!simulationAccount) {
+        return undefined;
+      }
+
+      const invocation = this.outboxOperations.buildOutboxInvocation(intent);
+
+      const simulation = await this.sorobanService.simulateTransaction({
+        sourceAccount: simulationAccount,
+        contractId: invocation.contractId,
+        method: invocation.method,
+        args: invocation.args,
+      });
+
+      const resourceFee = Number(simulation?.minResourceFee ?? 0);
+      const inclusionFee = Number(simulation?.inclusionFee ?? 0);
+      const total = resourceFee + inclusionFee;
+
+      if (!Number.isFinite(total) || total <= 0) {
+        return undefined;
+      }
+
+      return total;
+    } catch (error) {
+      this.logger.debug(
+        `Settlement cost estimation skipped: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
     }
   }
-  return { contractId: settlementContractId, method: entry.operation, args };
-}
-
-function str(value: unknown): xdr.ScVal {
-  return nativeToScVal(String(value ?? ""), { type: "string" });
-}
-
-function address(value: unknown): xdr.ScVal {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error("outbox payload is missing a required address");
-  }
-  return new Address(value).toScVal();
-}
-
-function i128(value: unknown): xdr.ScVal {
-  return nativeToScVal(BigInt(String(value)), { type: "i128" });
 }
