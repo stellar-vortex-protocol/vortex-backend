@@ -1,6 +1,9 @@
-import { IsIn, IsInt, IsNumber, IsOptional, IsString, Max, Min, MinLength } from "class-validator";
+import { ArrayMaxSize, IsArray, IsIn, IsInt, IsNumber, IsOptional, IsString, Max, Min, MinLength } from "class-validator";
 import { SUPPORTED_CHAINS } from "../../intents/intents.types";
 import { TokenStatus } from "../tokens.repository";
+
+export const TOKEN_RISK_FLAGS = ["new-listing", "low-liquidity", "fee-on-transfer", "rebasing"] as const;
+export type TokenRiskFlag = (typeof TOKEN_RISK_FLAGS)[number];
 
 export class CreateAdminTokenDto {
   @IsIn(SUPPORTED_CHAINS)
@@ -66,6 +69,12 @@ export class PatchAdminTokenDto {
   @IsOptional()
   @IsNumber()
   priceUSD?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(TOKEN_RISK_FLAGS.length)
+  @IsIn(TOKEN_RISK_FLAGS, { each: true })
+  riskFlags?: TokenRiskFlag[];
 }
 
 export class DeleteAdminTokenDto {

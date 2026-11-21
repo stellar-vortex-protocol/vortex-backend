@@ -6,6 +6,19 @@ export type TokenStatus = "active" | "paused" | "delisted";
 /** How the address was verified. Classic Stellar assets are not SACs. */
 export type TokenAssetKind = "evm" | "stellar-sac" | "stellar-classic";
 
+/**
+ * Fixed set of admin-settable risk/warning flags surfaced to clients.
+ * Detection heuristics are out of scope; admins set these manually.
+ */
+export const TOKEN_RISK_FLAGS = [
+  "new-listing",
+  "low-liquidity",
+  "fee-on-transfer",
+  "rebasing",
+] as const;
+
+export type TokenRiskFlag = (typeof TOKEN_RISK_FLAGS)[number];
+
 export interface TokenRecord {
   id?: string;
   address: string;
@@ -19,6 +32,8 @@ export interface TokenRecord {
   /** Missing on older in-memory seeds is treated as active. */
   status?: TokenStatus;
   assetKind?: TokenAssetKind;
+  /** Admin-set risk/warning flags. Missing is treated as none. */
+  riskFlags?: TokenRiskFlag[];
 }
 
 export const TOKENS_REPOSITORY = Symbol("TOKENS_REPOSITORY");

@@ -16,6 +16,7 @@ export interface ResolvedSrcToken {
   decimals: number;
   chain: SupportedChain;
   priceUSD: number;
+  riskFlags?: string[];
 }
 
 /**
@@ -28,6 +29,7 @@ export interface ResolvedDstToken {
   name: string;
   decimals: number;
   priceUSD: number;
+  riskFlags?: string[];
 }
 
 export type ResolvedToken = ResolvedSrcToken | ResolvedDstToken;
@@ -39,6 +41,7 @@ export interface ApiToken {
   name: string;
   decimals: number;
   priceUSD: number;
+  riskFlags: string[];
 }
 
 export interface TokensByChainResponse {
@@ -137,6 +140,7 @@ export class TokensService {
       name: token.name,
       decimals: token.decimals,
       priceUSD: token.priceUsd ?? 0,
+      riskFlags: token.riskFlags ?? [],
     };
   }
 
@@ -180,12 +184,16 @@ export class TokensService {
       decimals: token.decimals,
       chain,
       priceUSD: token.priceUsd ?? 0,
+      riskFlags: token.riskFlags ?? [],
     };
   }
 
   /**
    * Project a resolved token into the public `ApiToken` shape used by the
    * registry endpoints (issue #655 reuses this for watchlist resolution).
+   *
+   * `riskFlags` is always present (empty array when unset) so clients can
+   * render a warning badge without defensive null checks (issue #656).
    */
   toApiToken(token: ResolvedToken): ApiToken {
     if (token.kind === "dst") {
@@ -196,6 +204,7 @@ export class TokensService {
         name: token.name,
         decimals: token.decimals,
         priceUSD: token.priceUSD,
+        riskFlags: token.riskFlags ?? [],
       };
     }
     return {
@@ -205,6 +214,7 @@ export class TokensService {
       name: token.name,
       decimals: token.decimals,
       priceUSD: token.priceUSD,
+      riskFlags: token.riskFlags ?? [],
     };
   }
 
@@ -237,35 +247,3 @@ export class TokensService {
    * populated, so the caller can fall back per-field rather than per-pair.
    */
   async resolvePairOracleOverride(
-    srcToken: string,
-    dstToken: string,
-  ): Promise<PairOracleOverride | undefined> {
-    const key = normalizePairKey(srcToken, dstToken);
-    const overrides = await this.loadPairOracleOverrides();
-    return overrides.get(key);
-  }
-
-  /**
-   * Build the full `pairOverrides` lookup keyed by normalised `srcToken:dstToken`.
-   *
-   * Reads the registry once and projects any per-pair oracle bound columns into
-   * a `Map`. Pairs without an override are omitted entirely so a lookup miss is
-   * an unambiguous "use the global default" signal.
-   */
-  async loadPairOracleOverrides(): Promise<Map<string, PairOracleOverride>> {
-    const records = await this.findAll();
-    const overrides = new Map<string, PairOracleOverride>();
-    for (const record of records) {
-      const maxUserSlippageBps = (record as TokenRecord & { oracleMaxUserSlippageBps?: bigint | null })
-        .oracleMaxUserSlippageBps;
-      const maxPremiumBps = (record as TokenRecord & { oracleMaxPremiumBps?: bigint | null })
-        .oracleMaxPremiumBps;
-      if (maxUserSlippageBps == null && maxPremiumBps == null) continue;
-      const override: PairOracleOverride = {};
-      if (maxUserSlippageBps != null) override.maxUserSlippageBps = maxUserSlippageBps;
-      if (maxPremiumBps != null) override.maxPremiumBps = maxPremiumBps;
-      overrides.set(normalizePairKey(record.address, record.address), override);
-    }
-    return overrides;
-  }
-}
