@@ -54,6 +54,24 @@ export interface ReconciliationDetailResponse extends ReconciliationResult {
   }>;
 }
 
+/**
+ * Maximum number of days allowed in a single reconciliation history query.
+ * Bounds the snapshotDate range to avoid an unbounded full-table scan.
+ */
+export const MAX_RECONCILIATION_HISTORY_DAYS = 180;
+
+export interface ReconciliationHistoryQuery {
+  from: string; // YYYY-MM-DD
+  to: string; // YYYY-MM-DD
+}
+
+export interface ReconciliationHistoryResponse {
+  asset: string;
+  from: string;
+  to: string;
+  snapshots: ReconciliationResult[];
+}
+
 export interface TreasuryAlert {
   id: string;
   severity: "warning" | "critical";
