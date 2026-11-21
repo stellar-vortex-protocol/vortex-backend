@@ -70,6 +70,24 @@ export interface SolverRecord {
    * this value are ignored during replay.
    */
   chainUpdatedLedger?: number | null;
+  /**
+   * Public-profile metadata (issue #643).
+   *
+   * `avatarUrl` and `websiteUrl` are always `https://` links to externally
+   * hosted content (the API never hosts uploads). `description` is bounded
+   * plain text with any HTML stripped. All three are solver-editable via
+   * UpdateSolverDto.
+   */
+  avatarUrl?: string;
+  description?: string;
+  websiteUrl?: string;
+  /**
+   * Operator-only verification badge (issue #643).
+   *
+   * Settable exclusively through the admin-gated PATCH endpoint; a solver
+   * can never self-certify. Absent/false means unverified.
+   */
+  verified?: boolean;
 }
 
 /**

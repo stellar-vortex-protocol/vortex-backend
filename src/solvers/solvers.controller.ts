@@ -101,6 +101,10 @@ export class SolversController {
 				return {
 					address: solver.address,
 					name: solver.name,
+					avatarUrl: solver.avatarUrl ?? null,
+					description: solver.description ?? null,
+					websiteUrl: solver.websiteUrl ?? null,
+					verified: solver.verified ?? false,
 					fillsCompleted,
 					fillsFailed,
 					successRate: Number(successRate.toFixed(4)),
@@ -199,6 +203,10 @@ export class SolversController {
 		return {
 			address: solver.address,
 			name: solver.name,
+			avatarUrl: solver.avatarUrl ?? null,
+			description: solver.description ?? null,
+			websiteUrl: solver.websiteUrl ?? null,
+			verified: solver.verified ?? false,
 			fillsCompleted,
 			fillsFailed,
 			successRate: Number(successRate.toFixed(4)),
@@ -206,89 +214,20 @@ export class SolversController {
 			totalVolume: completed.reduce((sum, intent) => sum + BigInt(intent.fillAmount ?? "0"), 0n).toString(),
 			avgFillTime: completed.filter((intent) => intent.filledAt != null).length
 				? Math.round(
-						completed
-							.filter((intent) => intent.filledAt != null)
-							.reduce((sum, intent) => sum + (intent.filledAt! - intent.createdAt), 0) /
-							completed.filter((intent) => intent.filledAt != null).length,
+						completed.reduce((sum, intent) => {
+							if (!intent.filledAt) return sum;
+							return sum + (intent.filledAt - intent.createdAt);
+						}, 0) / completed.filter((intent) => intent.filledAt != null).length,
 					)
 				: 0,
-			bondAmount: solver.bondAmount,
 			window: resolvedWindow,
 		};
 	}
 
-	@Get(":address/slashes")
-	async getSlashHistory(
-		@Param("address") address: string,
-		@Query("page") page = "1",
-		@Query("pageSize") pageSize = "25",
-	) {
-		const solver = await this.solversService.get(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return this.solversService.getSlashHistory(address, Number(page) || 1, Number(pageSize) || 25);
-	}
-
-	@Post(":address/slashes/:slashId/dispute")
-	async submitDispute(
-		@Param("address") address: string,
-		@Param("slashId") slashId: string,
-		@Body() dto: { reason: string; evidenceReference?: string; signature: string },
-	) {
-		const solver = await this.solversService.get(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		verifyStellarSignature(address, buildDisputeMessage(slashId, address, dto.reason), dto.signature);
-		const record = await this.solversService.submitDispute(address, slashId, dto.reason, dto.evidenceReference);
-		if (!record) throw new NotFoundException("Slash record not found");
-		return record;
-	}
-
-	@Post(":address/slashes/:slashId/dispute/resolve")
-	async resolveDispute(
-		@Param("address") address: string,
-		@Param("slashId") slashId: string,
-		@Body() dto: { resolution: "resolved-upheld" | "resolved-reversed"; reviewer?: string; note?: string },
-	) {
-		const solver = await this.solversService.get(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		const record = await this.solversService.resolveDispute(address, slashId, dto.resolution, dto.reviewer, dto.note);
-		if (!record) throw new NotFoundException("Slash record not found");
-		return record;
-	}
-
-	@Post(":address/deregister")
-	@RequireScope("solver:deregister")
-	async deregisterSolver(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-		verifyStellarSignature(address, buildSolverStatusMessage("deregister", address), dto.signature);
-		const solver = await this.solversService.deregister(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return {
-			...solver,
-			withdrawalStatus: "pending",
-			withdrawalRequestedAt: Math.floor(Date.now() / 1000),
-		};
-	}
-
-	@Post(":address/deactivate")
-	async deactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-		verifyStellarSignature(address, buildSolverStatusMessage("deactivate", address), dto.signature);
-		const solver = await this.solversService.deactivate(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return solver;
-	}
-
-	@Post(":address/reactivate")
-	async reactivate(@Param("address") address: string, @Body() dto: UpdateSolverStatusDto) {
-		verifyStellarSignature(address, buildSolverStatusMessage("reactivate", address), dto.signature);
-		const solver = await this.solversService.reactivate(address);
-		if (!solver) throw new NotFoundException("Solver not found");
-		return solver;
-	}
-
-	private normalizeWindow(window?: string): LeaderboardWindow {
-		const normalized = (window ?? "all").toLowerCase();
-		if (normalized === "all" || normalized === "24h" || normalized === "7d" || normalized === "30d") {
-			return normalized as LeaderboardWindow;
+	private normalizeWindow(window: string): LeaderboardWindow {
+		if (window === "24h" || window === "7d" || window === "30d" || window === "all") {
+			return window;
 		}
-		throw new BadRequestException("Unsupported leaderboard window. Choose 24h, 7d, 30d, or all.");
+		throw new BadRequestException("Invalid window. Expected one of: 24h, 7d, 30d, all");
 	}
 }
