@@ -1,4 +1,4 @@
-import { IsIn, IsInt, IsNumber, IsOptional, IsString, Max, Min, MinLength } from "class-validator";
+import { IsIn, IsInt, IsNumber, IsOptional, IsString, IsUrl, Max, Min, MinLength } from "class-validator";
 import { SUPPORTED_CHAINS } from "../../intents/intents.types";
 import { TokenStatus } from "../tokens.repository";
 
@@ -25,7 +25,7 @@ export class CreateAdminTokenDto {
   decimals?: number;
 
   @IsOptional()
-  @IsString()
+  @IsUrl({ require_protocol: true, protocols: ["http", "https"] })
   logoUri?: string;
 
   @IsOptional()
@@ -60,7 +60,7 @@ export class PatchAdminTokenDto {
   decimals?: number;
 
   @IsOptional()
-  @IsString()
+  @IsUrl({ require_protocol: true, protocols: ["http", "https"] })
   logoUri?: string;
 
   @IsOptional()

@@ -1,5 +1,14 @@
-import { BadRequestException, Controller, Get, Query } from "@nestjs/common";
-import { ApiTags, ApiOkResponse, ApiQuery } from "@nestjs/swagger";
+import {
+  BadRequestException,
+  Controller,
+  Get,
+  NotFoundException,
+  Param,
+  Query,
+  Res,
+} from "@nestjs/common";
+import { ApiTags, ApiOkResponse, ApiQuery, ApiParam } from "@nestjs/swagger";
+import type { Response } from "express";
 import { TokensService } from "./tokens.service";
 import { StellarTokensResponseDto } from "./dto/token-response.dto";
 
@@ -158,5 +167,36 @@ export class TokensController {
   })
   getStellarTokens(@Query("vsCurrency") vsCurrency?: string) {
     return this.tokensService.getStellarTokens(parseVsCurrency(vsCurrency));
+  }
+
+  @Get(":address/logo")
+  @ApiParam({
+    name: "address",
+    description: "Token contract address whose verified logo should be served.",
+  })
+  @ApiQuery({
+    name: "chain",
+    required: false,
+    description: "Chain the token belongs to (defaults to `stellar`).",
+  })
+  @ApiOkResponse({
+    description:
+      "The verified token logo bytes, proxied and cached server-side so clients never " +
+      "hotlink the original admin-supplied host. Content-Type reflects the verified image type.",
+    schema: { type: "string", format: "binary" },
+  })
+  async getTokenLogo(
+    @Param("address") address: string,
+    @Res({ passthrough: true }) res: Response,
+    @Query("chain") chain?: string,
+  ) {
+    const logo = await this.tokensService.getTokenLogo(address, chain);
+    if (!logo) {
+      throw new NotFoundException(`No verified logo available for token '${address}'.`);
+    }
+    res.setHeader("Content-Type", logo.contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    return logo.body;
   }
 }

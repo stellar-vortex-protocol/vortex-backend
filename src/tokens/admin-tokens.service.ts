@@ -15,6 +15,7 @@ import { CreateAdminTokenDto, DeleteAdminTokenDto, PatchAdminTokenDto } from "./
 import { ITokensRepository, TOKENS_REPOSITORY, TokenRecord, TokenStatus } from "./tokens.repository";
 import { TokenVerifierService } from "./verification/token-verifier.service";
 import { VerifiedTokenMetadata } from "./verification/evm-token.verifier";
+import { HttpEgressService } from "../common/http-egress/http-egress.service";
 
 /** WebSocket payload emitted after a successful registry mutation. */
 export interface TokenListUpdatedEvent {
@@ -33,12 +34,31 @@ export class TokenListPublisher {
   publish: (event: TokenListUpdatedEvent) => Promise<void> = async () => undefined;
 }
 
+/** Content-types accepted for admin-supplied token logos (issue #652). */
+export const ALLOWED_LOGO_CONTENT_TYPES = ["image/png", "image/svg+xml", "image/webp"] as const;
+
+/** Upper bound on a verified logo body, in bytes (issue #652). */
+export const MAX_LOGO_BYTES = 256 * 1024;
+
+/** How long a verified logo stays cached, in milliseconds (issue #652). */
+export const LOGO_CACHE_TTL_MS = 60 * 60 * 1000;
+
+/** A verified logo body plus the content-type it was served with. */
+export interface CachedLogo {
+  contentType: string;
+  body: Buffer;
+  expiresAt: number;
+}
+
 /**
  * Admin registry writes. On-chain metadata is verified before any insert or
  * metadata update. A failed verification does not touch the repository.
  */
 @Injectable()
 export class AdminTokensService {
+  /** In-memory verified-logo cache keyed by `(chain, address)` (issue #652). */
+  private readonly logoCache = new Map<string, CachedLogo>();
+
   constructor(
     @Inject(TOKENS_REPOSITORY) private readonly repo: ITokensRepository,
     private readonly verifier: TokenVerifierService,
@@ -46,6 +66,8 @@ export class AdminTokensService {
     private readonly publisher: TokenListPublisher,
     /** Read cache (issue #414): every registry write drops the cached token lists. */
     @Optional() private readonly cache?: CacheService,
+    /** Egress client used to verify and fetch admin-supplied logos (issue #652). */
+    @Optional() private readonly egress?: HttpEgressService,
   ) {}
 
   /** Register a token. Client decimals/symbol/name must match the chain when supplied. */
@@ -57,6 +79,7 @@ export class AdminTokensService {
     }
     const verified = await this.verifyOrThrow(chain, dto.address);
     this.assertNoMismatch(dto, verified);
+    if (dto.logoUri !== undefined) await this.verifyLogoOrThrow(dto.logoUri);
     const record = this.toRecord(chain, dto.address, verified, {
       name: dto.name,
       logoUri: dto.logoUri,
@@ -95,9 +118,14 @@ export class AdminTokensService {
         assetKind: verified.assetKind,
       };
     }
-    if (dto.logoUri !== undefined) next.logoUri = dto.logoUri;
+    if (dto.logoUri !== undefined) {
+      await this.verifyLogoOrThrow(dto.logoUri);
+      next.logoUri = dto.logoUri;
+    }
     if (dto.priceUSD !== undefined) next.priceUsd = dto.priceUSD;
     const saved = await this.repo.save(next);
+    // A changed logo invalidates any previously cached bytes for this token.
+    if (dto.logoUri !== undefined) this.logoCache.delete(this.logoKey(chain, saved.address));
     await this.audit.record({
       actor: admin.id,
       action: "token.update",
@@ -126,6 +154,24 @@ export class AdminTokensService {
     return this.toResponse(saved);
   }
 
+  /**
+   * Serve the verified logo bytes for a token, fetching and caching them on
+   * first access (issue #652). Clients never hotlink the admin-supplied host.
+   */
+  async getLogo(chain: SupportedChain, address: string): Promise<CachedLogo> {
+    const key = this.logoKey(chain, address);
+    const cached = this.logoCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached;
+    const record = this.require(chain, address);
+    if (!record.logoUri) {
+      throw new NotFoundException(`Token ${address} on ${chain} has no logo`);
+    }
+    const fetched = await this.fetchLogoOrThrow(record.logoUri);
+    const entry: CachedLogo = { ...fetched, expiresAt: Date.now() + LOGO_CACHE_TTL_MS };
+    this.logoCache.set(key, entry);
+    return entry;
+  }
+
   private async verifyOrThrow(chain: SupportedChain, address: string) {
     try {
       const verified = await this.verifier.verify(chain, address);
@@ -142,6 +188,58 @@ export class AdminTokensService {
         `Token verification failed and nothing was saved: ${(err as Error).message}`,
       );
     }
+  }
+
+  /**
+   * Confirm the logo URL resolves to an allowed image content-type within the
+   * size bound, using the shared egress client (issue #652).
+   */
+  private async verifyLogoOrThrow(logoUri: string): Promise<void> {
+    await this.fetchLogoOrThrow(logoUri);
+  }
+
+  private async fetchLogoOrThrow(logoUri: string): Promise<{ contentType: string; body: Buffer }> {
+    if (!this.egress) {
+      throw new ServiceUnavailableException("Logo verification is unavailable: egress client not configured");
+    }
+    let response: { status: number; headers: Record<string, string>; body: Buffer };
+    try {
+      response = await this.egress.get(logoUri, { maxBytes: MAX_LOGO_BYTES });
+    } catch (err) {
+      throw new BadRequestException({
+        code: "LOGO_UNREACHABLE",
+        message: `Logo URL could not be fetched: ${(err as Error).message}`,
+      });
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new BadRequestException({
+        code: "LOGO_UNREACHABLE",
+        message: `Logo URL returned HTTP ${response.status}`,
+      });
+    }
+    const rawType = response.headers["content-type"] ?? "";
+    const contentType = rawType.split(";")[0].trim().toLowerCase();
+    if (!(ALLOWED_LOGO_CONTENT_TYPES as readonly string[]).includes(contentType)) {
+      throw new BadRequestException({
+        code: "LOGO_INVALID_CONTENT_TYPE",
+        message: `Logo must be one of ${ALLOWED_LOGO_CONTENT_TYPES.join(", ")}`,
+      });
+    }
+    const body = response.body;
+    if (!body || body.length === 0) {
+      throw new BadRequestException({ code: "LOGO_EMPTY", message: "Logo body was empty" });
+    }
+    if (body.length > MAX_LOGO_BYTES) {
+      throw new BadRequestException({
+        code: "LOGO_TOO_LARGE",
+        message: `Logo exceeds the ${MAX_LOGO_BYTES} byte limit`,
+      });
+    }
+    return { contentType, body };
+  }
+
+  private logoKey(chain: string, address: string): string {
+    return `${chain}:${address.toLowerCase()}`;
   }
 
   private assertNoMismatch(
