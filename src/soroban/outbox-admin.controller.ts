@@ -4,6 +4,7 @@ import { AdminGuard, CurrentAdmin, RequireAdminRole } from "../admin/admin.guard
 import { AdminPrincipal } from "../admin/admin-auth";
 import { AdminAuditService } from "../admin/admin-audit.service";
 import { IOutboxRepository, OUTBOX_REPOSITORY, OutboxStatus } from "./outbox.repository";
+import { FeeBumpDecisionRepository } from "./fee-bump-decision.repository";
 
 const OUTBOX_STATUSES: readonly OutboxStatus[] = [
   "pending",
@@ -30,6 +31,7 @@ export class OutboxAdminController {
   constructor(
     @Inject(OUTBOX_REPOSITORY) private readonly outbox: IOutboxRepository,
     private readonly audit: AdminAuditService,
+    private readonly feeBumpDecisions: FeeBumpDecisionRepository,
   ) {}
 
   /** Lists outbox rows with optional status/operation/intentId filters and cursor pagination. */
@@ -80,6 +82,34 @@ export class OutboxAdminController {
         updatedAt: row.updatedAt,
       })),
       nextCursor: page.nextCursor,
+    };
+  }
+
+  /**
+   * Returns the ordered fee-bump decision history for one outbox entry, correlated
+   * via the entry's envelope/tx hash (issue #661).
+   */
+  @Get(":id/fee-bumps")
+  @ApiUnauthorizedResponse({ description: "Missing or invalid admin key" })
+  @ApiNotFoundResponse({ description: "No outbox row with this id" })
+  async feeBumps(@Param("id") id: string) {
+    if (!/^\d+$/.test(id)) throw new NotFoundException(`No outbox row with id ${id}`);
+    const row = await this.outbox.findById(id);
+    if (!row) throw new NotFoundException(`No outbox row with id ${id}`);
+
+    const hash = row.txHashOrEnvelopeHash;
+    const decisions = hash ? await this.feeBumpDecisions.listByHash(hash) : [];
+
+    return {
+      id: row.id,
+      txHashOrEnvelopeHash: hash ?? null,
+      items: decisions.map((d) => ({
+        feeBumpCount: d.feeBumpCount,
+        percentileUsed: d.percentileUsed,
+        newFeeStroops: d.newFeeStroops,
+        ceilingHit: d.ceilingHit,
+        decidedAt: d.decidedAt,
+      })),
     };
   }
 

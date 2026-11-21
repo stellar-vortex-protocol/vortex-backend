@@ -10,6 +10,7 @@ import {
 import { AppConfig, FeePercentile } from "../config/configuration";
 import { MetricsService } from "../metrics/metrics.service";
 import { SorobanService } from "./soroban.service";
+import { PrismaService } from "../prisma/prisma.service";
 
 export interface FeeBumpResult {
   feeBumpXdr: string;
@@ -29,6 +30,7 @@ export class FeeEscalationPolicy {
   constructor(
     private readonly sorobanService: SorobanService,
     private readonly metricsService: MetricsService,
+    private readonly prisma: PrismaService,
     configService: ConfigService<AppConfig, true>,
   ) {
     this.maxFeeStroops = configService.get("stellar.maxFeeStroops", { infer: true });
@@ -69,6 +71,23 @@ export class FeeEscalationPolicy {
     const step = Math.min(opts.feeBumpCount, ESCALATION_LADDER.length - 1);
     const percentile = ESCALATION_LADDER[step];
 
+    // Resolve the inner transaction up front so we can correlate the audit
+    // record to the owning outbox entry via the inner-tx hash (the fee-bump
+    // XDR itself is only known after buildFeeBump returns).
+    let innerTx: Transaction | null = null;
+    try {
+      innerTx = new Transaction(opts.innerTxXdr, opts.networkPassphrase);
+    } catch {
+      // XDR might already be a fee-bump — unwrap it
+      try {
+        const feeBump = new FeeBumpTransaction(opts.innerTxXdr, opts.networkPassphrase);
+        innerTx = feeBump.innerTransaction;
+      } catch {
+        innerTx = null;
+      }
+    }
+    const txHashOrEnvelopeHash = innerTx ? innerTx.hash().toString("hex") : null;
+
     let newFeePerOp: string;
     try {
       const stats = await this.sorobanService.getFeeStats();
@@ -83,17 +102,26 @@ export class FeeEscalationPolicy {
         `Fee-bump ceiling hit: requested ${newFeePerOp} stroops > max ${this.maxFeeStroops} stroops. Refusing to bump.`,
       );
       this.metricsService.txFeeBumpCeilingHits.inc();
+      this.persistDecision({
+        txHashOrEnvelopeHash,
+        feeBumpCount: opts.feeBumpCount,
+        percentileUsed: percentile,
+        newFeeStroops: newFeePerOp,
+        ceilingHit: true,
+      });
       return null;
     }
 
-    // Rebuild the inner transaction from XDR
-    let innerTx: Transaction;
-    try {
-      innerTx = new Transaction(opts.innerTxXdr, opts.networkPassphrase);
-    } catch {
-      // XDR might already be a fee-bump — unwrap it
-      const feeBump = new FeeBumpTransaction(opts.innerTxXdr, opts.networkPassphrase);
-      innerTx = feeBump.innerTransaction;
+    if (!innerTx) {
+      // Could not decode the inner transaction; nothing to bump.
+      this.persistDecision({
+        txHashOrEnvelopeHash,
+        feeBumpCount: opts.feeBumpCount,
+        percentileUsed: percentile,
+        newFeeStroops: newFeePerOp,
+        ceilingHit: false,
+      });
+      throw new Error("Unable to decode inner transaction XDR for fee-bump");
     }
 
     const feeBump = TransactionBuilder.buildFeeBumpTransaction(
@@ -109,10 +137,49 @@ export class FeeEscalationPolicy {
       `Built fee-bump at ${percentile} (${newFeePerOp} stroops), bump #${opts.feeBumpCount + 1}`,
     );
 
+    this.persistDecision({
+      txHashOrEnvelopeHash,
+      feeBumpCount: opts.feeBumpCount,
+      percentileUsed: percentile,
+      newFeeStroops: newFeePerOp,
+      ceilingHit: false,
+    });
+
     return {
       feeBumpXdr: feeBump.toXDR(),
       newFeeStroops: newFeePerOp,
       percentileUsed: percentile,
     };
+  }
+
+  /**
+   * Fire-and-forget audit write. Mirrors ContractVersionService.persistUpgrade:
+   * a failed audit write must never block fee-bump submission.
+   */
+  private persistDecision(record: {
+    txHashOrEnvelopeHash: string | null;
+    feeBumpCount: number;
+    percentileUsed: FeePercentile;
+    newFeeStroops: string;
+    ceilingHit: boolean;
+  }): void {
+    if (!record.txHashOrEnvelopeHash) return;
+    void this.prisma.feeBumpDecision
+      .create({
+        data: {
+          txHashOrEnvelopeHash: record.txHashOrEnvelopeHash,
+          feeBumpCount: record.feeBumpCount,
+          percentileUsed: record.percentileUsed,
+          newFeeStroops: record.newFeeStroops,
+          ceilingHit: record.ceilingHit,
+        },
+      })
+      .catch((err: unknown) => {
+        this.logger.warn(
+          `Failed to persist fee-bump decision audit record: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
   }
 }
