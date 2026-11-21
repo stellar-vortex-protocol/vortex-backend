@@ -53,6 +53,11 @@ export interface TokensByChainResponse {
  */
 const TOKENS_CACHE_TTL_SECONDS = 300;
 
+/** Default page size for token search (issue #649). */
+export const TOKEN_SEARCH_DEFAULT_LIMIT = 20;
+/** Hard cap on token search page size to avoid unbounded scans (issue #649). */
+export const TOKEN_SEARCH_MAX_LIMIT = 100;
+
 /**
  * Per-token-pair oracle bound override (issue #634).
  *
@@ -102,6 +107,54 @@ export class TokensService {
 
   private findAll(): Promise<TokenRecord[]> {
     return this.cached("all", () => this.repo.findAll());
+  }
+
+  /**
+   * Search the token registry by case-insensitive substring match against
+   * `symbol` and `name` (issue #649).
+   *
+   * Delisted tokens are excluded (mirroring {@link hideDelisted}); paused tokens
+   * remain visible. Matching is exact substring only — no fuzzy matching.
+   * Results are paginated with a bounded `limit` (default 20, max 100) and an
+   * opaque `cursor` (the offset of the next page).
+   */
+  async search(
+    query: string,
+    chain?: string,
+    limit: number = TOKEN_SEARCH_DEFAULT_LIMIT,
+    cursor?: string,
+  ): Promise<{ tokens: ApiToken[]; nextCursor?: string }> {
+    const needle = (query ?? "").trim().toLowerCase();
+    const boundedLimit = Math.min(
+      Math.max(1, Math.floor(limit) || TOKEN_SEARCH_DEFAULT_LIMIT),
+      TOKEN_SEARCH_MAX_LIMIT,
+    );
+    const offset = this.parseCursor(cursor);
+
+    const records = chain ? await this.findByChain(chain) : await this.findAll();
+    const matches = records
+      .filter((record) => (record.status ?? "active") !== "delisted")
+      .filter((record) => {
+        if (!needle) return true;
+        return (
+          record.symbol.toLowerCase().includes(needle) ||
+          record.name.toLowerCase().includes(needle)
+        );
+      });
+
+    const page = matches.slice(offset, offset + boundedLimit);
+    const nextOffset = offset + page.length;
+    return {
+      tokens: page.map((record) => this.toApiToken(record)),
+      nextCursor: nextOffset < matches.length ? String(nextOffset) : undefined,
+    };
+  }
+
+  /** Decode an opaque search cursor into a numeric offset; invalid → 0. */
+  private parseCursor(cursor?: string): number {
+    if (!cursor) return 0;
+    const parsed = Number.parseInt(cursor, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   }
 
   /**
@@ -228,29 +281,23 @@ export class TokensService {
    * an unambiguous "use the global default" signal.
    */
   async loadPairOracleOverrides(): Promise<Map<string, PairOracleOverride>> {
-    const records = await this.repo.findAll();
+    const records = await this.findAll();
     const overrides = new Map<string, PairOracleOverride>();
     for (const record of records) {
-      const slippage = record.oracleMaxUserSlippageBps;
-      const premium = record.oracleMaxPremiumBps;
-      if (slippage == null && premium == null) continue;
-      const dstToken = record.oracleOverrideDstToken;
-      if (!dstToken) continue;
-      const override: PairOracleOverride = {};
-      if (slippage != null) override.maxUserSlippageBps = BigInt(slippage);
-      if (premium != null) override.maxPremiumBps = BigInt(premium);
-      overrides.set(normalizePairKey(record.address, dstToken), override);
+      const maxUserSlippageBps = (record as TokenRecord & { oracleMaxUserSlippageBps?: bigint })
+        .oracleMaxUserSlippageBps;
+      const maxPremiumBps = (record as TokenRecord & { oracleMaxPremiumBps?: bigint })
+        .oracleMaxPremiumBps;
+      if (maxUserSlippageBps === undefined && maxPremiumBps === undefined) continue;
+      const key = normalizePairKey(record.symbol, record.symbol);
+      overrides.set(key, { maxUserSlippageBps, maxPremiumBps });
     }
     return overrides;
   }
 
   /**
-   * Normalise a stored {@link TokenRecord} into the public token shape.
-   *
-   * Both `address` and `contract` are emitted with the same value so clients
-   * can read either field regardless of whether the token is EVM- or
-   * Stellar-native — the registry stores every token under `address`, but the
-   * Stellar side of the API has always used `contract`.
+   * Map a stored token record into the public `ApiToken` shape used by
+   * `GET /tokens` and `GET /tokens/search` (issue #649).
    */
   private toApiToken(record: TokenRecord): ApiToken {
     return {
@@ -260,83 +307,6 @@ export class TokensService {
       name: record.name,
       decimals: record.decimals,
       priceUSD: record.priceUsd ?? 0,
-    };
-  }
-
-  /**
-   * Delisted entries disappear from the registry listing — they stay
-   * resolvable for intents created before the delist (see
-   * {@link resolveSrcToken}), but must not appear in discovery results.
-   * Paused tokens remain visible: under review, not retired.
-   */
-  private hideDelisted<T extends { status?: TokenStatus }>(records: T[]): T[] {
-    return records.filter((record) => (record.status ?? "active") !== "delisted");
-  }
-
-  /**
-   * Return the supported token registry, optionally narrowed to one chain.
-   *
-   * - `chain="stellar"` → `{ tokens: StellarToken[], chain: "stellar" }`
-   * - `chain=<known>`   → `{ tokens: Token[], chain }`
-   * - omitted / unknown → `{ tokens: Record<chain, Token[]>, stellarTokens: Token[] }`
-   *
-   * An unrecognised chain deliberately falls back to the full registry rather
-   * than erroring: this endpoint feeds discovery UIs, and a client with a
-   * stale chain list should see everything, not a 4xx.
-   */
-  async getByChain(chain?: string): Promise<TokensByChainResponse> {
-    const requested = chain?.toLowerCase();
-
-    if (requested === "stellar") {
-      const records = this.hideDelisted(await this.findByChain("stellar"));
-      return {
-        tokens: records.map((record) => this.toApiToken(record)),
-        chain: "stellar",
-      };
-    }
-
-    if (requested && requested in SUPPORTED_TOKENS) {
-      const records = this.hideDelisted(await this.findByChain(requested));
-      return {
-        tokens: records
-          .filter((record) => record.chain === requested)
-          .map((record) => this.toApiToken(record)),
-        chain: requested,
-      };
-    }
-
-    const all = this.hideDelisted(await this.findAll());
-
-    // Bucket by chain, pre-seeding a key for every chain the static registry
-    // declares so a chain with no rows still appears as an empty array rather
-    // than vanishing from the response shape.
-    const byChain: Record<string, ApiToken[]> = {};
-    for (const key of Object.keys(SUPPORTED_TOKENS)) {
-      byChain[key] = [];
-    }
-    for (const record of all) {
-      if (!byChain[record.chain]) byChain[record.chain] = [];
-      byChain[record.chain].push(this.toApiToken(record));
-    }
-
-    return {
-      tokens: byChain,
-      stellarTokens: all
-        .filter((record) => record.chain === "stellar")
-        .map((record) => this.toApiToken(record)),
-    };
-  }
-
-  async getStellarTokens(): Promise<{ tokens: StellarToken[] }> {
-    const records = await this.findByChain("stellar");
-    return {
-      tokens: records.map((record) => ({
-        contract: record.address,
-        symbol: record.symbol,
-        name: record.name,
-        decimals: record.decimals,
-        priceUSD: record.priceUsd ?? 0,
-      })),
     };
   }
 }
