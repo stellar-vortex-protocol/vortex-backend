@@ -89,6 +89,24 @@ export interface LedgerTotals {
   balanced: true;
 }
 
+/** One line item in an integrator payout statement (one row per intentId). */
+export interface IntegratorStatementLine {
+  intentId: string;
+  ruleId: string;
+  ruleVersion: number;
+  amount: string;
+  createdAt: number;
+}
+
+/** Read-side payout statement for a single integrator over a date window. */
+export interface IntegratorStatement {
+  integratorId: string;
+  from: number;
+  to: number;
+  lines: IntegratorStatementLine[];
+  total: string;
+}
+
 export class MemoryFeeLedger {
   private readonly entries: LedgerEntry[] = [];
 
@@ -123,6 +141,49 @@ export class MemoryFeeLedger {
       integratorFees: integrator.toString(),
       last24hFees: last24h.toString(),
       balanced: true,
+    };
+  }
+
+  /**
+   * Sum credit/integrator entries for `integratorId` within [from, to] (inclusive),
+   * grouped into one line per intentId. Returns a well-formed empty statement when
+   * there is no activity in range.
+   */
+  integratorStatement(integratorId: string, from: number, to: number): IntegratorStatement {
+    const matching = this.entries.filter(
+      (entry) =>
+        entry.side === "credit" &&
+        entry.account === "integrator" &&
+        entry.accountId === integratorId &&
+        entry.createdAt >= from &&
+        entry.createdAt <= to,
+    );
+
+    const byIntent = new Map<string, IntegratorStatementLine>();
+    for (const entry of matching) {
+      const existing = byIntent.get(entry.intentId);
+      if (existing) {
+        existing.amount = (BigInt(existing.amount) + BigInt(entry.amount)).toString();
+      } else {
+        byIntent.set(entry.intentId, {
+          intentId: entry.intentId,
+          ruleId: entry.ruleId,
+          ruleVersion: entry.ruleVersion,
+          amount: entry.amount,
+          createdAt: entry.createdAt,
+        });
+      }
+    }
+
+    const lines = [...byIntent.values()].sort((a, b) => a.createdAt - b.createdAt);
+    const total = lines.reduce((sum, line) => sum + BigInt(line.amount), 0n);
+
+    return {
+      integratorId,
+      from,
+      to,
+      lines,
+      total: total.toString(),
     };
   }
 }
