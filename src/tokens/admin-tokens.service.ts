@@ -43,6 +43,19 @@ export const MAX_LOGO_BYTES = 256 * 1024;
 /** How long a verified logo stays cached, in milliseconds (issue #652). */
 export const LOGO_CACHE_TTL_MS = 60 * 60 * 1000;
 
+/** Maximum number of tokens accepted in a single batch create call (issue #653). */
+export const MAX_BATCH_CREATE_TOKENS = 50;
+
+/** Per-item outcome of a batch create call (issue #653). */
+export interface BatchCreateTokenResult {
+  index: number;
+  address: string;
+  chain: string;
+  success: boolean;
+  token?: ReturnType<AdminTokensService["toResponse"]>;
+  error?: { code: string; message: string };
+}
+
 /** A verified logo body plus the content-type it was served with. */
 export interface CachedLogo {
   contentType: string;
@@ -95,6 +108,59 @@ export class AdminTokensService {
     });
     await this.emit("created", saved);
     return this.toResponse(saved);
+  }
+
+  /**
+   * Register several tokens in one call (issue #653). Each entry runs through
+   * the exact same {@link create} path (verification, mismatch checks, audit,
+   * publish) sequentially so a single bad entry never fails the whole batch
+   * and the chain RPC/EVM reader is not hammered with concurrent calls.
+   */
+  async createBatch(
+    dtos: CreateAdminTokenDto[],
+    admin: AdminPrincipal,
+  ): Promise<BatchCreateTokenResult[]> {
+    if (dtos.length > MAX_BATCH_CREATE_TOKENS) {
+      throw new BadRequestException({
+        code: "BATCH_TOO_LARGE",
+        message: `At most ${MAX_BATCH_CREATE_TOKENS} tokens may be created per batch`,
+      });
+    }
+    const results: BatchCreateTokenResult[] = [];
+    for (let index = 0; index < dtos.length; index += 1) {
+      const dto = dtos[index];
+      try {
+        const token = await this.create(dto, admin);
+        results.push({ index, address: dto.address, chain: dto.chain, success: true, token });
+      } catch (err) {
+        results.push({
+          index,
+          address: dto.address,
+          chain: dto.chain,
+          success: false,
+          error: this.toBatchError(err),
+        });
+      }
+    }
+    return results;
+  }
+
+  /** Normalise a thrown error into a stable `{ code, message }` batch result. */
+  private toBatchError(err: unknown): { code: string; message: string } {
+    if (err instanceof BadRequestException) {
+      const response = err.getResponse();
+      if (typeof response === "object" && response !== null && "code" in response) {
+        const { code, message } = response as { code: string; message?: string };
+        return { code, message: message ?? err.message };
+      }
+      return { code: "BAD_REQUEST", message: err.message };
+    }
+    if (err instanceof ConflictException) return { code: "CONFLICT", message: err.message };
+    if (err instanceof NotFoundException) return { code: "NOT_FOUND", message: err.message };
+    if (err instanceof ServiceUnavailableException) {
+      return { code: "VERIFICATION_UNAVAILABLE", message: err.message };
+    }
+    return { code: "INTERNAL_ERROR", message: (err as Error)?.message ?? "Unknown error" };
   }
 
   /**
@@ -200,114 +266,6 @@ export class AdminTokensService {
 
   private async fetchLogoOrThrow(logoUri: string): Promise<{ contentType: string; body: Buffer }> {
     if (!this.egress) {
-      throw new ServiceUnavailableException("Logo verification is unavailable: egress client not configured");
-    }
-    let response: { status: number; headers: Record<string, string>; body: Buffer };
-    try {
-      response = await this.egress.get(logoUri, { maxBytes: MAX_LOGO_BYTES });
-    } catch (err) {
-      throw new BadRequestException({
-        code: "LOGO_UNREACHABLE",
-        message: `Logo URL could not be fetched: ${(err as Error).message}`,
-      });
-    }
-    if (response.status < 200 || response.status >= 300) {
-      throw new BadRequestException({
-        code: "LOGO_UNREACHABLE",
-        message: `Logo URL returned HTTP ${response.status}`,
-      });
-    }
-    const rawType = response.headers["content-type"] ?? "";
-    const contentType = rawType.split(";")[0].trim().toLowerCase();
-    if (!(ALLOWED_LOGO_CONTENT_TYPES as readonly string[]).includes(contentType)) {
-      throw new BadRequestException({
-        code: "LOGO_INVALID_CONTENT_TYPE",
-        message: `Logo must be one of ${ALLOWED_LOGO_CONTENT_TYPES.join(", ")}`,
-      });
-    }
-    const body = response.body;
-    if (!body || body.length === 0) {
-      throw new BadRequestException({ code: "LOGO_EMPTY", message: "Logo body was empty" });
-    }
-    if (body.length > MAX_LOGO_BYTES) {
-      throw new BadRequestException({
-        code: "LOGO_TOO_LARGE",
-        message: `Logo exceeds the ${MAX_LOGO_BYTES} byte limit`,
-      });
-    }
-    return { contentType, body };
-  }
+      throw new
 
-  private logoKey(chain: string, address: string): string {
-    return `${chain}:${address.toLowerCase()}`;
-  }
-
-  private assertNoMismatch(
-    supplied: { symbol?: string; decimals?: number; name?: string },
-    onChain: VerifiedTokenMetadata,
-  ): void {
-    const mismatches = this.verifier.mismatches(supplied, onChain);
-    if (mismatches.length > 0) {
-      throw new BadRequestException({
-        code: "METADATA_MISMATCH",
-        message: "Supplied token metadata does not match on-chain metadata",
-        mismatches,
-      });
-    }
-  }
-
-  private require(chain: SupportedChain, address: string): TokenRecord {
-    const existing = this.repo.findByAddressAndChain(address, chain);
-    if (!existing) throw new NotFoundException(`Token ${address} on ${chain} was not found`);
-    return existing;
-  }
-
-  private toRecord(
-    chain: SupportedChain,
-    address: string,
-    verified: VerifiedTokenMetadata,
-    extra: { name?: string; logoUri?: string; priceUSD?: number; status: TokenStatus },
-  ): TokenRecord {
-    return {
-      address,
-      chain,
-      symbol: verified.symbol,
-      name: extra.name ?? verified.name ?? verified.symbol,
-      decimals: verified.decimals,
-      logoUri: extra.logoUri ?? null,
-      priceUsd: extra.priceUSD ?? null,
-      isStellar: chain === "stellar",
-      status: extra.status,
-      assetKind: verified.assetKind,
-    };
-  }
-
-  private toResponse(record: TokenRecord) {
-    return {
-      address: record.address,
-      chain: record.chain,
-      symbol: record.symbol,
-      name: record.name,
-      decimals: record.decimals,
-      status: record.status ?? "active",
-      assetKind: record.assetKind ?? (record.isStellar ? "stellar-sac" : "evm"),
-      logoUri: record.logoUri ?? null,
-      priceUSD: record.priceUsd ?? null,
-    };
-  }
-
-  private target(chain: string, address: string): string {
-    return `token:${chain}:${address}`;
-  }
-
-  private async emit(action: TokenListUpdatedEvent["action"], record: TokenRecord): Promise<void> {
-    await this.cache?.invalidate("tokens");
-    await this.publisher.publish({
-      type: "token_list_updated",
-      action,
-      chain: record.chain,
-      address: record.address,
-      status: record.status ?? "active",
-    });
-  }
-}
+/* … truncated 3705 chars — edit only what you need near the top … */
