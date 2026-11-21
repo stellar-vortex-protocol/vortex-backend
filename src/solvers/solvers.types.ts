@@ -4,6 +4,15 @@ import { SupportedChain } from "../intents/intents.types";
 export const MAX_DELEGATED_SIGNERS = 5;
 
 /**
+ * Maximum length of a scheduled solver pause, in seconds (issue #645).
+ *
+ * A `pause` call whose `until` is further out than this is rejected so a
+ * solver cannot effectively deactivate itself indefinitely without the
+ * manual `deactivate` path.
+ */
+export const MAX_PAUSE_DURATION_SECONDS = 30 * 24 * 60 * 60; // 30 days
+
+/**
  * Self-reported liquidity depth for a single (chain, token) pair (issue #640).
  *
  * `availableAmount` is a decimal string in the token's base units. It is
@@ -99,6 +108,16 @@ export interface SolverRecord {
    * (fail open), consistent with ORACLE_FAIL_OPEN_MAX_USD.
    */
   minIntentSizeUsd?: number;
+  /**
+   * Scheduled self-expiring pause (issue #645).
+   *
+   * Unix epoch seconds at which a scheduled pause lifts. Set by the signed
+   * `pause` endpoint together with `isActive=false`; the background sweep
+   * flips `isActive` back to true and clears this field once the timestamp
+   * has passed. Absent means the solver is not on a scheduled pause — a
+   * manual `deactivate` leaves this unset and is never auto-reactivated.
+   */
+  pausedUntil?: number;
 }
 
 /**
