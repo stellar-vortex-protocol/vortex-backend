@@ -90,3 +90,43 @@ export interface RefundLedgerEntry {
   reason: string;
   txHash?: string;
 }
+
+/**
+ * Treasury Refund Request
+ *
+ * Durable record created when a dispute reviewer overturns a slash. The
+ * refund itself is executed by a separate, change-managed process; this
+ * record is the queue operators work from.
+ */
+export type TreasuryRefundRequestStatus = "requested" | "executed" | "rejected";
+
+export interface TreasuryRefundRequest {
+  id: string;
+  disputeId: string;
+  solverAddress: string;
+  amount: string; // bigint as string
+  status: TreasuryRefundRequestStatus;
+  requestedAt: Date;
+  executedAt: Date | null;
+  executedBy: string | null;
+  executionTxHash: string | null;
+  rejectionReason: string | null;
+}
+
+export interface RequestRefundInput {
+  disputeId: string;
+  solverAddress: string;
+  amount: string; // bigint as string
+}
+
+export interface ExecuteRefundInput {
+  requestId: string;
+  executionTxHash: string;
+  executedBy: string;
+}
+
+export interface RejectRefundInput {
+  requestId: string;
+  reason: string;
+  executedBy: string;
+}
