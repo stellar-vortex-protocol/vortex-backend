@@ -18,6 +18,7 @@ export class AuctionTickerService {
   private readonly lastPrices = new Map<string, string>();
   private readonly priceHistory = new Map<string, AuctionPriceTick[]>();
   private readonly historyCap: number;
+  private readonly batchModeEnabled: boolean;
   private publishing = false;
 
   constructor(
@@ -29,6 +30,7 @@ export class AuctionTickerService {
       Number.isFinite(configured) && configured > 0
         ? Math.floor(configured)
         : DEFAULT_PRICE_HISTORY_CAP;
+    this.batchModeEnabled = process.env.AUCTION_BATCH_MODE_ENABLED === "true";
   }
 
   getPriceHistory(intentId: string): AuctionPriceTick[] {
@@ -52,10 +54,17 @@ export class AuctionTickerService {
       const now = Math.floor(Date.now() / 1000);
       const intents = await this.intentsService.getByState("open");
       const activeIds = new Set<string>();
+      const batchGroups = new Map<string, typeof intents>();
       for (const intent of intents) {
         if (!intent.auction) continue;
         activeIds.add(intent.intentId);
         const currentDstAmount = dutchAuctionPrice(intent.auction, now, intent.minDstAmount);
+        if (this.batchModeEnabled) {
+          const key = `${intent.srcToken}:${intent.dstToken}`;
+          const group = batchGroups.get(key) ?? [];
+          group.push(intent);
+          batchGroups.set(key, group);
+        }
         if (this.lastPrices.get(intent.intentId) === currentDstAmount) continue;
         await this.intentsGateway.broadcast({
           type: "auction_price",
@@ -65,6 +74,29 @@ export class AuctionTickerService {
         });
         this.lastPrices.set(intent.intentId, currentDstAmount);
         this.appendPriceTick(intent.intentId, { currentDstAmount, timestamp: now });
+      }
+      if (this.batchModeEnabled) {
+        for (const [key, group] of batchGroups) {
+          const [srcToken, dstToken] = key.split(":");
+          let clearingDstAmount: bigint | null = null;
+          for (const intent of group) {
+            const price = BigInt(
+              dutchAuctionPrice(intent.auction!, now, intent.minDstAmount),
+            );
+            if (clearingDstAmount === null || price < clearingDstAmount) {
+              clearingDstAmount = price;
+            }
+          }
+          if (clearingDstAmount === null) continue;
+          await this.intentsGateway.broadcast({
+            type: "batch_auction_price",
+            srcToken,
+            dstToken,
+            intentIds: group.map((intent) => intent.intentId),
+            clearingDstAmount: clearingDstAmount.toString(),
+            timestamp: now,
+          });
+        }
       }
       for (const intentId of this.lastPrices.keys()) {
         if (!activeIds.has(intentId)) this.lastPrices.delete(intentId);
