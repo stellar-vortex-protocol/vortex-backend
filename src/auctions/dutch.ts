@@ -65,3 +65,18 @@ export function dutchAuctionPrice(auction: DutchAuction, timestamp: number, minD
 
   return (startAmount - priceDrop).toString();
 }
+
+/**
+ * Compute the current live Dutch-auction price for an intent's stored auction
+ * field at `timestamp`. Returns `null` when the intent has no auction (i.e. it
+ * is not a Dutch-auction intent). Reuses `dutchAuctionPrice()` so the REST read
+ * path and the WS ticker share identical decay math.
+ */
+export function currentAuctionPrice(
+  auction: DutchAuction | null | undefined,
+  timestamp: number,
+  minDstAmount: string,
+): string | null {
+  if (!auction) return null;
+  return dutchAuctionPrice(auction, timestamp, minDstAmount);
+}
