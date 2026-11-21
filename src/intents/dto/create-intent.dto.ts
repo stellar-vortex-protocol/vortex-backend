@@ -128,3 +128,26 @@ export class CreateIntentDto {
   @MaxLength(78)
   minFillAmount?: string;
 }
+
+export class CreateIntentResponseDto {
+  @ApiProperty({ description: "Unique intent identifier" })
+  id!: string;
+
+  @ApiProperty({ description: "Current intent state" })
+  state!: string;
+
+  @ApiProperty({ description: "Fair value of the intent in destination base units" })
+  fairValue!: string;
+
+  @ApiProperty({ description: "Slippage in basis points between fair value and minDstAmount" })
+  slippageBps!: number;
+
+  @ApiPropertyOptional({
+    description:
+      "Issue #659 — advisory preflight estimate of the on-chain settlement cost (resource fee + " +
+      "inclusion fee) in stroops, derived from a sandbox `simulateTransaction` of the would-be " +
+      "`create_intent` invocation. Omitted (not zero) when the settlement contract is not " +
+      "configured or simulation fails; never blocks intent creation.",
+  })
+  estimatedSettlementCostStroops?: number;
+}

@@ -103,4 +103,12 @@ export class QuoteResponseDto {
 
   @ApiPropertyOptional({ description: "True when no solver responded and the returned quote is indicative" })
   indicative?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      "Advisory estimated on-chain settlement cost in stroops (resource fee + inclusion fee). " +
+      "Omitted when the settlement contract is not configured or simulation fails.",
+    example: 12345,
+  })
+  estimatedSettlementCostStroops?: number;
 }
