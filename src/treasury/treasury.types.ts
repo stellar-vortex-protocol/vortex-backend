@@ -90,3 +90,32 @@ export interface RefundLedgerEntry {
   reason: string;
   txHash?: string;
 }
+
+export interface BurnForecastDailyBucket {
+  date: string; // ISO date (YYYY-MM-DD)
+  fees: string; // bigint as string
+  slashes: string; // bigint as string
+  refunds: string; // bigint as string
+  net: string; // bigint as string (fees + slashes - refunds)
+}
+
+export interface BurnForecast {
+  asset: string;
+  windowDays: number;
+  /** Number of distinct days within the window that had ledger activity. */
+  distinctDays: number;
+  /** True when there is not enough data to project a meaningful trend. */
+  insufficientData: boolean;
+  /** Human-readable reason when insufficientData is true. */
+  insufficientDataReason: string | null;
+  /** Net inflow/outflow per day over the trailing window (bigint as string). */
+  netPerDay: string;
+  /** "growing" | "flat" | "draining" | "unknown" */
+  trend: "growing" | "flat" | "draining" | "unknown";
+  /** Current treasury balance for the asset (bigint as string). */
+  currentBalance: string;
+  /** Estimated days until balance reaches zero; null when not draining. */
+  daysToZero: number | null;
+  /** Per-day breakdown of ledger activity within the window. */
+  dailyBuckets: BurnForecastDailyBucket[];
+}
