@@ -32,4 +32,10 @@ coverage/
 .backfill-audit-partitions.json
 # Issue #409 backfill cursor
 .backfill-timestamps.json
-config.bat
+
+# secrets / editor (restored after malware cleanup)
+.env
+.env.*
+!.env*.example
+.vscode/*
+!.vscode/extensions.json
