@@ -60,6 +60,8 @@ export class AuctionTickerService {
         await this.intentsGateway.broadcast({
           type: "auction_price",
           intentId: intent.intentId,
+          srcToken: intent.srcToken,
+          dstToken: intent.dstToken,
           currentDstAmount,
           timestamp: now,
         });

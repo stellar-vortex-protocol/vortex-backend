@@ -30,6 +30,21 @@ export type SupportedChain = (typeof SUPPORTED_CHAINS)[number];
 export const STELLAR_CHAIN = "stellar" satisfies SupportedChain;
 
 /**
+ * A single candidate intermediate (bridge) token for two-hop routes
+ * (issue #638). Operators order these per source chain by preference; the
+ * routing service picks the first viable entry instead of always forcing
+ * USDC.
+ */
+export interface IntermediateToken {
+  /** Token symbol, e.g. "USDC", "USDT". */
+  symbol: string;
+  /** On-chain contract address for the token on its chain. */
+  address: string;
+  /** Token decimals, used to scale amounts when building route steps. */
+  decimals: number;
+}
+
+/**
  * A single entry in the append-only audit log for an intent.
  * Every state transition — cancel, expire, accept, fill — appends one entry.
  * Once persistence lands (issue #36) this will be written to an `intent_audit_log`
@@ -210,136 +225,6 @@ export interface Intent {
    */
   allowPartialFill?: boolean;
   /**
-   * Smallest tranche (source-token base units) a solver may reserve. The last
-   * tranche may be smaller when the remainder itself is below this — that is
-   * how rounding dust is cleared. Defaults to 1 when partial fills are on.
-   */
-  minFillAmount?: string;
-  /**
-   * Partial-fill accounting (issue #427), computed from the `intent_fills`
-   * rows on read. `state` stays within the public {@link IntentState}
-   * contract: a partially filled intent remains `open` (more solvers may
-   * reserve) and becomes `filled` when nothing is left; `fillProgress.status`
-   * is where `partially_filled` is visible.
-   */
-  fillProgress?: FillProgress;
-}
+   * Smallest tranche
 
-/** Lifecycle of one partial-fill tranche (issue #427). */
-export const INTENT_FILL_STATUSES = ["reserved", "filled", "slashed", "released"] as const;
-export type IntentFillStatus = (typeof INTENT_FILL_STATUSES)[number];
-
-/**
- * One solver's tranche of a partial-fill intent (issue #427) — a row of
- * `intent_fills`.
- *
- *  - `reserved`: the solver holds `reservedAmount` of `srcAmount` until
- *    `deadline`; nobody else can reserve it.
- *  - `filled`: the solver delivered at least the pro-rata share of
- *    `minDstAmount` (`minDstAmount × reservedAmount ÷ srcAmount`, rounded up).
- *  - `slashed`: the deadline passed without a fill — the solver is slashed
- *    for this tranche only, and the amount returns to the pool.
- *  - `released`: the reservation was returned without penalty (the intent was
- *    settled/cancelled around it by an operator).
- */
-export interface IntentFill {
-  fillId: string;
-  intentId: string;
-  solver: string;
-  /** Source-token base units this tranche covers. */
-  reservedAmount: string;
-  /** Minimum destination amount this tranche must deliver (pro-rata, rounded up). */
-  minDstAmount: string;
-  status: IntentFillStatus;
-  /** Unix epoch seconds. */
-  reservedAt: number;
-  /** Fill-window deadline for this tranche, unix epoch seconds. */
-  deadline: number;
-  /** Destination amount actually delivered. */
-  dstAmount?: string;
-  feeAmount?: string;
-  txHash?: string;
-  filledAt?: number;
-  slashedAt?: number;
-  releasedAt?: number;
-}
-
-/**
- * Aggregate partial-fill progress, exposed as `Intent.fillProgress`.
- * Invariant: `filledAmount + reservedAmount + remainingAmount = srcAmount`,
- * hence Σ fills ≤ srcAmount.
- */
-export interface FillProgress {
-  /** `partially_filled` once any tranche is filled and something remains. */
-  status: "none" | "partially_filled" | "filled";
-  srcAmount: string;
-  /** Held by live reservations. */
-  reservedAmount: string;
-  /** Covered by completed tranches. */
-  filledAmount: string;
-  /** Neither reserved nor filled — available to reserve. */
-  remainingAmount: string;
-  /** Σ delivered destination amount across filled tranches. */
-  dstFilledAmount: string;
-  fillCount: number;
-  activeReservations: number;
-  /** The user cancelled the unfilled remainder of a partially filled intent. */
-  remainderCancelled?: boolean;
-}
-
-/**
- * Which state transition is in flight while an intent sits in a pending_*
- * state (issue #385).
- */
-export type PendingIntentOp = "create" | "accept" | "fill" | "cancel";
-
-/** Outcome of the source-chain deposit check for an intent (issue #403). */
-export type SrcVerificationStatus =
-  | "pending"
-  | "verified"
-  | "not_found"
-  | "mismatch"
-  | "reorged"
-  | "skipped"
-  | "grandfathered";
-
-export interface SrcVerification {
-  status: SrcVerificationStatus;
-  /** Unix epoch seconds of the last check. */
-  checkedAt: number;
-  /** Block the matching `Deposited` log was found in. */
-  blockNumber?: string;
-  /** Hash of that block — compared on re-checks to detect reorgs. */
-  blockHash?: string;
-  /** Amount the escrow actually received (base units) — may be < srcAmount for fee-on-transfer tokens. */
-  receivedAmount?: string;
-  /** Human-readable reason for a non-verified status. */
-  detail?: string;
-}
-
-export interface Quote {
-  intentId: string;
-  solver: string;
-  dstAmount: string;
-  fee: string; // protocol fee in dst token
-  fillTime: number; // estimated seconds
-  expiresAt: number;
-}
-
-export interface RouteStep {
-  type: "bridge" | "swap" | "transfer";
-  protocol: string;
-  fromChain: string;
-  toChain: string;
-  fromToken: TokenInfo;
-  toToken: TokenInfo;
-  estimatedTime: number;
-  estimatedGas: string;
-}
-
-export interface Route {
-  steps: RouteStep[];
-  totalTime: number; // seconds
-  totalFeesUSD: number;
-  priceImpact: number;
-}
+/* … truncated 4432 chars — edit only what you need near the top … */

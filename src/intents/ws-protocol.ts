@@ -116,3 +116,96 @@ export function resolveProtocol(
   // Any other non-empty value: unknown protocol echoed by negotiateProtocol.
   return { accepted: false };
 }
+
+/**
+ * Solver-facing auction-tick subscription filters (issue #632).
+ *
+ * A solver may send `{ type: "subscribe_auction_ticks", filters: [...] }` to
+ * receive only `auction_price` ticks that match one of its filters.  A
+ * connection that never sends this message keeps the legacy unfiltered
+ * behaviour (it receives every tick).
+ */
+export const WS_MSG_SUBSCRIBE_AUCTION_TICKS = "subscribe_auction_ticks";
+
+/**
+ * A single auction-tick filter.  A tick matches when its token pair equals
+ * `srcToken`/`dstToken` and (if `maxDstAmount` is set) the tick's current
+ * `dstAmount` is at or below the threshold.
+ */
+export interface AuctionTickFilter {
+  srcToken: string;
+  dstToken: string;
+  /** Only deliver ticks whose current dstAmount is <= this value. */
+  maxDstAmount?: string;
+}
+
+/** Inbound `subscribe_auction_ticks` message shape. */
+export interface SubscribeAuctionTicksMessage {
+  type: typeof WS_MSG_SUBSCRIBE_AUCTION_TICKS;
+  filters: AuctionTickFilter[];
+}
+
+/**
+ * Validate an inbound `subscribe_auction_ticks` payload.
+ *
+ * Returns the normalised filter list on success, or `{ error }` with a
+ * human-readable reason on failure.  Never throws -- callers send the error
+ * back as a WS error frame instead of crashing the gateway.
+ */
+export function parseSubscribeAuctionTicks(
+  payload: unknown,
+): { filters: AuctionTickFilter[] } | { error: string } {
+  if (typeof payload !== "object" || payload === null) {
+    return { error: "subscribe_auction_ticks payload must be an object" };
+  }
+  const raw = (payload as { filters?: unknown }).filters;
+  if (!Array.isArray(raw)) {
+    return { error: "subscribe_auction_ticks requires a 'filters' array" };
+  }
+  const filters: AuctionTickFilter[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const f = raw[i];
+    if (typeof f !== "object" || f === null) {
+      return { error: `filters[${i}] must be an object` };
+    }
+    const { srcToken, dstToken, maxDstAmount } = f as Record<string, unknown>;
+    if (typeof srcToken !== "string" || srcToken.length === 0) {
+      return { error: `filters[${i}].srcToken must be a non-empty string` };
+    }
+    if (typeof dstToken !== "string" || dstToken.length === 0) {
+      return { error: `filters[${i}].dstToken must be a non-empty string` };
+    }
+    if (maxDstAmount !== undefined && typeof maxDstAmount !== "string") {
+      return { error: `filters[${i}].maxDstAmount must be a string when set` };
+    }
+    filters.push({ srcToken, dstToken, maxDstAmount: maxDstAmount as string | undefined });
+  }
+  return { filters };
+}
+
+/**
+ * Does a tick for `srcToken`/`dstToken` at `dstAmount` match any filter?
+ *
+ * An empty filter list means "unfiltered" -- every tick matches, preserving
+ * the legacy behaviour for connections that never subscribed.
+ */
+export function matchesAuctionTickFilters(
+  filters: readonly AuctionTickFilter[],
+  srcToken: string,
+  dstToken: string,
+  dstAmount: string,
+): boolean {
+  if (filters.length === 0) return true;
+  for (const f of filters) {
+    if (f.srcToken !== srcToken || f.dstToken !== dstToken) continue;
+    if (f.maxDstAmount === undefined) return true;
+    // Compare as BigInt when both sides are integer strings; fall back to
+    // string equality otherwise so a malformed threshold never throws.
+    try {
+      if (BigInt(dstAmount) <= BigInt(f.maxDstAmount)) return true;
+    } catch {
+      if (dstAmount === f.maxDstAmount) return true;
+    }
+  }
+  return false;
+}
