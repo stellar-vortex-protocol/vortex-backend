@@ -66,6 +66,27 @@ export interface NewOutboxEntry {
   payload: Record<string, unknown>;
 }
 
+/** Filters accepted by {@link IOutboxRepository.list} (issue #660). */
+export interface OutboxListFilter {
+  status?: OutboxStatus;
+  operation?: OutboxOperation;
+  intentId?: string;
+}
+
+/** Cursor pagination input for {@link IOutboxRepository.list} (issue #660). */
+export interface OutboxListPagination {
+  /** Opaque cursor from a previous page's `nextCursor`; rows after it are returned. */
+  cursor?: string;
+  /** Page size, already bounded by the caller. */
+  limit: number;
+}
+
+export interface OutboxListPage {
+  rows: OutboxEntry[];
+  /** Cursor to pass as `cursor` for the next page, or undefined when exhausted. */
+  nextCursor?: string;
+}
+
 /** The only outbox capability intent-mutating code needs inside a transaction. */
 export interface IOutboxWriter {
   enqueue(entry: NewOutboxEntry): Promise<OutboxEntry>;
@@ -89,6 +110,13 @@ export interface IOutboxRepository extends IOutboxWriter {
   findByIntent(intentId: string): Promise<OutboxEntry[]>;
 
   countByStatus(): Promise<Record<OutboxStatus, number>>;
+
+  /**
+   * Operator inspection (issue #660): rows matching `filter`, ordered by `id`
+   * ascending, starting after `pagination.cursor`. Returns at most
+   * `pagination.limit` rows plus a cursor for the next page.
+   */
+  list(filter: OutboxListFilter, pagination: OutboxListPagination): Promise<OutboxListPage>;
 
   /** Persists the signed envelope hash before broadcast. Fenced on `attempts`. */
   recordEnvelope(entry: OutboxEntry, envelopeHash: string): Promise<boolean>;
@@ -188,6 +216,21 @@ export class InMemoryOutboxRepository implements IOutboxRepository {
     return counts;
   }
 
+  async list(filter: OutboxListFilter, pagination: OutboxListPagination): Promise<OutboxListPage> {
+    const after = pagination.cursor !== undefined ? BigInt(pagination.cursor) : undefined;
+    const matched = this.ordered().filter((row) => {
+      if (after !== undefined && BigInt(row.id) <= after) return false;
+      if (filter.status !== undefined && row.status !== filter.status) return false;
+      if (filter.operation !== undefined && row.operation !== filter.operation) return false;
+      if (filter.intentId !== undefined && row.intentId !== filter.intentId) return false;
+      return true;
+    });
+    const page = matched.slice(0, pagination.limit);
+    const nextCursor =
+      matched.length > pagination.limit ? page[page.length - 1]?.id : undefined;
+    return { rows: page.map((r) => ({ ...r })), nextCursor };
+  }
+
   async recordEnvelope(entry: OutboxEntry, envelopeHash: string): Promise<boolean> {
     return this.fenced(entry, ["processing"], { envelopeHash });
   }
@@ -235,19 +278,23 @@ export class InMemoryOutboxRepository implements IOutboxRepository {
       lastError: note,
       lockedUntil: undefined,
       envelopeHash: undefined,
+      txHash: undefined,
     });
   }
 
   async requeueDead(id: string): Promise<boolean> {
     const row = this.rows.get(id);
-    if (!row || row.status !== "dead") return false;
+    if (row === undefined || row.status !== "dead") return false;
+    const now = new Date();
     Object.assign(row, {
       status: "pending",
       attempts: 0,
-      nextAttemptAt: new Date(),
+      nextAttemptAt: now,
+      lastError: undefined,
+      lockedUntil: undefined,
       envelopeHash: undefined,
       txHash: undefined,
-      updatedAt: new Date(),
+      updatedAt: now,
     });
     return true;
   }
@@ -258,11 +305,13 @@ export class InMemoryOutboxRepository implements IOutboxRepository {
 
   private fenced(
     entry: OutboxEntry,
-    from: OutboxStatus[],
+    allowed: readonly OutboxStatus[],
     patch: Partial<OutboxEntry>,
   ): boolean {
     const row = this.rows.get(entry.id);
-    if (!row || row.attempts !== entry.attempts || !from.includes(row.status)) return false;
+    if (row === undefined) return false;
+    if (!allowed.includes(row.status)) return false;
+    if (row.attempts !== entry.attempts) return false;
     Object.assign(row, patch, { updatedAt: new Date() });
     return true;
   }
