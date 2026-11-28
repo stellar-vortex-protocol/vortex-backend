@@ -23,17 +23,50 @@ export class GuardianController {
     return this.guardian.status();
   }
 
-  @Post("actions/:id/override")
-  @HttpCode(200)
+  /**
+   * Phase 1 — propose a quorum override for an active guardian action.
+   *
+   * Records a pending override proposal signed by the calling superadmin.
+   * A second, distinct superadmin must call the approve endpoint before the
+   * action is actually lifted. The proposal expires after 30 minutes.
+   */
+  @Post("actions/:id/override/propose")
+  @HttpCode(202)
   @UseGuards(AdminGuard)
   @RequireAdminRole("superadmin")
   @ApiHeader({ name: "x-admin-key", required: true })
-  @ApiOperation({ summary: "Superadmin override of an active guardian action (audited)" })
-  async override(
+  @ApiOperation({
+    summary: "Propose a quorum override of an active guardian action (phase 1 of 2, audited)",
+  })
+  async proposeOverride(
     @Param("id") id: string,
     @Body() dto: GuardianOverrideDto,
     @CurrentAdmin() admin: AdminPrincipal,
   ) {
-    return { overridden: await this.guardian.override(id, admin, dto.reason), status: this.guardian.status() };
+    const result = await this.guardian.proposeOverride(id, admin, dto.reason);
+    return { ...result, status: this.guardian.status() };
+  }
+
+  /**
+   * Phase 2 — co-sign a pending override proposal.
+   *
+   * The approving admin must differ from every admin who has already approved
+   * (including the proposer). Once the configured quorum of distinct approvals
+   * is reached the override executes immediately and the action is lifted.
+   */
+  @Post("actions/:id/override/approve")
+  @HttpCode(200)
+  @UseGuards(AdminGuard)
+  @RequireAdminRole("superadmin")
+  @ApiHeader({ name: "x-admin-key", required: true })
+  @ApiOperation({
+    summary: "Co-sign a pending guardian override proposal (phase 2 of 2, audited)",
+  })
+  async approveOverride(
+    @Param("id") id: string,
+    @CurrentAdmin() admin: AdminPrincipal,
+  ) {
+    const result = await this.guardian.approveOverride(id, admin);
+    return { ...result, status: this.guardian.status() };
   }
 }
