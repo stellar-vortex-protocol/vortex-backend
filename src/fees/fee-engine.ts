@@ -40,6 +40,10 @@ export interface ReferralCode {
   code: string;
   integratorId: string;
   shareBps: number;
+  /** Persisted codes can be revoked; revoked codes stop matching future quotes. */
+  active?: boolean;
+  createdAt?: string | Date;
+  revokedAt?: string | Date | null;
 }
 
 export interface FeeInput {
@@ -95,6 +99,21 @@ export function floorBps(amount: bigint, bps: number): bigint {
   if (bps < 0 || bps > 10_000) throw new Error(`bps out of range: ${bps}`);
   if (amount < 0n) throw new Error("amount must be non-negative");
   return (amount * BigInt(bps)) / BPS_DENOMINATOR;
+}
+
+/**
+ * Validate a referral share in bps using the same 0–10000 range the fee
+ * rounding helpers enforce, so a code can never be issued with an
+ * out-of-range share. Throws on an invalid value.
+ */
+export function assertShareBps(shareBps: number): number {
+  if (typeof shareBps !== "number" || !Number.isInteger(shareBps)) {
+    throw new Error(`shareBps must be an integer: ${shareBps}`);
+  }
+  if (shareBps < 0 || shareBps > 10_000) {
+    throw new Error(`shareBps out of range: ${shareBps}`);
+  }
+  return shareBps;
 }
 
 function parseUnits(value: string | bigint, label: string): bigint {
@@ -159,6 +178,11 @@ function clamp(fee: bigint, rule: FeeRule): bigint {
   return next;
 }
 
+/** A referral code only matches while it is active (revoked codes stop matching). */
+function isActiveReferral(referral: ReferralCode): boolean {
+  return referral.active !== false && !referral.revokedAt;
+}
+
 /**
  * Quote a protocol fee. Realized fees use this same function on the fill
  * amount, so a fill equal to the quoted amount reproduces the quote exactly.
@@ -175,7 +199,7 @@ export function quoteFee(
   const fee = clamp(applyBpsCeil(amount, bps), rule);
 
   const referral = input.referralCode
-    ? referrals.find((item) => item.code === input.referralCode) ?? null
+    ? referrals.find((item) => item.code === input.referralCode && isActiveReferral(item)) ?? null
     : null;
   const shareBps = referral ? referral.shareBps : 0;
   const integratorFee = floorBps(fee, shareBps);
@@ -206,3 +230,40 @@ export function parseReferrals(raw: string | undefined): ReferralCode[] {
   const parsed = JSON.parse(raw) as ReferralCode[];
   return Array.isArray(parsed) ? parsed : [];
 }
+
+export interface FeeRuleValidationError {
+  /** Index of the offending rule in the candidate array. */
+  index: number;
+  ruleId: string | null;
+  field: string;
+  message: string;
+}
+
+/**
+ * Validate a candidate rule set with the same invariants `clamp()` enforces at
+ * quote time, plus the structural checks `quoteFee()` would otherwise only
+ * surface as a thrown error mid-quote. Returns one entry per problem so callers
+ * can report errors per-rule instead of a single generic failure.
+ */
+export function validateFeeRules(rules: readonly FeeRule[]): FeeRuleValidationError[] {
+  const errors: FeeRuleValidationError[] = [];
+  rules.forEach((rule, index) => {
+    const ruleId = typeof rule?.id === "string" ? rule.id : null;
+    const push = (field: string, message: string) =>
+      errors.push({ index, ruleId, field, message });
+
+    if (!rule || typeof rule !== "object") {
+      push("rule", "rule must be an object");
+      return;
+    }
+    if (typeof rule.id !== "string" || rule.id === "") push("id", "id is required");
+    if (rule.scope !== "pair" && rule.scope !== "chain" && rule.scope !== "default") {
+      push("scope", "scope must be pair, chain, or default");
+    }
+    if (typeof rule.bps !== "number" || rule.bps < 0 || rule.bps > 10_000) {
+      push("bps", "bps must be between 0 and 10000");
+    }
+    if (
+      typeof rule.integratorShareBps !== "number" 
+
+/* … truncated 1176 chars — edit only what you need near the top … */

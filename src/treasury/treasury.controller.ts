@@ -4,10 +4,12 @@ import {
   Post,
   Query,
   Param,
+  Res,
   UseGuards,
   HttpCode,
   HttpStatus,
 } from "@nestjs/common";
+import { Response } from "express";
 import {
   ApiTags,
   ApiOperation,
@@ -16,7 +18,11 @@ import {
   ApiParam,
 } from "@nestjs/swagger";
 import { TreasuryService } from "./treasury.service";
-import { ReconciliationSummary, ReconciliationDetailResponse } from "./treasury.types";
+import {
+  ReconciliationSummary,
+  ReconciliationDetailResponse,
+  SlashAttributionResponse,
+} from "./treasury.types";
 
 /**
  * TreasuryController
@@ -77,6 +83,137 @@ export class TreasuryController {
     @Query("date") date?: string,
   ): Promise<ReconciliationSummary> {
     return this.treasuryService.getReconciliationSummary(date);
+  }
+
+  /**
+   * GET /api/v1/treasury/reconciliation/export
+   * 
+   * Export reconciliation results for a date range as a downloadable CSV
+   * statement suitable for external auditors / finance teams.
+   */
+  @Get("reconciliation/export")
+  @ApiOperation({
+    summary: "Export treasury reconciliation statement",
+    description:
+      "Streams a CSV statement of reconciliation snapshots for a date range as an attachment",
+  })
+  @ApiQuery({
+    name: "from",
+    required: true,
+    description: "Start date in YYYY-MM-DD format (inclusive)",
+    example: "2026-09-01",
+  })
+  @ApiQuery({
+    name: "to",
+    required: true,
+    description: "End date in YYYY-MM-DD format (inclusive)",
+    example: "2026-09-30",
+  })
+  @ApiQuery({
+    name: "asset",
+    required: false,
+    description: "Restrict export to a single asset",
+    example: "native",
+  })
+  @ApiQuery({
+    name: "format",
+    required: false,
+    description: "Export format (only 'csv' is supported)",
+    enum: ["csv"],
+    example: "csv",
+  })
+  @ApiResponse({
+    status: 200,
+    description: "CSV reconciliation statement",
+    content: { "text/csv": {} },
+  })
+  async exportReconciliation(
+    @Query("from") from: string,
+    @Query("to") to: string,
+    @Query("asset") asset: string | undefined,
+    @Query("format") format: string | undefined,
+    @Res() res: Response,
+  ): Promise<void> {
+    const csv = await this.treasuryService.exportReconciliationCsv({
+      from,
+      to,
+      asset,
+      format,
+    });
+
+    const filename = `treasury-reconciliation-${from}_${to}.csv`;
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.status(HttpStatus.OK).send(csv);
+  }
+
+  /**
+   * GET /api/v1/treasury/slashes/by-solver
+   *
+   * Per-solver attribution of treasury inflow from slashing.
+   * Groups slash ledger entries by solver address, returning a per-asset
+   * breakdown (never a blended multi-asset total) sorted descending by total.
+   */
+  @Get("slashes/by-solver")
+  @ApiOperation({
+    summary: "Get per-solver slash attribution",
+    description:
+      "Attributes treasury slash proceeds to the solver they came from, with a per-asset breakdown",
+  })
+  @ApiQuery({
+    name: "asset",
+    required: false,
+    description: "Restrict attribution to a single asset",
+    example: "native",
+  })
+  @ApiQuery({
+    name: "from",
+    required: false,
+    description: "Start date in YYYY-MM-DD format (inclusive)",
+    example: "2026-09-01",
+  })
+  @ApiQuery({
+    name: "to",
+    required: false,
+    description: "End date in YYYY-MM-DD format (inclusive)",
+    example: "2026-09-30",
+  })
+  @ApiResponse({
+    status: 200,
+    description: "Per-solver slash attribution",
+    schema: {
+      type: "object",
+      properties: {
+        solvers: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              solverAddress: { type: "string", example: "GSOLVER..." },
+              entryCount: { type: "number", example: 4 },
+              byAsset: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    asset: { type: "string", example: "native" },
+                    totalSlashed: { type: "string", example: "100000000" },
+                    entryCount: { type: "number", example: 3 },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  })
+  async getSlashAttribution(
+    @Query("asset") asset?: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+  ): Promise<SlashAttributionResponse> {
+    return this.treasuryService.getSlashAttribution(asset, from, to);
   }
 
   /**
@@ -193,12 +330,7 @@ export class TreasuryController {
       message: asset
         ? `Reconciliation completed for ${asset}`
         : "Reconciliation completed for all assets",
-      results: results.map((r) => ({
-        asset: r.asset,
-        hasUnexplainedDiscrepancy: r.hasUnexplainedDiscrepancy,
-        discrepancy: r.discrepancy,
-        discrepancyPercentage: r.discrepancyPercentage,
-      })),
+      results,
     };
   }
 }
