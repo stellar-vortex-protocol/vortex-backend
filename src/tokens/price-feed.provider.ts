@@ -3,6 +3,7 @@ import { EgressPurpose, HttpEgressService } from "../common/http-egress";
 
 export interface PriceFeedProvider {
   getUsdPrice(symbol: string): Promise<number>;
+  getPrice(symbol: string, vsCurrency: string): Promise<number>;
 }
 
 export const PRICE_FEED_PROVIDER = Symbol("PRICE_FEED_PROVIDER");
@@ -17,9 +18,12 @@ const DEFAULT_COIN_IDS: Record<string, string> = {
   XLM: "stellar",
 };
 
+const CACHE_TTL_MS = 30_000;
+
 @Injectable()
 export class CoinGeckoPriceFeedProvider implements PriceFeedProvider {
   private readonly coinIds: Record<string, string>;
+  private readonly cache = new Map<string, { price: number; expiresAt: number }>();
   private readonly egress = new HttpEgressService({
     timeoutMs: 10_000,
     maxRedirects: 0,
@@ -53,12 +57,21 @@ export class CoinGeckoPriceFeedProvider implements PriceFeedProvider {
   }
 
   async getUsdPrice(symbol: string): Promise<number> {
+    return this.getPrice(symbol, "usd");
+  }
+
+  async getPrice(symbol: string, vsCurrency: string): Promise<number> {
     const coinId = this.coinIds[symbol.toUpperCase()];
     if (!coinId) throw new Error(`No CoinGecko ID configured for token symbol ${symbol}`);
 
+    const currency = vsCurrency.toLowerCase();
+    const cacheKey = `${coinId}:${currency}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.price;
+
     const url = new URL("https://api.coingecko.com/api/v3/simple/price");
     url.searchParams.set("ids", coinId);
-    url.searchParams.set("vs_currencies", "usd");
+    url.searchParams.set("vs_currencies", currency);
     const apiKey = process.env.PRICE_FEED_API_KEY;
     const response = await this.egress.fetch(url.toString(), {
       purpose: EgressPurpose.ORACLE,
@@ -68,11 +81,12 @@ export class CoinGeckoPriceFeedProvider implements PriceFeedProvider {
       throw new Error(`CoinGecko returned HTTP ${response.statusCode}`);
     }
 
-    const data = JSON.parse(response.body) as Record<string, { usd?: unknown }>;
-    const price = data[coinId]?.usd;
+    const data = JSON.parse(response.body) as Record<string, Record<string, unknown>>;
+    const price = data[coinId]?.[currency];
     if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
-      throw new Error(`CoinGecko returned an invalid USD price for ${symbol}`);
+      throw new Error(`CoinGecko returned an invalid ${currency.toUpperCase()} price for ${symbol}`);
     }
+    this.cache.set(cacheKey, { price, expiresAt: Date.now() + CACHE_TTL_MS });
     return price;
   }
 }

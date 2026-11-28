@@ -26,6 +26,17 @@ export class AdminTokensController {
     return this.tokens.create(dto, admin);
   }
 
+  @Post("batch")
+  @ApiOperation({
+    summary: "Register up to 50 tokens in one call, returning per-item results",
+    description:
+      "Each entry runs through the same on-chain verification/mismatch/audit path as the single-token create. " +
+      "Entries are processed sequentially and a failing entry does not abort the rest of the batch.",
+  })
+  createBatch(@Body() dtos: CreateAdminTokenDto[], @CurrentAdmin() admin: AdminPrincipal) {
+    return this.tokens.createBatch(dtos, admin);
+  }
+
   @Patch()
   @ApiOperation({ summary: "Update token status or re-verified metadata" })
   update(@Body() dto: PatchAdminTokenDto, @CurrentAdmin() admin: AdminPrincipal) {
