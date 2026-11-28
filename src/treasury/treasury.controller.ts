@@ -7,6 +7,7 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from "@nestjs/common";
 import {
   ApiTags,
@@ -17,6 +18,9 @@ import {
 } from "@nestjs/swagger";
 import { TreasuryService } from "./treasury.service";
 import { ReconciliationSummary, ReconciliationDetailResponse } from "./treasury.types";
+
+/** Maximum number of days allowed in a reconciliation history range. */
+const MAX_RECONCILIATION_HISTORY_DAYS = 180;
 
 /**
  * TreasuryController
@@ -144,6 +148,98 @@ export class TreasuryController {
     @Query("date") date?: string,
   ): Promise<ReconciliationDetailResponse> {
     return this.treasuryService.getReconciliationDetail(asset, date);
+  }
+
+  /**
+   * GET /api/v1/treasury/reconciliation/:asset/history
+   *
+   * Historical trend of treasury snapshots for a specific asset across a
+   * bounded date range. Returns rows ordered by snapshotDate ascending so a
+   * frontend can chart discrepancy-over-time without one request per day.
+   */
+  @Get("reconciliation/:asset/history")
+  @ApiOperation({
+    summary: "Get reconciliation history for an asset",
+    description:
+      "Returns the ordered treasury snapshot series for an asset across a bounded date range",
+  })
+  @ApiParam({
+    name: "asset",
+    description: "Asset identifier (e.g., 'native', 'USDC:ISSUER', or contract address)",
+    example: "native",
+  })
+  @ApiQuery({
+    name: "from",
+    required: true,
+    description: "Start date in YYYY-MM-DD format (inclusive)",
+    example: "2026-04-01",
+  })
+  @ApiQuery({
+    name: "to",
+    required: true,
+    description: "End date in YYYY-MM-DD format (inclusive)",
+    example: "2026-09-28",
+  })
+  @ApiResponse({
+    status: 200,
+    description: "Ordered reconciliation snapshot series",
+    schema: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          snapshotDate: { type: "string", example: "2026-09-28" },
+          asset: { type: "string", example: "native" },
+          expectedBalance: { type: "string", example: "1000000000" },
+          actualBalance: { type: "string", example: "1000500000" },
+          discrepancy: { type: "string", example: "500000" },
+          discrepancyPercentage: { type: "number", example: 0.05 },
+          hasUnexplainedDiscrepancy: { type: "boolean", example: false },
+          explanation: { type: "string", nullable: true },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: "Invalid or over-length date range" })
+  async getAssetReconciliationHistory(
+    @Param("asset") asset: string,
+    @Query("from") from: string,
+    @Query("to") to: string,
+  ): Promise<ReconciliationDetailResponse[]> {
+    const fromDate = this.parseDateParam("from", from);
+    const toDate = this.parseDateParam("to", to);
+
+    if (fromDate.getTime() > toDate.getTime()) {
+      throw new BadRequestException("'from' must be on or before 'to'");
+    }
+
+    const rangeDays =
+      Math.floor((toDate.getTime() - fromDate.getTime()) / 86_400_000) + 1;
+    if (rangeDays > MAX_RECONCILIATION_HISTORY_DAYS) {
+      throw new BadRequestException(
+        `Date range must not exceed ${MAX_RECONCILIATION_HISTORY_DAYS} days`,
+      );
+    }
+
+    return this.treasuryService.getReconciliationHistory(asset, from, to);
+  }
+
+  /**
+   * Parse a YYYY-MM-DD query param into a UTC Date, rejecting malformed input.
+   */
+  private parseDateParam(name: string, value: string): Date {
+    if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      throw new BadRequestException(
+        `'${name}' must be a valid date in YYYY-MM-DD format`,
+      );
+    }
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(
+        `'${name}' must be a valid date in YYYY-MM-DD format`,
+      );
+    }
+    return parsed;
   }
 
   /**
