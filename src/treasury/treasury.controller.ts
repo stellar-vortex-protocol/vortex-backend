@@ -147,6 +147,55 @@ export class TreasuryController {
   }
 
   /**
+   * GET /api/v1/treasury/forecast/:asset
+   *
+   * Linear burn-rate / runway forecast for a specific asset, computed from
+   * the trailing window of fee/slash/refund ledger rows.
+   */
+  @Get("forecast/:asset")
+  @ApiOperation({
+    summary: "Get treasury burn-rate forecast for an asset",
+    description:
+      "Projects net treasury growth or depletion per day over the trailing window and estimates days-of-runway at current burn",
+  })
+  @ApiParam({
+    name: "asset",
+    description: "Asset identifier (e.g., 'native', 'USDC:ISSUER', or contract address)",
+    example: "native",
+  })
+  @ApiQuery({
+    name: "windowDays",
+    required: false,
+    description: "Trailing window in days used for the projection (defaults to 30)",
+    example: 30,
+  })
+  @ApiResponse({
+    status: 200,
+    description: "Burn-rate forecast",
+    schema: {
+      type: "object",
+      properties: {
+        asset: { type: "string", example: "native" },
+        windowDays: { type: "number", example: 30 },
+        insufficientData: { type: "boolean", example: false },
+        distinctDays: { type: "number", example: 12 },
+        currentBalance: { type: "string", example: "1000000000" },
+        netPerDay: { type: "string", example: "-2500000" },
+        trend: { type: "string", enum: ["growing", "flat", "draining"] },
+        daysToZero: { type: "number", nullable: true, example: 400 },
+      },
+    },
+  })
+  async getBurnForecast(
+    @Param("asset") asset: string,
+    @Query("windowDays") windowDays?: string,
+  ) {
+    const parsed = windowDays !== undefined ? Number(windowDays) : undefined;
+    const window = parsed !== undefined && Number.isFinite(parsed) ? parsed : undefined;
+    return this.treasuryService.getBurnForecast(asset, window);
+  }
+
+  /**
    * POST /api/v1/treasury/reconciliation/trigger
    * 
    * Manually trigger reconciliation (admin only).
