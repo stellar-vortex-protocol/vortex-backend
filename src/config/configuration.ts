@@ -329,6 +329,8 @@ export interface AppConfig {
   adminApiKeys: string;
   /** Soroban contract emitting guardian emergency events (issue #507). Empty disables ingestion. */
   guardianContractId: string;
+  /** Guardian-override quorum: number of distinct superadmins required to execute a break-glass override. Default 2. */
+  "guardian.overrideQuorum": number;
   /** Addresses (users and solvers) owned by the synthetic canary (issue #496). */
   canaryAddresses: string[];
   /** Public anonymised dataset publication settings (see docs/rfcs/0001). */

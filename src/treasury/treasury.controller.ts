@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   Post,
@@ -14,9 +15,20 @@ import {
   ApiResponse,
   ApiQuery,
   ApiParam,
+  ApiHeader,
 } from "@nestjs/swagger";
+import { IsString, MinLength, MaxLength } from "class-validator";
 import { TreasuryService } from "./treasury.service";
 import { ReconciliationSummary, ReconciliationDetailResponse } from "./treasury.types";
+import { AdminGuard, CurrentAdmin, RequireAdminRole } from "../admin/admin.guard";
+import { AdminPrincipal } from "../admin/admin-auth";
+
+export class AcknowledgeAlertDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(200)
+  note?: string;
+}
 
 /**
  * TreasuryController
@@ -200,5 +212,48 @@ export class TreasuryController {
         discrepancyPercentage: r.discrepancyPercentage,
       })),
     };
+  }
+
+  /**
+   * GET /api/v1/treasury/alerts
+   *
+   * List persisted treasury discrepancy alerts. Filterable by acknowledged
+   * status, asset, and severity.
+   */
+  @Get("alerts")
+  @UseGuards(AdminGuard)
+  @RequireAdminRole("admin")
+  @ApiHeader({ name: "x-admin-key", required: true })
+  @ApiOperation({ summary: "List treasury discrepancy alerts" })
+  @ApiQuery({ name: "acknowledged", required: false, enum: ["true", "false"] })
+  @ApiQuery({ name: "asset", required: false, type: String })
+  @ApiQuery({ name: "severity", required: false, enum: ["warning", "critical"] })
+  async listAlerts(
+    @Query("acknowledged") acknowledged?: string,
+    @Query("asset") asset?: string,
+    @Query("severity") severity?: string,
+  ) {
+    const ackFilter =
+      acknowledged === "true" ? true : acknowledged === "false" ? false : undefined;
+    return this.treasuryService.listAlerts({ acknowledged: ackFilter, asset, severity });
+  }
+
+  /**
+   * POST /api/v1/treasury/alerts/:id/acknowledge
+   *
+   * Acknowledge a treasury alert. Idempotent.
+   */
+  @Post("alerts/:id/acknowledge")
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(AdminGuard)
+  @RequireAdminRole("admin")
+  @ApiHeader({ name: "x-admin-key", required: true })
+  @ApiOperation({ summary: "Acknowledge a treasury alert" })
+  @ApiParam({ name: "id", description: "Treasury alert id (UUID)" })
+  async acknowledgeAlert(
+    @Param("id") id: string,
+    @CurrentAdmin() admin: AdminPrincipal,
+  ) {
+    return this.treasuryService.acknowledgeAlert(id, admin.id);
   }
 }
